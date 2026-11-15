@@ -1,18 +1,27 @@
-"""Motor de EventEdits: análisis, descarte, sugerencia de formato, revelado y exportación."""
+"""Motor de PhootFlow: análisis, descarte, sugerencia de formato, revelado y exportación."""
 from __future__ import annotations
 
 import csv
 import datetime as dt
+import hashlib
 import io
+import json
 import math
 import os
+import queue
+import re
 import shutil
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import zipfile
 from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
-from PIL import Image, ImageCms, ImageOps
+from PIL import Image, ImageCms, ImageOps, TiffImagePlugin
+
+import styles
 
 try:
     import rawpy
@@ -43,8 +52,20 @@ EV_MAX = 5.0            # tope de subida de exposición
 EV_HOPELESS = 7.5       # a partir de aquí la foto se considera irrecuperable
 FACE_TARGET = 0.32      # luminancia lineal a la que se lleva la piel de las caras
 
+# Salidas propias (DSC0001_4x5_max.jpg, DSC0001_original_1080.jpg…) y copias editadas: no se reeditan
+OWN_OUTPUT = re.compile(r"((_bn)?_(original|\d+x\d+)_(max|2048|1080)|_editada|_edited)$", re.I)
+SOFTWARE = "PhootFlow"
+
+
+def asset(name: str) -> str:
+    """Ruta a un recurso de assets/, tanto en desarrollo como dentro del .exe de PyInstaller."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "assets", name)
+
+
 _SRGB_ICC = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-_FACE = None
+_TLS = threading.local()  # los detectores de OpenCV no son seguros entre hilos: uno por hilo
+_KEEP: list = []  # y no deben destruirse al terminar el hilo (OpenCV 4.x en Windows se cae): se guardan aquí
 
 
 @dataclass
@@ -62,6 +83,14 @@ class Settings:
     quality: int = 95
     move_discards: bool = True
     archive_originals: bool = True
+    keep_exif: bool = True
+    write_xmp: bool = False
+    workers: int = 2
+    style: dict = field(default_factory=dict)  # parámetros del estilo (styles.PRESETS o aprendido)
+    style_name: str = ""
+    bw: bool = False        # además, versión en blanco y negro editorial (carpeta ByN)
+    cache_dir: str = ""     # vistas previas en disco (no en memoria): imprescindible con miles de fotos
+    resume: bool = True     # al exportar, saltar las fotos que ya se terminaron en una pasada anterior
 
 
 @dataclass
@@ -84,6 +113,13 @@ class Photo:
     keep: bool = True
     reason: str = ""
     thumb: bytes = b""
+    preview: bytes = b""        # vista previa grande (sin recortar, ya girada) si no hay caché en disco
+    preview_path: str = ""      # … o su ruta en la caché
+    preview_ev: float = 0.0     # exposición con la que se generó la vista previa
+    preview_angle: float = 0.0
+    feats: dict = field(default_factory=dict)  # rasgos para detectar el tipo de sesión
+    warn: str = ""              # avisos que no descartan (p. ej. ojos quizá cerrados)
+    meta: dict = field(default_factory=dict)  # EXIF útil para copiar a los JPG
     error: str = ""
 
 
@@ -97,6 +133,8 @@ def list_photos(folder: str) -> list[Photo]:
         stem, ext = os.path.splitext(fn)
         ext = ext.lower()
         if not os.path.isfile(p) or ext not in RAW_EXT | IMG_EXT:
+            continue
+        if ext not in RAW_EXT and OWN_OUTPUT.search(stem):
             continue
         d = by_stem.setdefault(stem.lower(), {"raw": None, "img": []})
         if ext in RAW_EXT and d["raw"] is None:
@@ -120,9 +158,17 @@ def read_meta(ph: Photo) -> None:
     try:
         with open(ph.path, "rb") as f:
             t = exifread.process_file(f, details=False)
+        for key, tag in [("make", "Image Make"), ("model", "Image Model"), ("lens", "EXIF LensModel"),
+                         ("exposure", "EXIF ExposureTime"), ("fnumber", "EXIF FNumber"),
+                         ("focal", "EXIF FocalLength"), ("date", "EXIF DateTimeOriginal"),
+                         ("artist", "Image Artist"), ("copyright", "Image Copyright")]:
+            v = t.get(tag)
+            if v is not None:
+                ph.meta[key] = v.values if isinstance(v.values, list) and not isinstance(v.values, str) else str(v)
         iso = t.get("EXIF ISOSpeedRatings")
         if iso:
             ph.iso = int(str(iso).split(",")[0].strip("[] "))
+            ph.meta["iso"] = ph.iso
         d = t.get("EXIF DateTimeOriginal") or t.get("Image DateTime")
         if d:
             sub = str(t.get("EXIF SubSecTimeOriginal") or "0")
@@ -238,15 +284,108 @@ def detect_tilt(gray8: np.ndarray) -> float:
     return round(float(roll), 2) if 0.4 <= abs(roll) <= 6 else 0.0
 
 
+_POOL: dict = {}  # nombre -> queue.Queue de detectores creados en el hilo principal
+
+
+def prepare_detectors(n: int) -> None:
+    """Crea en el hilo principal `n` juegos de detectores para los hilos de trabajo.
+
+    Los detectores de OpenCV no son seguros entre hilos, así que cada hilo usa el suyo; y un
+    CascadeClassifier creado dentro de un hilo secundario tumba el proceso al salir (OpenCV 4.x, Windows).
+    """
+    for name, make in _MAKERS.items():
+        q = _POOL.setdefault(name, queue.Queue())
+        for _ in range(n):
+            d = make()
+            _KEEP.append(d)
+            q.put(d)
+
+
+def _detector(name: str):
+    d = getattr(_TLS, name, None)
+    if d is None:
+        try:
+            d = _POOL[name].get_nowait()
+        except (KeyError, queue.Empty):
+            d = _MAKERS[name]()
+            _KEEP.append(d)
+        setattr(_TLS, name, d)
+    return d
+
+
+def _haar(file: str):
+    return lambda: cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, file))
+
+
+def _make_yunet():
+    model = asset("face_detection_yunet_2023mar.onnx")
+    if os.path.exists(model) and hasattr(cv2, "FaceDetectorYN"):
+        try:
+            return cv2.FaceDetectorYN.create(model, "", (320, 320), 0.7, 0.3, 5000)
+        except Exception:
+            pass
+    return False
+
+
+_MAKERS = {"yunet": _make_yunet, "haar": _haar("haarcascade_frontalface_default.xml"),
+           "eye": _haar("haarcascade_eye_tree_eyeglasses.xml")}
+
+
 def _faces(gray8: np.ndarray) -> list[tuple[int, int, int, int]]:
-    global _FACE
-    if _FACE is None:
-        _FACE = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
-    if _FACE.empty():
+    """Caras (x, y, w, h). YuNet aguanta mucho mejor ISO alto, perfiles y luz de discoteca que Haar."""
+    yunet = _detector("yunet")
+    if yunet is not False:
+        h, w = gray8.shape
+        bgr = cv2.cvtColor(gray8, cv2.COLOR_GRAY2BGR)
+        yunet.setInputSize((w, h))
+        _, det = yunet.detect(bgr)
+        m = 0.03 * min(h, w)
+        if det is None:
+            return []
+        return [(int(max(0, d[0])), int(max(0, d[1])), int(d[2]), int(d[3])) for d in det if d[2] >= m]
+    return _faces_haar(gray8)
+
+
+def _faces_haar(gray8: np.ndarray) -> list[tuple[int, int, int, int]]:
+    face = _detector("haar")
+    if face.empty():
         return []
     m = int(0.045 * min(gray8.shape))
-    f = _FACE.detectMultiScale(gray8, scaleFactor=1.1, minNeighbors=7, minSize=(m, m))
+    f = face.detectMultiScale(gray8, scaleFactor=1.1, minNeighbors=7, minSize=(m, m))
     return [tuple(int(v) for v in r) for r in f]
+
+
+def _eyes_closed(gray8: np.ndarray, faces: list) -> int:
+    """Caras frontales grandes en las que no se encuentra ningún ojo abierto (aviso orientativo)."""
+    eye = _detector("eye")
+    if eye.empty():
+        return 0
+    n = 0
+    for (x, y, fw, fh) in faces:
+        if fw < 90:  # demasiado pequeña para juzgar
+            continue
+        roi = gray8[y + fh // 6: y + fh // 2 + fh // 10, x: x + fw]
+        if roi.size == 0:
+            continue
+        roi = cv2.equalizeHist(roi)
+        m = max(12, fw // 8)
+        if len(eye.detectMultiScale(roi, 1.1, 3, minSize=(m, m))) == 0:
+            n += 1
+    return n
+
+
+def face_sharpness(gray: np.ndarray, faces: list) -> float:
+    """Nitidez dentro de la cara más grande (0 si no hay caras), misma escala que `sharpness`."""
+    if not faces:
+        return 0.0
+    x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+    c = gray[y: y + fh, x: x + fw]
+    if min(c.shape[:2]) < 40:
+        return 0.0
+    g = cv2.GaussianBlur(c, (0, 0), 1.0)
+    lap = np.abs(cv2.Laplacian(g, cv2.CV_32F))
+    rng = float(np.percentile(c, 99) - np.percentile(c, 1)) + 0.05
+    return float(np.percentile(lap, 90) / rng)
 
 
 def _face_ev(gray: np.ndarray, faces: list) -> float:
@@ -374,10 +513,26 @@ def analyze(ph: Photo, st: Settings) -> Photo:
         ph.ev = ev
         del lin
         ph.crops, ph.scores, ph.best = plan_crops(gray, faces)
+        closed = _eyes_closed((np.clip(gray, 0, 1) * 255).astype(np.uint8), faces)
+        ph.warn = f"Revisar: {closed} cara(s) quizá con ojos cerrados" if closed else ""
+        fs = face_sharpness(gray, faces)
+        if faces and 0 < fs < 0.5 * ph.sharp:
+            ph.warn = (ph.warn + " · " if ph.warn else "") + "La cara está menos nítida que el fondo"
+        ph.feats = styles.scene_features(g, ph)
         t = Image.fromarray((np.clip(g, 0, 1) * 255).astype(np.uint8))
-        t.thumbnail((220, 220))
+        ph.preview_ev, ph.preview_angle = ph.ev, ph.angle
+        if st.cache_dir:
+            os.makedirs(st.cache_dir, exist_ok=True)
+            ph.preview_path = os.path.join(st.cache_dir, os.path.basename(ph.path) + ".prev.jpg")
+            t.save(ph.preview_path, "JPEG", quality=85)
+            ph.preview = b""
+        else:
+            b = io.BytesIO()
+            t.save(b, "JPEG", quality=85)
+            ph.preview = b.getvalue()
+        t.thumbnail((360, 360))
         b = io.BytesIO()
-        t.save(b, "JPEG", quality=80)
+        t.save(b, "JPEG", quality=82)
         ph.thumb = b.getvalue()
     except Exception as e:  # una foto ilegible no para la sesión
         ph.error = f"{type(e).__name__}: {e}"
@@ -439,9 +594,10 @@ def _nlm(ch: np.ndarray, h: float, search: int) -> np.ndarray:
 
 
 def develop(ph: Photo, st: Settings) -> np.ndarray:
-    """Revelado a resolución completa: exposición, grano, contraste, nitidez y giro. RGB 0..1."""
-    g = tone(load_linear(ph.path, half=False), ph.ev)
-    mult = NR_LEVELS[st.nr]
+    """Revelado a resolución completa: exposición, grano, contraste, nitidez, estilo y giro. RGB 0..1."""
+    sty = dict(styles.BASE, **(st.style or {}))
+    g = tone(load_linear(ph.path, half=False), ph.ev + float(sty["ev_bias"]))
+    mult = NR_LEVELS[st.nr] * float(sty["nr"])
     hl = (0.8 + 0.35 * (math.log2(max(ph.iso, 100) / 100) + max(ph.ev, 0))) * mult
     hc = min(2.8 * hl, 14.0)
     ycc = cv2.cvtColor(g, cv2.COLOR_RGB2YCrCb)
@@ -456,29 +612,118 @@ def develop(ph: Photo, st: Settings) -> np.ndarray:
     y = _nlm(y0, hl, 15) if hl >= 1.4 else y0
     m = np.clip((y - 0.25) / 0.35, 0, 1) * 0.22  # devuelve textura fina solo en zonas claras
     y = y * (1 - m) + y0 * m
-    y = y + (y - cv2.GaussianBlur(y, (0, 0), 1.2)) * 0.55 * np.clip((y - 0.12) / 0.25, 0, 1)
-    y = np.clip((np.clip(y, 0, 1) - 0.035) / 0.965, 0, 1)
-    y = y * 0.72 + (y * y * (3 - 2 * y)) * 0.28
+    y = y + (y - cv2.GaussianBlur(y, (0, 0), 1.2)) * float(sty["sharpen"]) * np.clip((y - 0.12) / 0.25, 0, 1)
+    blk = float(sty["black"])
+    y = np.clip((np.clip(y, 0, 1) - blk) / (1 - blk), 0, 1)
+    k = float(sty["contrast"])
+    y = y * (1 - k) + (y * y * (3 - 2 * y)) * k
     ycc[..., 0] = y
     for i in (1, 2):
-        ycc[..., i] = 0.5 + (ycc[..., i] - 0.5) * 1.08
+        ycc[..., i] = 0.5 + (ycc[..., i] - 0.5) * float(sty["saturation"])
     out = np.clip(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB), 0, 1)
+    del ycc
+    out = styles.apply_color(out, sty)
+    if sty.get("bw"):
+        out = bw_editorial(out, seed=ph.dhash & 0xFFFFFFFF)
     return np.clip(rotate(out, ph.angle), 0, 1)
+
+
+def bw_editorial(rgb: np.ndarray, seed: int = 0) -> np.ndarray:
+    """Blanco y negro de catálogo editorial a partir del revelado en color (RGB 0..1, sRGB).
+
+    - Mezcla de canales con peso en el rojo: la piel queda luminosa y limpia (como un filtro naranja suave).
+    - Contraste local de radio grande (≈ «claridad»): volumen sin halos.
+    - Curva en S: negros densos pero con detalle (punto negro levantado 2 %), blancos limpios sin quemar.
+    - Grano fino de luminancia, más en medios tonos que en sombras y luces: textura de papel, no ruido.
+    Devuelve RGB 0..1 neutro (los tres canales iguales).
+    """
+    h, w = rgb.shape[:2]
+    lin = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    y = 0.42 * lin[..., 0] + 0.46 * lin[..., 1] + 0.12 * lin[..., 2]
+    y = np.where(y <= 0.0031308, 12.92 * y, 1.055 * np.power(np.maximum(y, 1e-9), 1 / 2.4) - 0.055)
+    y = np.clip(y, 0, 1).astype(np.float32)
+    # contraste local (radio proporcional al tamaño) protegido en sombras y luces
+    r = max(4.0, 0.012 * max(h, w))
+    base = cv2.GaussianBlur(y, (0, 0), r)
+    mid = 1 - np.abs(y - 0.5) * 2
+    y = y + (y - base) * 0.35 * np.clip(mid * 1.6, 0, 1)
+    # nitidez fina suave
+    y = y + (y - cv2.GaussianBlur(y, (0, 0), 1.0)) * 0.25
+    y = np.clip(y, 0, 1)
+    # curva en S editorial
+    s_curve = y * y * (3 - 2 * y)
+    y = 0.45 * y + 0.55 * s_curve
+    y = 0.02 + 0.955 * y  # negro 2 %, blanco 97,5 %: aire de impresión
+    # grano fino
+    rng = np.random.default_rng(seed)
+    g = rng.standard_normal((h, w)).astype(np.float32)
+    g = cv2.GaussianBlur(g, (0, 0), 0.6 + 0.0002 * max(h, w))
+    g /= g.std() + 1e-6
+    y = y + g * 0.010 * (0.35 + np.clip(mid, 0, 1))
+    y = np.clip(y, 0, 1)
+    return np.repeat(y[..., None], 3, axis=2)
 
 
 def _tag(ratio: str) -> str:
     return ratio.replace(":", "x")
 
 
-def _save(img: np.ndarray, path: str, quality: int) -> None:
+def _rat(v):
+    try:
+        v = v[0] if isinstance(v, (list, tuple)) else v
+        if hasattr(v, "num"):
+            return TiffImagePlugin.IFDRational(int(v.num), int(v.den) or 1)
+        return TiffImagePlugin.IFDRational(float(v))
+    except Exception:
+        return None
+
+
+def build_exif(ph: Photo, version: str = "") -> bytes:
+    """EXIF básico (cámara, objetivo, exposición, fecha) para los JPG exportados. Orientación ya aplicada."""
+    m = ph.meta
+    ex = Image.Exif()
+    if not m and not is_raw(ph.path):
+        try:
+            with Image.open(ph.path) as src:
+                ex = src.getexif()
+        except Exception:
+            pass
+    else:
+        for tag, key in [(0x010F, "make"), (0x0110, "model"), (0x013B, "artist"), (0x8298, "copyright")]:
+            if key in m:
+                ex[tag] = str(m[key]).strip()
+        e = ex.get_ifd(0x8769)
+        if "date" in m:
+            e[0x9003] = e[0x9004] = str(m["date"])
+        if "iso" in m:
+            e[0x8827] = int(m["iso"])
+        for tag, key in [(0x829A, "exposure"), (0x829D, "fnumber"), (0x920A, "focal")]:
+            r = _rat(m[key]) if key in m else None
+            if r is not None:
+                e[tag] = r
+        if "lens" in m:
+            e[0xA434] = str(m["lens"]).strip()
+    ex[0x0112] = 1
+    ex[0x0131] = f"{SOFTWARE} {version}".strip()
+    try:
+        return ex.tobytes()
+    except Exception:
+        return b""
+
+
+def _save(img: np.ndarray, path: str, quality: int, exif: bytes = b"") -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    kw = {"exif": exif} if exif else {}
+    tmp = path + ".part"
     Image.fromarray((img * 255 + 0.5).astype(np.uint8)).save(
-        path, "JPEG", quality=quality, subsampling=0, optimize=True, icc_profile=_SRGB_ICC)
+        tmp, "JPEG", quality=quality, subsampling=0, optimize=True, icc_profile=_SRGB_ICC, **kw)
+    os.replace(tmp, path)  # un corte a mitad nunca deja un JPG a medias
 
 
-def export(ph: Photo, st: Settings, out_dir: str) -> list[str]:
+def export(ph: Photo, st: Settings, out_dir: str, version: str = "") -> list[str]:
     """Revela la foto y guarda el formato sugerido más los formatos elegidos, en cada tamaño."""
     img = develop(ph, st)
+    exif = build_exif(ph, version) if st.keep_exif else b""
     H, W = img.shape[:2]
     wanted = [ph.best]
     if st.export_original_ratio and "Original" not in wanted:
@@ -502,9 +747,197 @@ def export(ph: Photo, st: Settings, out_dir: str) -> list[str]:
                 r = cv2.resize(c, (int(round(cw * s)), int(round(ch * s))), interpolation=cv2.INTER_AREA)
                 r = np.clip(r + (r - cv2.GaussianBlur(r, (0, 0), 0.6)) * 0.35, 0, 1)
             p = os.path.join(folder, f"{ph.name}_{_tag(ratio) if ratio != 'Original' else 'original'}_{size}.jpg")
-            _save(r, p, st.quality)
+            _save(r, p, st.quality, exif)
+            written.append(p)
+    if st.bw and not st.style.get("bw"):  # versión B/N solo del formato sugerido, en todos los tamaños
+        x0, y0, x1, y1 = ph.crops[ph.best]
+        c = img[int(round(y0 * H)):int(round(y1 * H)), int(round(x0 * W)):int(round(x1 * W))]
+        del img
+        bw = bw_editorial(c, seed=ph.dhash & 0xFFFFFFFF)
+        tag = _tag(ph.best) if ph.best != "Original" else "original"
+        for size in st.sizes:
+            ch, cw = bw.shape[:2]
+            if size == "max":
+                r = bw
+            else:
+                px = SIZES[size]
+                s = px / cw if size == "1080" else px / max(cw, ch)
+                if s >= 1:
+                    continue
+                r = cv2.resize(bw, (int(round(cw * s)), int(round(ch * s))), interpolation=cv2.INTER_AREA)
+            p = os.path.join(out_dir, "ByN", f"{ph.name}_bn_{tag}_{size}.jpg")
+            _save(r, p, st.quality, exif)
             written.append(p)
     return written
+
+
+def xmp_sidecar(ph: Photo, st: Settings) -> str:
+    """XMP de Lightroom/Camera Raw con exposición, giro, recorte sugerido y reducción de ruido.
+
+    Se escribe junto al RAW solo si no existe ya uno (nunca se pisa el trabajo hecho en Lightroom).
+    Los descartes se marcan como rechazadas (Rating -1). Devuelve la ruta, o "" si no se escribió.
+    """
+    if not is_raw(ph.path):
+        return ""
+    path = os.path.splitext(ph.path)[0] + ".xmp"
+    if os.path.exists(path):
+        return ""
+    x0, y0, x1, y1 = ph.crops.get(ph.best, (0.0, 0.0, 1.0, 1.0))
+    nr = {"Suave": 15, "Normal": 25, "Fuerte": 40}.get(st.nr, 25)
+    boost = int(min(30, max(0.0, math.log2(max(ph.iso, 100) / 800)) * 8))
+    has_crop = ph.best != "Original" or bool(ph.angle)
+    body = f"""<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="{SOFTWARE}">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+    xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
+   xmp:CreatorTool="{SOFTWARE}"
+   xmp:Rating="{1 if ph.keep else -1}"
+   crs:Version="15.0"
+   crs:ProcessVersion="11.0"
+   crs:HasSettings="True"
+   crs:WhiteBalance="As Shot"
+   crs:Exposure2012="{ph.ev:+.2f}"
+   crs:Highlights2012="-30"
+   crs:Shadows2012="+15"
+   crs:LuminanceSmoothing="{min(80, nr + boost)}"
+   crs:ColorNoiseReduction="{min(60, 25 + boost)}"
+   crs:HasCrop="{has_crop}"
+   crs:CropTop="{y0:.6f}"
+   crs:CropLeft="{x0:.6f}"
+   crs:CropBottom="{y1:.6f}"
+   crs:CropRight="{x1:.6f}"
+   crs:CropAngle="{-ph.angle:.2f}"
+   crs:CropConstrainToWarp="0"/>
+ </rdf:RDF>
+</x:xmpmeta>
+"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(body)
+    return path
+
+
+# ------------------------------------------------------------- sesiones grandes: caché y reanudación
+
+_CACHE_SKIP = {"thumb", "preview", "keep", "reason"}
+
+
+def _sig(ph: Photo, st: Settings) -> str:
+    try:
+        stt = os.stat(ph.path)
+        base = f"{os.path.basename(ph.path)}|{stt.st_size}|{stt.st_mtime_ns}|{st.straighten}|{st.ev_comp:.2f}|v2"
+    except OSError:
+        return ""
+    return hashlib.sha1(base.encode()).hexdigest()[:16]
+
+
+def save_session(photos: list[Photo], st: Settings, work_dir: str) -> None:
+    """Guarda el análisis (sin imágenes) para no repetirlo si se cierra el programa o se reanuda."""
+    os.makedirs(work_dir, exist_ok=True)
+    rows = {}
+    for ph in photos:
+        if not ph.thumb or ph.error:
+            continue
+        sig = _sig(ph, st)
+        if not sig:
+            continue
+        d = {k: v for k, v in ph.__dict__.items() if k not in _CACHE_SKIP}
+        d["when"] = ph.when.isoformat() if ph.when else None
+        d["meta"] = {k: str(v) if not isinstance(v, (int, float, str)) else v for k, v in ph.meta.items()}
+        rows[os.path.basename(ph.path)] = {"sig": sig, "data": d}
+        tp = os.path.join(work_dir, os.path.basename(ph.path) + ".thumb.jpg")
+        if not os.path.exists(tp):
+            with open(tp, "wb") as f:
+                f.write(ph.thumb)
+    tmp = os.path.join(work_dir, "analisis.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rows, f)
+    os.replace(tmp, os.path.join(work_dir, "analisis.json"))
+
+
+def load_session(photos: list[Photo], st: Settings, work_dir: str) -> int:
+    """Recupera el análisis guardado de las fotos que no han cambiado. Devuelve cuántas se recuperaron."""
+    try:
+        with open(os.path.join(work_dir, "analisis.json"), encoding="utf-8") as f:
+            rows = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    n = 0
+    for ph in photos:
+        r = rows.get(os.path.basename(ph.path))
+        tp = os.path.join(work_dir, os.path.basename(ph.path) + ".thumb.jpg")
+        if not r or r["sig"] != _sig(ph, st) or not os.path.exists(tp):
+            continue
+        d = r["data"]
+        if d.get("preview_path") and not os.path.exists(d["preview_path"]):
+            continue
+        for k, v in d.items():
+            if hasattr(ph, k):
+                setattr(ph, k, v)
+        ph.when = dt.datetime.fromisoformat(d["when"]) if d.get("when") else None
+        ph.crops = {k: tuple(v) for k, v in d.get("crops", {}).items()}
+        with open(tp, "rb") as f:
+            ph.thumb = f.read()
+        n += 1
+    return n
+
+
+def _done_file(out_dir: str) -> str:
+    return os.path.join(out_dir, ".phootflow", "exportadas.txt")
+
+
+def exported_names(out_dir: str) -> set[str]:
+    try:
+        with open(_done_file(out_dir), encoding="utf-8") as f:
+            return {line.strip() for line in f if line.strip()}
+    except OSError:
+        return set()
+
+
+def analyze_many(photos: list[Photo], st: Settings, workers: int = 2, on_done=None, cancelled=lambda: False):
+    """Analiza en paralelo con hilos (OpenCV y LibRaw sueltan el GIL). `on_done(i)` al terminar cada foto.
+    Las fotos que ya traen análisis (recuperado de la caché) no se repiten."""
+    def one(i):
+        if not cancelled() and not photos[i].thumb:
+            analyze(photos[i], st)
+        return i
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        for i in ex.map(one, range(len(photos))):
+            if on_done and not cancelled():
+                on_done(i)
+
+
+def export_many(photos: list[Photo], st: Settings, out_dir: str, version: str = "", on_done=None,
+                cancelled=lambda: False) -> int:
+    """Exporta en paralelo (`st.workers` hilos). Un fallo en una foto queda en `ph.error` y no para el lote.
+    `on_done(hechas, total)` tras cada foto. Devuelve el número de archivos JPG escritos."""
+    done_before = exported_names(out_dir) if st.resume else set()
+    lock = threading.Lock()
+    os.makedirs(os.path.dirname(_done_file(out_dir)), exist_ok=True)
+
+    def one(ph):
+        key = os.path.basename(ph.path)
+        if cancelled() or key in done_before:
+            return 0
+        try:
+            n = len(export(ph, st, out_dir, version))
+            if st.write_xmp:
+                xmp_sidecar(ph, st)
+            with lock, open(_done_file(out_dir), "a", encoding="utf-8") as f:
+                f.write(key + "\n")
+            return n
+        except Exception as e:
+            ph.error = f"{type(e).__name__}: {e}"
+            return 0
+
+    files = 0
+    with ThreadPoolExecutor(max_workers=max(1, st.workers)) as ex:
+        for k, n in enumerate(ex.map(one, photos), start=1):
+            files += n
+            if on_done:
+                on_done(k, len(photos))
+    return files
 
 
 def move_discards(photos: list[Photo], src_dir: str) -> int:
@@ -529,11 +962,11 @@ def write_report(photos: list[Photo], out_dir: str) -> str:
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         wr = csv.writer(f, delimiter=";")
         wr.writerow(["archivo", "estado", "motivo", "formato_sugerido", "exposicion_ev", "giro_grados",
-                     "nitidez", "iso", "caras"])
+                     "nitidez", "iso", "caras", "aviso"])
         for p in photos:
             wr.writerow([os.path.basename(p.path), "conservada" if p.keep else "descartada",
                          p.reason or p.error, p.best, f"{p.ev:+.2f}", f"{p.angle:+.2f}", f"{p.sharp:.4f}",
-                         p.iso or "", p.faces])
+                         p.iso or "", p.faces, p.warn])
     return path
 
 

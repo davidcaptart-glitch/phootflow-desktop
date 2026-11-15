@@ -85,7 +85,7 @@ class Drive:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
-                self.wfile.write("<h2>EventEdits: ya puedes cerrar esta pestaña.</h2>".encode())
+                self.wfile.write("<h2>PhootFlow: ya puedes cerrar esta pestaña.</h2>".encode())
 
             def log_message(self, *a):
                 pass

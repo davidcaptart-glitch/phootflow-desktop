@@ -97,11 +97,103 @@ class Engine(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.d, "y.jpg")))
 
 
+class PhootFlowExtras(unittest.TestCase):
+    """Lo añadido en PhootFlow: salidas propias, EXIF, XMP, B/N, caché, reanudación y estilos."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.st = E.Settings(ratios=["4:5"], sizes=["max", "1080"])
+
+    def test_own_outputs_are_ignored(self):
+        for n in ("a.jpg", "a_4x5_max.jpg", "a_original_1080.jpg", "a_bn_4x5_max.jpg", "a_editada.jpg"):
+            scene().save(os.path.join(self.d, n))
+        self.assertEqual([p.name for p in E.list_photos(self.d)], ["a"])
+
+    def test_bw_xmp_exif_and_resume(self):
+        scene().save(os.path.join(self.d, "a.jpg"), quality=93)
+        st = E.Settings(ratios=["4:5"], sizes=["max"], bw=True, cache_dir=os.path.join(self.d, "cache"))
+        ps = E.list_photos(self.d)
+        E.analyze_many(ps, st, 2)
+        self.assertTrue(ps[0].preview_path and os.path.exists(ps[0].preview_path))
+        self.assertFalse(ps[0].preview)  # en disco, no en memoria
+        ps[0].meta = {"make": "SONY", "model": "ILCE-6700", "iso": 3200, "date": "2026:11:15 22:10:00"}
+        out = os.path.join(self.d, "out")
+        n = E.export_many(ps, st, out, "9.9")
+        bw = [f for f in os.listdir(os.path.join(out, "ByN"))]
+        self.assertEqual(len(bw), 1)
+        a = np.asarray(Image.open(os.path.join(out, "ByN", bw[0])).convert("RGB")).astype(int)
+        self.assertLess(np.abs(a[..., 0] - a[..., 2]).max(), 3)  # neutro
+        ex = Image.open(os.path.join(out, "Sugeridas", os.listdir(os.path.join(out, "Sugeridas"))[0])).getexif()
+        self.assertEqual(ex.get(0x0110), "ILCE-6700")
+        self.assertIn("PhootFlow", ex.get(0x0131))
+        self.assertEqual(E.export_many(ps, st, out, "9.9"), 0)  # reanudar: no repite lo hecho
+        self.assertGreater(n, 0)
+        E.save_session(ps, st, os.path.join(self.d, "w"))
+        fresh = E.list_photos(self.d)
+        self.assertEqual(E.load_session(fresh, st, os.path.join(self.d, "w")), 1)
+        self.assertEqual(fresh[0].crops, ps[0].crops)
+        # XMP: solo para RAW, nunca pisa uno existente
+        raw = os.path.join(self.d, "r.ARW")
+        open(raw, "wb").write(b"0")
+        ph = E.Photo(path=raw, name="r", ev=1.5, angle=-1.2, crops={"Original": (0, 0, 1, 1)}, keep=False)
+        x = E.xmp_sidecar(ph, st)
+        self.assertIn('crs:Exposure2012="+1.50"', open(x, encoding="utf-8").read())
+        self.assertIn('xmp:Rating="-1"', open(x, encoding="utf-8").read())
+        self.assertEqual(E.xmp_sidecar(ph, st), "")
+
+    def test_styles_detect_and_learn_from_finals(self):
+        import styles as S
+        night = E.Photo(path="x", iso=6400, ev_raw=4.0, faces=3,
+                        feats={"lights": 0.06, "green": 0.0, "white": 0.0, "dark": 0.6, "sat": 0.4,
+                               "exposure": 1 / 60, "focal": 24, "iso": 6400, "ev_raw": 4.0, "faces": 3})
+        sport = E.Photo(path="y", feats={"lights": 0.0, "green": 0.4, "white": 0.01, "dark": 0.05, "sat": 0.3,
+                                         "exposure": 1 / 2000, "focal": 200, "iso": 800, "ev_raw": 0.5,
+                                         "faces": 1})
+        self.assertEqual(S.detect_scene([night, night])[0], "Discoteca / noche")
+        self.assertEqual(S.detect_scene([sport, sport])[0], "Deporte")
+        fin = os.path.join(self.d, "finales")
+        os.makedirs(fin)
+        for k in range(3):  # ediciones cálidas y contrastadas en 4:5
+            a = np.asarray(scene(seed=k)).astype(np.float32)
+            a[..., 0] *= 1.15
+            a[..., 2] *= 0.85
+            Image.fromarray(np.clip(a, 0, 255).astype(np.uint8)).resize((800, 1000)).save(
+                os.path.join(fin, f"f{k}.jpg"))
+        cfg = os.path.join(self.d, "cfg")
+        path, n = S.learn_from_finals(E, fin, cfg, "Prueba", "Boda")
+        self.assertEqual(n, 3)
+        st = S.all_styles(cfg)["Mi estilo: Prueba"]
+        self.assertGreater(st["target_b"], 0)  # aprendió que es cálido
+        self.assertEqual(st["formats"][0], "4:5")
+        img = np.asarray(scene()).astype(np.float32) / 255
+        out = S.apply_color(img, st)
+        self.assertEqual(out.shape, img.shape)
+        self.assertGreater(out[..., 0].mean() - out[..., 2].mean(), img[..., 0].mean() - img[..., 2].mean())
+
+
 class Updater(unittest.TestCase):
     def test_versions(self):
         self.assertTrue(updater.is_newer("v0.10.0", "0.9.9"))
         self.assertFalse(updater.is_newer("0.1.0", "0.1.0"))
         self.assertFalse(updater.is_newer("0.1.0", "0.2.0"))
+
+    def test_source_update_copies_files_and_rejects_bad_zips(self):
+        d = tempfile.mkdtemp()
+        target, z = os.path.join(d, "app"), os.path.join(d, "u.zip")
+        os.makedirs(target)
+        open(os.path.join(target, "app.py"), "w").write("viejo")
+        open(os.path.join(target, "requirements.txt"), "w").write("x")
+        with zipfile.ZipFile(z, "w") as zz:
+            zz.writestr("PhootFlow/app.py", "nuevo")
+            zz.writestr("PhootFlow/assets/a.png", "png")
+            zz.writestr("PhootFlow/requirements.txt", "x")
+        updater.install_source(z, target)
+        self.assertEqual(open(os.path.join(target, "app.py")).read(), "nuevo")
+        self.assertTrue(os.path.exists(os.path.join(target, "assets", "a.png")))
+        with zipfile.ZipFile(z, "w") as zz:
+            zz.writestr("../fuera.py", "x")
+        with self.assertRaises(RuntimeError):
+            updater.install_source(z, target)
 
 
 class FakeGoogle(http.server.BaseHTTPRequestHandler):

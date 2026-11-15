@@ -29,25 +29,35 @@ jobs:
         run: python -m unittest discover -s tests
       - name: Compilar .exe
         run: >
-          pyinstaller --noconfirm --onefile --windowed --name EventEdits
+          pyinstaller --noconfirm --onefile --windowed --name PhootFlow
+          --icon assets/icon.ico --add-data "assets;assets"
           --collect-all rawpy --collect-data cv2 app.py
       - name: Comprobar que el .exe arranca y procesa
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath dist\EventEdits.exe -ArgumentList "--selftest" -Wait -PassThru
-          Get-Content "$env:TEMP\eventedits_selftest.log"
+          $p = Start-Process -FilePath dist\PhootFlow.exe -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:TEMP\phootflow_selftest.log"
           if ($p.ExitCode -ne 0) { exit 1 }
-      - name: Suma de verificación
+      - name: Paquete de código (instalación con Python y autoactualización en PCs con Smart App Control)
         shell: pwsh
         run: |
-          $h = (Get-FileHash dist\EventEdits.exe -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path dist\EventEdits.exe.sha256 -Value $h -NoNewline -Encoding ascii
+          New-Item -ItemType Directory -Force pkg\PhootFlow | Out-Null
+          Copy-Item app.py, engine.py, styles.py, theme.py, drive.py, updater.py, version.py, requirements.txt, instalar.ps1, README.md pkg\PhootFlow\
+          Copy-Item -Recurse assets pkg\PhootFlow\assets
+          Compress-Archive -Path pkg\PhootFlow -DestinationPath dist\PhootFlow-src.zip
+      - name: Sumas de verificación
+        shell: pwsh
+        run: |
+          foreach ($f in "PhootFlow.exe", "PhootFlow-src.zip") {
+            $h = (Get-FileHash "dist\$f" -Algorithm SHA256).Hash.ToLower()
+            Set-Content -Path "dist\$f.sha256" -Value $h -NoNewline -Encoding ascii
+          }
       - uses: actions/upload-artifact@v4
         with:
-          name: EventEdits
-          path: dist/EventEdits.exe*
+          name: PhootFlow
+          path: dist/PhootFlow*
       - name: Publicar release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/EventEdits.exe dist/EventEdits.exe.sha256 --title "EventEdits ${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" dist/PhootFlow.exe dist/PhootFlow.exe.sha256 dist/PhootFlow-src.zip dist/PhootFlow-src.zip.sha256 --title "PhootFlow ${{ github.ref_name }}" --generate-notes

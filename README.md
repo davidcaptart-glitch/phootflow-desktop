@@ -1,90 +1,105 @@
-# EventEdits
+<p align="center"><img src="assets/icon.png" width="96" alt="PhootFlow"></p>
 
-Programa de escritorio para Windows que edita de golpe todas las fotos de una sesión: corrige exposición,
-limpia el grano, endereza, propone el mejor formato de recorte, aparta las fotos fallidas y exporta en JPG.
+# PhootFlow
 
-**Descarga:** [última versión](https://github.com/davidcaptart-glitch/eventedits/releases/latest) → `EventEdits.exe`.
-No necesita instalación. Al no estar firmado, Windows mostrará «Windows protegió su PC» la primera vez:
-*Más información → Ejecutar de todas formas*.
+Programa de escritorio para Windows que edita **sola** una sesión de fotos entera (500, 1000, 2000 fotos):
+corrige exposición, limpia el grano, endereza, propone el mejor recorte, aparta las fallidas, aplica el estilo
+del tipo de evento (o **tu propio estilo aprendido**) y exporta en JPG, con versión en blanco y negro editorial
+opcional. Antes se llamaba *EventEdits*.
+
+## Instalar
+
+| Opción | Cuándo |
+|---|---|
+| **`instalar.ps1`** (recomendada) | Cualquier PC con Python 3.11+. Imprescindible si Windows tiene **Smart App Control** activo: bloquea el `.exe` sin firmar. |
+| **`PhootFlow.exe`** de la [última versión](https://github.com/davidcaptart-glitch/phootflow-desktop/releases/latest) | PCs sin Smart App Control. Al no estar firmado, Windows avisa la primera vez: *Más información → Ejecutar de todas formas*. |
+
+```
+powershell -ExecutionPolicy Bypass -File instalar.ps1
+```
+
+Las dos se **actualizan solas**: al abrirse (y cada 4 horas) miran si hay una versión nueva, la descargan,
+comprueban su SHA-256 y se reinician.
 
 ## Uso
 
-1. **Carpeta de la sesión**: la que contiene los RAW (`.ARW`, `.CR3`, `.NEF`, `.RAF`, `.DNG`…) o JPG.
-2. **1. Analizar sesión**: pasada rápida (unos segundos por foto). Muestra cada foto con su estado, el formato
-   sugerido, la exposición que se va a aplicar y el giro. Nada se mueve ni se borra todavía.
-3. Revisa la columna **Editar**: marca o desmarca lo que quieras cambiar.
-4. **2. Editar y exportar**: revela a resolución completa las marcadas.
+1. **Carpeta de la sesión** (los RAW `.ARW`, `.CR3`, `.NEF`, `.RAF`, `.DNG`… o JPG).
+2. **Tipo de sesión**: *Automático* lo detecta (boda, cumpleaños/fiesta, discoteca/noche, deporte, retrato,
+   exterior) por EXIF y contenido; o elígelo tú, o elige uno de **tus estilos aprendidos**.
+3. **Procesar todo**: analiza, selecciona y exporta sin parar. El PC no se suspende mientras trabaja. Si se
+   corta, vuelve a pulsarlo: recupera el análisis y no repite lo ya exportado.
+   O, si prefieres revisar: **Analizar** → revisa en la rejilla → **Exportar**.
+
+En la rejilla: clic para ver la foto en grande con el recorte marcado; **P** conservar, **X** descartar,
+**espacio** alternar. En el panel derecho se cambian exposición, giro y formato de cada foto.
 
 ### Qué genera
 
 ```
 Sesión/
 ├── Descartadas/            originales apartados (nunca se borran)
+├── DSC0001.xmp             (opcional) ajustes para Lightroom, solo si no existía ya uno
 └── Editadas/
     ├── Sugeridas/          cada foto en su formato sugerido
     ├── Formatos/4x5/ …     los demás formatos que marques
+    ├── ByN/                (opcional) blanco y negro editorial
     ├── Originales.zip      originales conservados, sin pérdida
-    └── informe.csv         estado, motivo y ajustes de cada foto
+    ├── informe.csv         estado, motivo, ajustes y avisos de cada foto
+    └── .phootflow/         análisis guardado para reanudar (se puede borrar)
 ```
 
-Cada archivo lleva el formato y el tamaño en el nombre: `DSC03381_4x5_max.jpg`, `DSC03381_4x5_1080.jpg`.
+## Estilos
 
-### Formatos y tamaños
+- **Presets por tipo de evento**: Boda (luminoso, suave, cálido), Cumpleaños/fiesta, Discoteca/noche (más
+  limpieza de grano, negros densos, conserva el color de los focos), Deporte (contraste y nitidez),
+  Retrato/estudio y Exterior/paisaje.
+- **Aprender mi estilo…**: elige una carpeta con tus fotos **ya editadas** de un tipo de evento y PhootFlow
+  aprende tu aspecto final (luces, contraste, color, saturación, cuánto B/N usas y tus formatos de recorte).
+  Si además le das la carpeta de **originales** con los mismos nombres de archivo, aprende cuánto transformas
+  cada foto: más fiel. Los estilos se guardan en `%APPDATA%\PhootFlow\estilos\`.
+- **Blanco y negro editorial** (opción): mezcla de canales pensada para la piel, contraste local, negros densos
+  sin empastar, blancos limpios y grano fino.
 
-4:5, 5:4, 2:3, 3:2, 3:4, 4:3, 5:7, 7:5, 9:16, 16:9, 1:1 y el original. El programa elige como **sugerido** el
-recorte que elimina más zona vacía sin perder sujeto, y exporta además todos los que marques.
-Tamaños: máxima resolución, 2048 px de lado largo y 1080 px de ancho.
+## Selección automática
 
-### Descarte
+- Desenfocadas o movidas (relativo a la nitidez media de la sesión).
+- Exposición irrecuperable (más de un 30 % quemado o más de 7,5 pasos de subida).
+- Casi duplicadas: de cada ráfaga se queda la más nítida.
+- **Avisos** (no descartan): ojos quizá cerrados, cara menos nítida que el fondo.
 
-- **Desenfocadas o movidas**: se comparan con la nitidez media de la sesión.
-- **Exposición irrecuperable**: más de un 30 % quemado, o haría falta subir más de 7,5 pasos.
-- **Casi duplicadas**: de cada ráfaga igual se queda la más nítida.
+Las caras se detectan con **YuNet** (OpenCV Zoo, licencia MIT), mucho más fiable que Haar con ISO alto y luz
+de discoteca.
 
-Los criterios son aproximados: revisa la propuesta antes de exportar. La detección de ojos cerrados no está incluida.
+## Nube
 
-### Originales comprimidos
+- **Google Drive**: sube `Editadas` a la carpeta que indiques, crea el enlace «cualquiera con el enlace» y lo
+  copia al portapapeles. El ZIP de originales va a una carpeta aparte que no se comparte.
+- **Carpeta sincronizada**: copia a una carpeta que otra app sube sola (vía para **Amazon Photos**, que no
+  tiene API pública).
 
-`Originales.zip` es compresión sin pérdida: al descomprimir se recuperan los RAW idénticos. Los RAW ya vienen
-comprimidos de cámara, así que el ahorro ronda el 10 %. Los originales no se tocan; cuando compruebes el ZIP
-puedes borrarlos tú.
-
-### Nube
-
-- **Google Drive**: sube `Editadas` a la carpeta de Drive que indiques (pega su enlace), crea el enlace
-  «cualquiera con el enlace puede ver» y lo copia al portapapeles. El ZIP de originales va a una carpeta aparte
-  que **no** se comparte.
-- **Carpeta sincronizada**: copia el resultado a una carpeta local que otra aplicación sube sola. Es la vía para
-  **Amazon Photos**, que no ofrece una API pública para subir ni crear enlaces: el enlace se crea desde Amazon Photos.
-
-#### Conectar Google Drive (una sola vez)
+### Conectar Google Drive (una sola vez)
 
 1. En <https://console.cloud.google.com/> crea un proyecto y activa **Google Drive API**.
-2. *Pantalla de consentimiento de OAuth* → tipo **Externo** → añade tu cuenta como usuario de prueba y luego
-   **Publicar aplicación** (si se queda «en pruebas», Google caduca el permiso cada 7 días).
-3. *Credenciales → Crear credenciales → ID de cliente de OAuth →* **App de escritorio** → descarga el JSON.
-4. En EventEdits: destino **Google Drive** → **Conectar Google Drive…** → elige ese JSON y autoriza en el navegador.
+2. *Pantalla de consentimiento de OAuth* → **Externo** → añade tu cuenta como usuario de prueba → **Publicar
+   aplicación** (si queda «en pruebas», Google caduca el permiso cada 7 días).
+3. *Credenciales → ID de cliente de OAuth →* **App de escritorio** → descarga el JSON.
+4. En PhootFlow: Nube → **Google Drive** → **Conectar Google Drive…** → elige ese JSON y autoriza.
 
-El permiso se guarda en `%APPDATA%\EventEdits` en tu PC.
-
-## Actualizaciones
-
-Al abrirse, el programa consulta la última release de este repositorio. Si hay una versión nueva pregunta,
-la descarga, comprueba su SHA-256, se sustituye y se reinicia.
-
-Publicar una versión nueva:
+## Publicar una versión
 
 ```
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
-GitHub Actions pasa las pruebas, compila `EventEdits.exe` en Windows, comprueba que arranca y lo publica.
+GitHub Actions pasa las pruebas, compila `PhootFlow.exe`, comprueba que arranca y procesa, empaqueta
+`PhootFlow-src.zip` y lo publica todo con sus SHA-256. Las copias instaladas se actualizan solas.
 
 ## Desarrollo
 
 ```
 pip install -r requirements.txt
 python app.py
+python app.py --selftest
 python -m unittest discover -s tests
 ```
