@@ -51,8 +51,10 @@ python -m unittest discover -s tests   # 11 pruebas, sin fotos reales
 ## Estado (v0.2.0)
 
 Probado en el PC de David: motor con 8 ARW reales del cumpleaños (ISO 2500–6400), selftest, 11 pruebas.
-Estilos «Deporte» y «Boda» aprendidos de sus fotos acabadas en Drive (muestra de ≈40 por carpeta, en
-`%LOCALAPPDATA%\PhootFlow\aprendizaje`).
+Estilos aprendidos de sus fotos acabadas (solo en su PC, `%APPDATA%\PhootFlow\estilos`): Deporte, Boda y comunión,
+Cumpleaños, Quinceañera, Discoteca (Drive, miniaturas de 1600 px vía `drive.google.com/thumbnail`, ≈40 por carpeta)
+y Baile (álbum compartido de Lightroom, 329 fotos a 2048 px por la API `/v2/spaces/<id>/albums/<id>/assets`).
+Las muestras están en `%LOCALAPPDATA%\PhootFlow\aprendizaje`. Google limita la descarga de originales de 16 MB.
 
 Sin probar: el `.exe` en un PC sin Smart App Control, Drive contra cuenta real, sesión completa de 2000 fotos.
 
