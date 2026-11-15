@@ -295,6 +295,8 @@ class LearnDialog(QDialog):
         self.b_go.setEnabled(False)
         self.msg.setText("Aprendiendo…")
         self.worker = LearnWorker(self.finals.text().strip(), origs, name, self.base.currentText())
+        self.parent()._threads.add(self.worker)
+        self.worker.finished.connect(lambda w=self.worker: self.parent()._threads.discard(w))
         self.worker.progress.connect(lambda a, b: (self.pb.setMaximum(b), self.pb.setValue(a),
                                                    self.msg.setText(f"Analizando {a}/{b}…")))
         self.worker.done.connect(self.finished_ok)
@@ -343,6 +345,7 @@ def labeled(label: str, w: QWidget) -> QWidget:
     h.setContentsMargins(0, 0, 0, 0)
     lab = QLabel(label)
     lab.setObjectName("muted")
+    w.setMinimumWidth(120)
     h.addWidget(lab, 1)
     h.addWidget(w)
     return box
@@ -510,6 +513,7 @@ class Main(QMainWindow):
         self.resize(1440, 900)
         self.s = QSettings(APP, APP)
         self.photos, self.worker, self.filter = [], None, "all"
+        self._threads: set = set()
         self._thumbs: OrderedDict[int, QPixmap] = OrderedDict()
         self.cur: E.Photo | None = None
         self.pending_update = None
@@ -1160,7 +1164,12 @@ class Main(QMainWindow):
         self.run(Worker("export", self.photos, st, self.src.text().strip(), self.out_dir(), cloud))
 
     def run(self, worker):
+        if worker.mode in ("analyze", "auto"):
+            E.prepare_detectors(worker.st.workers)  # en el hilo principal (ver engine.prepare_detectors)
         self.worker = worker
+        # se guarda hasta que el hilo termine de verdad: destruir un QThread en marcha aborta el programa
+        self._threads.add(worker)
+        worker.finished.connect(lambda w=worker: self._threads.discard(w))
         worker.progress.connect(self.on_progress)
         worker.photo.connect(self.on_photo)
         worker.scene.connect(self.on_scene)

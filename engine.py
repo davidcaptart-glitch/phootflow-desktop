@@ -902,6 +902,8 @@ def analyze_many(photos: list[Photo], st: Settings, workers: int = 2, on_done=No
             analyze(photos[i], st)
         return i
 
+    if threading.current_thread() is threading.main_thread():  # si no, lo llama quien lanza el hilo (app.Main.run)
+        prepare_detectors(max(1, workers))
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         for i in ex.map(one, range(len(photos))):
             if on_done and not cancelled():
