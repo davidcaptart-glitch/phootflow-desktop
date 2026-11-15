@@ -153,9 +153,11 @@ def apply_color(rgb: np.ndarray, style: dict) -> np.ndarray:
         if style.get("target_chroma") and mid.any():
             ratio = np.clip(style["target_chroma"] / max(float(np.median(c[mid])), 1e-3), 0.6, 1.6)
             chroma *= 1 + k * (ratio - 1)
-            tint += k * (float(style.get("target_a", 0)) - float(np.median(sub[..., 1][mid])) * chroma)
-            warm += k * (float(style.get("target_b", 0)) - float(np.median(sub[..., 2][mid])) * chroma)
-            tint, warm = float(np.clip(tint, -12, 12)), float(np.clip(warm, -15, 15))
+            # el color medio se acerca a medias y con tope: en discoteca el «color medio» son los focos,
+            # y llevarlo entero tiñe de magenta fotos que no lo tenían
+            tint += 0.5 * k * (float(style.get("target_a", 0)) - float(np.median(sub[..., 1][mid])) * chroma)
+            warm += 0.5 * k * (float(style.get("target_b", 0)) - float(np.median(sub[..., 2][mid])) * chroma)
+            tint, warm = float(np.clip(tint, -5, 5)), float(np.clip(warm, -7, 7))
     lab[..., 1] = lab[..., 1] * chroma + tint
     lab[..., 2] = lab[..., 2] * chroma + warm
     return np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)

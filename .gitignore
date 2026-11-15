@@ -10,3 +10,8 @@ EventEdits.zip
 .phootflow/
 *.part
 
+# fotos reales: nunca al repositorio público
+comparativa*.jpg
+*.ARW
+*.NEF
+
