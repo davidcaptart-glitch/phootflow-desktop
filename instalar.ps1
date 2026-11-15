@@ -1,4 +1,4 @@
-# Instala PhootFlow (versión con Python) y crea accesos directos. Se actualiza sola desde las Releases.
+﻿# Instala PhootFlow (versión con Python) y crea accesos directos. Se actualiza sola desde las Releases.
 # Uso:  powershell -ExecutionPolicy Bypass -File instalar.ps1
 # Es la vía recomendada en PCs con Smart App Control, que bloquea el .exe sin firmar.
 $ErrorActionPreference = "Stop"
@@ -14,7 +14,9 @@ $zipUrl = ($rel.assets | Where-Object name -eq "PhootFlow-src.zip").browser_down
 $shaUrl = ($rel.assets | Where-Object name -eq "PhootFlow-src.zip.sha256").browser_download_url
 $tmp = Join-Path $env:TEMP "PhootFlow-src.zip"
 Invoke-WebRequest $zipUrl -OutFile $tmp -UseBasicParsing
-$expected = (Invoke-WebRequest $shaUrl -UseBasicParsing).Content.Trim().ToLower()
+$shaFile = Join-Path $env:TEMP "PhootFlow-src.zip.sha256"
+Invoke-WebRequest $shaUrl -OutFile $shaFile -UseBasicParsing
+$expected = ([IO.File]::ReadAllText($shaFile)).Trim().ToLower()
 if ((Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw "La descarga no coincide con su suma de verificación." }
 
 New-Item -ItemType Directory -Force $dest | Out-Null

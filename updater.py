@@ -17,6 +17,8 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
+
+import net
 import zipfile
 
 REPO = "davidcaptart-glitch/phootflow-desktop"
@@ -51,7 +53,7 @@ def latest() -> dict | None:
     """{'version', 'url', 'sha_url', 'notes'} de la última release para este modo, o None."""
     try:
         req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest", headers=_UA)
-        with urllib.request.urlopen(req, timeout=8) as r:
+        with net.urlopen(req, timeout=8) as r:
             d = json.load(r)
         assets = {a["name"]: a["browser_download_url"] for a in d.get("assets", [])}
         name = ASSET_EXE if mode() == "exe" else ASSET_SRC
@@ -67,11 +69,11 @@ def download(info: dict, progress=None) -> str:
     """Descarga el archivo de la release y comprueba su SHA-256. Devuelve la ruta temporal."""
     if not info.get("sha_url"):
         raise RuntimeError("La versión publicada no trae suma de verificación")
-    with urllib.request.urlopen(urllib.request.Request(info["sha_url"], headers=_UA), timeout=15) as r:
+    with net.urlopen(urllib.request.Request(info["sha_url"], headers=_UA), timeout=15) as r:
         expected = r.read().decode().split()[0].strip().lower()
     dest = os.path.join(tempfile.gettempdir(), "PhootFlow_nueva_" + info.get("name", ASSET_EXE))
     h = hashlib.sha256()
-    with urllib.request.urlopen(urllib.request.Request(info["url"], headers=_UA), timeout=30) as r, \
+    with net.urlopen(urllib.request.Request(info["url"], headers=_UA), timeout=30) as r, \
             open(dest, "wb") as f:
         total, done = int(r.headers.get("Content-Length") or 0), 0
         while chunk := r.read(1 << 20):

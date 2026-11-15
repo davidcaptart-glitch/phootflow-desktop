@@ -14,6 +14,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import net
 import webbrowser
 
 API = "https://www.googleapis.com/drive/v3"
@@ -114,7 +116,7 @@ class Drive:
     def _post_form(self, url: str, data: dict) -> dict:
         req = urllib.request.Request(url, data=urllib.parse.urlencode(data).encode())
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with net.urlopen(req, timeout=30) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             raise DriveError(f"Google rechazó la autorización ({e.code}): {e.read().decode(errors='replace')[:300]}")
@@ -150,7 +152,7 @@ class Drive:
             h["Content-Type"] = "application/json; charset=UTF-8"
         req = urllib.request.Request(url, data=data, headers=h, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=120) as r:
+            with net.urlopen(req, timeout=120) as r:
                 return r if raw else (json.loads(r.read() or b"{}"), r.headers)
         except urllib.error.HTTPError as e:
             if e.code == 308:
