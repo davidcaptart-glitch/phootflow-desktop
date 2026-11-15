@@ -1,9 +1,9 @@
-# FotoLote
+# EventEdits
 
 Programa de escritorio para Windows que edita de golpe todas las fotos de una sesión: corrige exposición,
 limpia el grano, endereza, propone el mejor formato de recorte, aparta las fotos fallidas y exporta en JPG.
 
-**Descarga:** [última versión](https://github.com/davidcaptart-glitch/fotolote/releases/latest) → `FotoLote.exe`.
+**Descarga:** [última versión](https://github.com/davidcaptart-glitch/eventedits/releases/latest) → `EventEdits.exe`.
 No necesita instalación. Al no estar firmado, Windows mostrará «Windows protegió su PC» la primera vez:
 *Más información → Ejecutar de todas formas*.
 
@@ -38,7 +38,7 @@ Tamaños: máxima resolución, 2048 px de lado largo y 1080 px de ancho.
 ### Descarte
 
 - **Desenfocadas o movidas**: se comparan con la nitidez media de la sesión.
-- **Exposición irrecuperable**: más de un 30 % quemado, o haría falta subir más de 5,5 pasos.
+- **Exposición irrecuperable**: más de un 30 % quemado, o haría falta subir más de 7,5 pasos.
 - **Casi duplicadas**: de cada ráfaga igual se queda la más nítida.
 
 Los criterios son aproximados: revisa la propuesta antes de exportar. La detección de ojos cerrados no está incluida.
@@ -63,9 +63,9 @@ puedes borrarlos tú.
 2. *Pantalla de consentimiento de OAuth* → tipo **Externo** → añade tu cuenta como usuario de prueba y luego
    **Publicar aplicación** (si se queda «en pruebas», Google caduca el permiso cada 7 días).
 3. *Credenciales → Crear credenciales → ID de cliente de OAuth →* **App de escritorio** → descarga el JSON.
-4. En FotoLote: destino **Google Drive** → **Conectar Google Drive…** → elige ese JSON y autoriza en el navegador.
+4. En EventEdits: destino **Google Drive** → **Conectar Google Drive…** → elige ese JSON y autoriza en el navegador.
 
-El permiso se guarda en `%APPDATA%\FotoLote` en tu PC.
+El permiso se guarda en `%APPDATA%\EventEdits` en tu PC.
 
 ## Actualizaciones
 
@@ -79,7 +79,7 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-GitHub Actions pasa las pruebas, compila `FotoLote.exe` en Windows, comprueba que arranca y lo publica.
+GitHub Actions pasa las pruebas, compila `EventEdits.exe` en Windows, comprueba que arranca y lo publica.
 
 ## Desarrollo
 

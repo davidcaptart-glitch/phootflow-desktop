@@ -1,4 +1,4 @@
-"""FotoLote — edición por lotes de sesiones de fotos (interfaz de escritorio)."""
+"""EventEdits — edición por lotes de sesiones de fotos (interfaz de escritorio)."""
 from __future__ import annotations
 
 import os
@@ -21,7 +21,7 @@ import engine as E
 import updater
 from version import __version__
 
-APP = "FotoLote"
+APP = "EventEdits"
 CFG_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~/.config"), APP)
 CLOUDS = ["No subir", "Google Drive (sube y crea enlace)", "Carpeta sincronizada (Amazon Photos u otra)"]
 
@@ -473,13 +473,13 @@ class Main(QMainWindow):
 
 def selftest() -> int:
     """Comprobación que ejecuta el compilado en GitHub antes de publicar una versión."""
-    log = os.path.join(tempfile.gettempdir(), "fotolote_selftest.log")
+    log = os.path.join(tempfile.gettempdir(), "eventedits_selftest.log")
     try:
         import cv2
         import numpy as np
         import rawpy
         from PIL import Image
-        d = tempfile.mkdtemp(prefix="fotolote_")
+        d = tempfile.mkdtemp(prefix="eventedits_")
         rng = np.random.default_rng(1)
         for k in range(2):
             a = np.full((900, 600, 3), 18, np.uint8)

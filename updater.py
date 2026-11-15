@@ -9,9 +9,9 @@ import sys
 import tempfile
 import urllib.request
 
-REPO = "davidcaptart-glitch/fotolote"
-ASSET = "FotoLote.exe"
-_UA = {"User-Agent": "FotoLote-updater", "Accept": "application/vnd.github+json"}
+REPO = "davidcaptart-glitch/eventedits"
+ASSET = "EventEdits.exe"
+_UA = {"User-Agent": "EventEdits-updater", "Accept": "application/vnd.github+json"}
 
 
 def _ver(v: str) -> tuple:
@@ -47,7 +47,7 @@ def download(info: dict, progress=None) -> str:
         raise RuntimeError("La versión publicada no trae suma de verificación")
     with urllib.request.urlopen(urllib.request.Request(info["sha_url"], headers=_UA), timeout=15) as r:
         expected = r.read().decode().split()[0].strip().lower()
-    dest = os.path.join(tempfile.gettempdir(), "FotoLote_nueva.exe")
+    dest = os.path.join(tempfile.gettempdir(), "EventEdits_nueva.exe")
     h = hashlib.sha256()
     with urllib.request.urlopen(urllib.request.Request(info["url"], headers=_UA), timeout=30) as r, \
             open(dest, "wb") as f:
@@ -67,7 +67,7 @@ def download(info: dict, progress=None) -> str:
 def swap_and_restart(new_exe: str) -> None:
     """Lanza un script que espera a que se cierre el programa, sustituye el .exe y lo reabre."""
     current = sys.executable
-    bat = os.path.join(tempfile.gettempdir(), "fotolote_actualizar.bat")
+    bat = os.path.join(tempfile.gettempdir(), "eventedits_actualizar.bat")
     pid = os.getpid()
     with open(bat, "w", encoding="mbcs") as f:
         f.write(f"""@echo off

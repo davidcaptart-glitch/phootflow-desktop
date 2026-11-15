@@ -1,4 +1,4 @@
-"""Motor de FotoLote: análisis, descarte, sugerencia de formato, revelado y exportación."""
+"""Motor de EventEdits: análisis, descarte, sugerencia de formato, revelado y exportación."""
 from __future__ import annotations
 
 import csv
@@ -38,7 +38,10 @@ RATIOS = {
 SIZES = {"max": None, "2048": 2048, "1080": 1080}  # 2048 = lado largo, 1080 = ancho
 NR_LEVELS = {"Suave": 0.6, "Normal": 1.0, "Fuerte": 1.5}
 SENS = {"Baja": 0.30, "Normal": 0.45, "Alta": 0.60}
-SHARP_ABS_MIN = 0.012  # por debajo de esto no hay nada nítido en la imagen
+SHARP_ABS_MIN = 0.008  # por debajo de esto no hay nada nítido en la imagen
+EV_MAX = 5.0            # tope de subida de exposición
+EV_HOPELESS = 7.5       # a partir de aquí la foto se considera irrecuperable
+FACE_TARGET = 0.32      # luminancia lineal a la que se lleva la piel de las caras
 
 _SRGB_ICC = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
 _FACE = None
@@ -168,7 +171,7 @@ def estimate_ev(lin: np.ndarray) -> tuple[float, float, float]:
     med = float(np.median(lum)) * 2 ** ev
     if med > 0.30:  # no levantar escenas que ya son luminosas
         ev -= math.log2(med / 0.30)
-    return float(np.clip(ev, -1.5, 4.5)), ev_raw, clipped
+    return float(np.clip(ev, -1.5, EV_MAX)), ev_raw, clipped
 
 
 def tone(lin: np.ndarray, ev: float) -> np.ndarray:
@@ -244,6 +247,23 @@ def _faces(gray8: np.ndarray) -> list[tuple[int, int, int, int]]:
     m = int(0.045 * min(gray8.shape))
     f = _FACE.detectMultiScale(gray8, scaleFactor=1.1, minNeighbors=7, minSize=(m, m))
     return [tuple(int(v) for v in r) for r in f]
+
+
+def _face_ev(gray: np.ndarray, faces: list) -> float:
+    """Corrección de exposición (EV) para llevar la piel de las caras a su tono, acotada."""
+    vals, wts = [], []
+    for (x, y, fw, fh) in faces:
+        c = gray[y + fh // 5: y + 4 * fh // 5, x + fw // 5: x + 4 * fw // 5]
+        if c.size:
+            v = float(np.median(c))
+            vals.append(((v + 0.055) / 1.055) ** 2.4 if v > 0.04045 else v / 12.92)
+            wts.append(fw * fh)
+    if not vals:
+        return 0.0
+    order = np.argsort(vals)
+    cum = np.cumsum(np.array(wts, float)[order])
+    lum = max(float(np.array(vals)[order][np.searchsorted(cum, cum[-1] / 2)]), 1e-4)
+    return float(np.clip(math.log2(FACE_TARGET / lum), -0.7, 0.9))
 
 
 def sharpness(gray: np.ndarray) -> float:
@@ -328,9 +348,7 @@ def analyze(ph: Photo, st: Settings) -> Photo:
         read_meta(ph)
         lin = load_linear(ph.path, half=True)
         ph.ev, ph.ev_raw, ph.clipped = estimate_ev(lin)
-        ph.ev = float(np.clip(ph.ev + st.ev_comp, -2.5, 5.0))
         g = tone(lin, ph.ev)
-        del lin
         s = 1600 / max(g.shape[:2])
         if s < 1:
             g = cv2.resize(g, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
@@ -344,6 +362,17 @@ def analyze(ph: Photo, st: Settings) -> Photo:
             g8 = (np.clip(gray, 0, 1) * 255).astype(np.uint8)
         faces = _faces(g8)
         ph.faces = len(faces)
+        # medición en las caras: en fotos de evento lo que tiene que quedar bien expuesto es la piel
+        d_ev = _face_ev(gray, faces)
+        ev = float(np.clip(ph.ev + d_ev + st.ev_comp, -2.5, EV_MAX + 0.5))
+        if abs(ev - ph.ev) > 0.1:
+            g = tone(lin, ev)
+            if s < 1:
+                g = cv2.resize(g, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            g = rotate(g, ph.angle)
+            gray = cv2.cvtColor(g, cv2.COLOR_RGB2GRAY)
+        ph.ev = ev
+        del lin
         ph.crops, ph.scores, ph.best = plan_crops(gray, faces)
         t = Image.fromarray((np.clip(g, 0, 1) * 255).astype(np.uint8))
         t.thumbnail((220, 220))
@@ -365,7 +394,7 @@ def cull(photos: list[Photo], st: Settings) -> None:
         for p in ok:
             if p.clipped > 0.30:
                 p.keep, p.reason = False, f"Sobreexpuesta ({p.clipped:.0%} quemado)"
-            elif p.ev_raw > 5.5:
+            elif p.ev_raw > EV_HOPELESS:
                 p.keep, p.reason = False, f"Subexpuesta sin arreglo ({p.ev_raw:+.1f} EV)"
     if st.cull_focus:
         med = float(np.median([p.sharp for p in ok])) if len(ok) >= 5 else 0.0

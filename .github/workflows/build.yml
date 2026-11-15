@@ -29,25 +29,25 @@ jobs:
         run: python -m unittest discover -s tests
       - name: Compilar .exe
         run: >
-          pyinstaller --noconfirm --onefile --windowed --name FotoLote
+          pyinstaller --noconfirm --onefile --windowed --name EventEdits
           --collect-all rawpy --collect-data cv2 app.py
       - name: Comprobar que el .exe arranca y procesa
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath dist\FotoLote.exe -ArgumentList "--selftest" -Wait -PassThru
-          Get-Content "$env:TEMP\fotolote_selftest.log"
+          $p = Start-Process -FilePath dist\EventEdits.exe -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:TEMP\eventedits_selftest.log"
           if ($p.ExitCode -ne 0) { exit 1 }
       - name: Suma de verificación
         shell: pwsh
         run: |
-          $h = (Get-FileHash dist\FotoLote.exe -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path dist\FotoLote.exe.sha256 -Value $h -NoNewline -Encoding ascii
+          $h = (Get-FileHash dist\EventEdits.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path dist\EventEdits.exe.sha256 -Value $h -NoNewline -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
-          name: FotoLote
-          path: dist/FotoLote.exe*
+          name: EventEdits
+          path: dist/EventEdits.exe*
       - name: Publicar release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/FotoLote.exe dist/FotoLote.exe.sha256 --title "FotoLote ${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" dist/EventEdits.exe dist/EventEdits.exe.sha256 --title "EventEdits ${{ github.ref_name }}" --generate-notes
