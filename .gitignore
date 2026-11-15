@@ -1,0 +1,6 @@
+__pycache__/
+build/
+dist/
+*.spec
+client_secret*.json
+drive_token.json

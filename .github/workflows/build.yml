@@ -1,0 +1,53 @@
+name: Compilar y publicar
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Dependencias
+        run: pip install -r requirements.txt pyinstaller
+      - name: Versión desde la etiqueta
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          Set-Content -Path version.py -Value "__version__ = `"$v`"" -Encoding utf8
+      - name: Pruebas
+        run: python -m unittest discover -s tests
+      - name: Compilar .exe
+        run: >
+          pyinstaller --noconfirm --onefile --windowed --name FotoLote
+          --collect-all rawpy --collect-data cv2 app.py
+      - name: Comprobar que el .exe arranca y procesa
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\FotoLote.exe -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:TEMP\fotolote_selftest.log"
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Suma de verificación
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash dist\FotoLote.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path dist\FotoLote.exe.sha256 -Value $h -NoNewline -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FotoLote
+          path: dist/FotoLote.exe*
+      - name: Publicar release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" dist/FotoLote.exe dist/FotoLote.exe.sha256 --title "FotoLote ${{ github.ref_name }}" --generate-notes

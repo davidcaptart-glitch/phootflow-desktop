@@ -1,0 +1,6 @@
+PySide6-Essentials>=6.7
+rawpy>=0.21
+opencv-python-headless>=4.9,<5
+numpy>=1.26
+Pillow>=10
+exifread>=3
