@@ -60,6 +60,33 @@ Sesión/
 - **Blanco y negro editorial** (opción): mezcla de canales pensada para la piel, contraste local, negros densos
   sin empastar, blancos limpios y grano fino.
 
+## Edición uniforme
+
+La sesión entera se revela con **un único ajuste**, como al sincronizar ajustes en Lightroom: una sola curva y
+un solo color para todas las fotos, y el brillo (sobre todo el de las caras) igualado entre fotos del mismo
+momento. Por foto solo cambia lo que no altera el aspecto: limpieza del grano según el ruido medido de cada
+foto, enderezado, recorte y rescate de luces quemadas por el flash.
+
+- **Look de la cámara** (opción): parte del contraste y el color del JPEG que lleva el RAW (mediana de la sesión).
+
+## LUT por tipo de sesión
+
+En **Tipo de sesión → Importar LUT…** se asocian uno o varios `.cube` (Lightroom, Premiere, DaVinci…) a cada
+tipo de sesión (también hay LUT comunes). Se elige el LUT y su intensidad; el programa iguala la sesión, quita
+su propia curva y color para no duplicarlos y aplica el mismo LUT a todas las fotos. Las fotos a las que el LUT
+les sienta peor que al resto (se queman, se empastan o cambian mucho de brillo) salen en **Avisos** como
+«Revisar LUT», y en cada foto se puede bajar la intensidad del LUT solo para ella. Se guardan en
+`%APPDATA%\PhootFlow\luts\<tipo>\`.
+
+## IA (local, sin subir fotos)
+
+- **Tipo de evento** con CLIP (ViT-B/32 cuantizado, MIT; 89 MB que se descargan y verifican la primera vez).
+  Acertó 15 de 15 sesiones reales del autor.
+- **Ojos cerrados** con MediaPipe Face Landmarker (Apache-2.0; 3,6 MB). Avisa, o descarta si se activa la opción;
+  en las ráfagas se queda con la foto de ojos abiertos y cara nítida.
+
+Todo funciona sin conexión una vez descargados los modelos; sin ellos se usan los métodos clásicos.
+
 ## Selección automática
 
 - Desenfocadas o movidas (relativo a la nitidez media de la sesión).

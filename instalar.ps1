@@ -27,6 +27,7 @@ Copy-Item -Recurse -Force (Join-Path $x "PhootFlow\*") $dest
 
 Write-Host "Instalando dependencias…"
 & $py -m pip install --disable-pip-version-check -q -r (Join-Path $dest "requirements.txt")
+& $py -m pip install --disable-pip-version-check -q --no-deps -r (Join-Path $dest "requirements-nodeps.txt")
 
 $pyw = Join-Path (Split-Path $py) "pythonw.exe"
 if (-not (Test-Path $pyw)) { $pyw = $py }

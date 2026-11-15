@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 
 import drive as gdrive
 import engine as E
+import luts as L
 import styles as S
 import theme as T
 import updater
@@ -68,6 +69,7 @@ class Worker(QThread):
     progress = Signal(int, int, str)
     photo = Signal(int)
     scene = Signal(str, dict)  # tipo detectado, parámetros
+    calibrated = Signal(dict)  # ajustes únicos de la sesión (curva, color) para el revelado
     done = Signal(str, str)  # resumen, enlace
     failed = Signal(str)
 
@@ -125,6 +127,13 @@ class Worker(QThread):
             self.st.style, self.st.style_name = dict(S.PRESETS[name]), name
             self.scene.emit(name, self.st.style)
             detected = f"Tipo detectado: {name}. "
+        # una sola curva y un solo color para toda la sesión, y exposición igualada entre fotos
+        session = E.calibrate_session(self.photos, self.st)
+        self.st.style = dict(self.st.style, **session)
+        self.calibrated.emit(session)
+        for i, p in enumerate(self.photos):
+            if p.thumb:
+                self.photo.emit(i)
         E.cull(self.photos, self.st)
         keep = sum(p.keep for p in self.photos)
         warn = sum(1 for p in self.photos if p.warn)
@@ -310,6 +319,20 @@ class LearnDialog(QDialog):
         self.b_cancel.setText("Listo")
 
 
+def ensure_extras() -> None:
+    """En la instalación con Python: si faltan los paquetes que se instalan sin dependencias (MediaPipe),
+    instalarlos una vez. Cubre la actualización desde versiones cuyo actualizador no los conocía."""
+    import importlib.util
+    import subprocess
+    req = os.path.join(updater.APP_DIR, "requirements-nodeps.txt")
+    if updater.mode() != "source" or not os.path.exists(req) or importlib.util.find_spec("mediapipe"):
+        return
+    subprocess.run([sys.executable.replace("pythonw.exe", "python.exe"), "-m", "pip", "install", "-q",
+                    "--disable-pip-version-check", "--no-deps", "-r", req],
+                   check=False, creationflags=0x08000000 if os.name == "nt" else 0)
+    importlib.invalidate_caches()
+
+
 def _fmt_time(sec: float) -> str:
     sec = int(max(0, sec))
     return f"{sec // 60} min {sec % 60:02d} s" if sec >= 60 else f"{sec} s"
@@ -357,8 +380,8 @@ def np_to_pixmap(a: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(QImage(a.data, w, h, 3 * w, QImage.Format_RGB888).copy())
 
 
-def render_preview(ph: E.Photo) -> np.ndarray:
-    """Vista previa con la exposición y el giro actuales, partiendo de la generada en el análisis."""
+def render_preview(ph: E.Photo, style: dict | None = None) -> np.ndarray:
+    """Vista previa con la exposición y el giro actuales, el color de la sesión y el LUT (si hay)."""
     from PIL import Image
     import io
     src = ph.preview_path if ph.preview_path else io.BytesIO(ph.preview)
@@ -369,6 +392,16 @@ def render_preview(ph: E.Photo) -> np.ndarray:
         a = E.tone(lin, d_ev)
     if abs(d_ang) > 0.01:
         a = E.rotate(a, d_ang)
+    if style:
+        a = S.apply_color(np.clip(a, 0, 1).astype(np.float32), style)
+        if style.get("cube"):
+            k = float(style.get("cube_strength", 1.0)) if ph.lut_strength is None else float(ph.lut_strength)
+            try:
+                a = L.apply(a, style["cube"], k)
+            except Exception:
+                pass
+        if style.get("bw"):
+            a = E.bw_editorial(a, seed=ph.dhash & 0xFFFFFFFF)
     return (np.clip(a, 0, 1) * 255).astype(np.uint8)
 
 
@@ -505,6 +538,8 @@ class PreviewLabel(QLabel):
 
 class Main(QMainWindow):
     update_found = Signal(dict, bool)  # info, comprobación pedida a mano
+    recalibrated = Signal(dict)        # ajustes de sesión recalculados (p. ej. al cambiar de LUT)
+    models_status = Signal(str)        # mensajes de la descarga/carga de los modelos de IA
 
     def __init__(self):
         super().__init__()
@@ -540,6 +575,9 @@ class Main(QMainWindow):
         self.upd_timer.timeout.connect(lambda: self.check_update(False))
         self.upd_timer.start(UPDATE_EVERY_MS)
         QTimer.singleShot(1500, lambda: self.check_update(False))
+        self.recalibrated.connect(self.on_recalibrated)
+        self.models_status.connect(lambda t: self.status.setText(t))
+        QTimer.singleShot(800, self.load_models)
 
     # ---------------------------------------------------------- construcción
     def build_sidebar(self) -> QWidget:
@@ -600,9 +638,28 @@ class Main(QMainWindow):
         b_learn.clicked.connect(self.learn_style)
         cv.addWidget(self.style_cb)
         cv.addWidget(self.style_info)
+        self.lut_cb = QComboBox()
+        self.lut_cb.setToolTip("LUT (.cube) asociados a este tipo de sesión, más los comunes.\n"
+                               "Con un LUT elegido, el programa iguala la sesión y aplica el mismo LUT a todas.")
+        self.lut_k = QSpinBox()
+        self.lut_k.setRange(0, 100)
+        self.lut_k.setSuffix(" %")
+        self.lut_k.setValue(100)
+        b_lut = button("Importar LUT…", "small", "Añade uno o varios .cube a este tipo de sesión")
+        b_lut.clicked.connect(self.import_luts)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(self.lut_cb, 1)
+        row.addWidget(self.lut_k)
+        cv.addLayout(row)
+        cv.addWidget(b_lut)
         cv.addWidget(b_learn)
         v.addWidget(c)
         self.detected: tuple[str, dict] | None = None
+        self.session_extra: dict = {}
+        self._lut_loading = False
+        self.lut_cb.currentIndexChanged.connect(self.on_lut_changed)
+        self.lut_k.valueChanged.connect(self.on_lut_changed)
         self.reload_styles()
 
         # --- edición
@@ -615,9 +672,17 @@ class Main(QMainWindow):
         self.evc.setSuffix(" EV")
         self.straight = QCheckBox("Enderezar automáticamente")
         self.straight.setChecked(True)
+        self.c_uniform = QCheckBox("Edición uniforme en toda la sesión")
+        self.c_uniform.setToolTip("Una sola curva y un solo color para todas las fotos, y el mismo brillo\n"
+                                  "(sobre todo en las caras) entre fotos del mismo momento.")
+        self.c_cam = QCheckBox("Partir del look de la cámara")
+        self.c_cam.setToolTip("Toma el contraste y el color del JPEG que lleva el RAW (mediana de la sesión).\n"
+                              "No se usa con los estilos aprendidos, que ya llevan tu aspecto.")
         cv.addWidget(labeled("Reducción de grano", self.nr))
         cv.addWidget(labeled("Compensar exposición", self.evc))
         cv.addWidget(self.straight)
+        cv.addWidget(self.c_uniform)
+        cv.addWidget(self.c_cam)
         v.addWidget(c)
 
         # --- descarte
@@ -626,7 +691,8 @@ class Main(QMainWindow):
         self.c_exp = QCheckBox("Exposición irrecuperable")
         self.c_dup = QCheckBox("Casi duplicadas (deja la más nítida)")
         self.c_move = QCheckBox("Al exportar, mover descartes a «Descartadas»")
-        for w in (self.c_focus, self.c_exp, self.c_dup, self.c_move):
+        self.c_eyes = QCheckBox("Ojos cerrados (descartar; si no, solo avisa)")
+        for w in (self.c_focus, self.c_exp, self.c_dup, self.c_eyes, self.c_move):
             w.setChecked(True)
             cv.addWidget(w)
         self.sens = QComboBox()
@@ -863,6 +929,12 @@ class Main(QMainWindow):
         cv.addWidget(labeled("Exposición", self.p_ev))
         cv.addWidget(labeled("Giro", self.p_ang))
         cv.addWidget(labeled("Formato sugerido", self.p_fmt))
+        self.p_lut = QSpinBox()
+        self.p_lut.setRange(0, 100)
+        self.p_lut.setSuffix(" %")
+        self.p_lut.setToolTip("Intensidad del LUT solo en esta foto (las demás no cambian).")
+        self.p_lut.valueChanged.connect(self.on_photo_lut)
+        cv.addWidget(labeled("LUT en esta foto", self.p_lut))
         v.addWidget(c)
         self.p_card = c
         c.setEnabled(False)
@@ -886,6 +958,9 @@ class Main(QMainWindow):
         self.c_exif.setChecked(b("exif", True))
         self.c_xmp.setChecked(b("xmp", False))
         self.c_bw.setChecked(b("bw", False))
+        self.c_uniform.setChecked(b("uniform", True))
+        self.c_cam.setChecked(b("cam", True))
+        self.c_eyes.setChecked(b("eyes", False))
         self.style_cb.setCurrentText(g("style", S.AUTO))
         self.c_zip.setChecked(b("zip", True))
         self.c_up_orig.setChecked(b("up_orig", True))
@@ -899,6 +974,7 @@ class Main(QMainWindow):
         for k, v in [("src", self.src.text()), ("out", self.out.text()), ("nr", st.nr), ("sens", st.sensitivity),
                      ("ratios", ",".join(st.ratios)), ("sizes", ",".join(st.sizes)),
                      ("orig", st.export_original_ratio), ("exif", st.keep_exif), ("xmp", st.write_xmp), ("bw", st.bw),
+                     ("uniform", st.uniform), ("cam", st.camera_look), ("eyes", st.cull_eyes),
                      ("style", self.style_cb.currentText()),
                      ("zip", st.archive_originals), ("up_orig", self.c_up_orig.isChecked()),
                      ("quality", st.quality), ("workers", st.workers),
@@ -915,7 +991,14 @@ class Main(QMainWindow):
         style_name, style = self.resolved_style()
         ratios = [k for k, c in self.ratio_cb.items() if c.isChecked()]
         ratios += [r for r in style.get("formats", []) if r in E.RATIOS and r not in ratios]
+        cube = self.lut_cb.currentData() if hasattr(self, "lut_cb") else None
+        if cube:
+            style = dict(style, cube=cube, cube_strength=self.lut_k.value() / 100)
+        if self.session_extra and bool(self.session_extra.get("_cube")) == bool(cube):
+            style = dict(style, **{k: v for k, v in self.session_extra.items() if k != "_cube"})
         return E.Settings(style=style, style_name=style_name,
+            uniform=self.c_uniform.isChecked(), camera_look=self.c_cam.isChecked(),
+            cull_eyes=self.c_eyes.isChecked(),
             nr=self.nr.currentText(), straighten=self.straight.isChecked(), ev_comp=self.evc.value(),
             cull_focus=self.c_focus.isChecked(), cull_exposure=self.c_exp.isChecked(),
             cull_dupes=self.c_dup.isChecked(), sensitivity=self.sens.currentText(),
@@ -945,6 +1028,96 @@ class Main(QMainWindow):
         self.style_cb.blockSignals(False)
         self.on_style_changed(self.style_cb.currentText())
 
+    def lut_kind(self) -> str:
+        name = self.style_cb.currentText()
+        if name == S.AUTO:
+            return self.detected[0] if self.detected else L.COMMON
+        if name.startswith("Mi estilo: "):
+            return S.all_styles(CFG_DIR).get(name, {}).get("_base") or L.COMMON
+        return name
+
+    def reload_luts(self):
+        kind = self.lut_kind()
+        self._lut_loading = True
+        self.lut_cb.clear()
+        self.lut_cb.addItem("Sin LUT", None)
+        for label, path in L.available(CFG_DIR, kind):
+            self.lut_cb.addItem(label, path)
+        want = self.s.value(f"lut/{L.folder_name(kind)}", "")
+        idx = self.lut_cb.findData(want) if want else 0
+        self.lut_cb.setCurrentIndex(max(0, idx))
+        self.lut_k.setValue(int(self.s.value(f"lutk/{L.folder_name(kind)}", 100)))
+        self.lut_k.setEnabled(self.lut_cb.currentData() is not None)
+        self._lut_loading = False
+
+    def import_luts(self):
+        kind = self.lut_kind()
+        files, _ = QFileDialog.getOpenFileNames(self, f"LUT para «{kind}»", "", "LUT (*.cube)")
+        if not files:
+            return
+        try:
+            done = L.import_luts(CFG_DIR, kind, files)
+        except Exception as e:
+            return QMessageBox.warning(self, APP, f"No se pudo importar: {e}")
+        self.reload_luts()
+        self.lut_cb.setCurrentIndex(max(0, self.lut_cb.findData(done[-1])))
+        self.status.setText(f"{len(done)} LUT añadidos a «{kind}».")
+
+    def on_lut_changed(self, *_):
+        if self._lut_loading:
+            return
+        kind = L.folder_name(self.lut_kind())
+        self.s.setValue(f"lut/{kind}", self.lut_cb.currentData() or "")
+        self.s.setValue(f"lutk/{kind}", self.lut_k.value())
+        self.lut_k.setEnabled(self.lut_cb.currentData() is not None)
+        self.recalibrate()
+
+    def recalibrate(self):
+        """Recalcula los ajustes únicos de la sesión (y el aviso «Revisar LUT») sin bloquear la ventana."""
+        if not any(p.thumb for p in self.photos) or self.worker:
+            return self.show_preview() if hasattr(self, "preview") else None
+        saved, self.session_extra = self.session_extra, {}
+        st = self.settings()
+        self.session_extra = saved
+        self.status.setText("Recalculando la sesión con el nuevo ajuste…")
+
+        def job():
+            extra = E.calibrate_session(self.photos, st)
+            extra["_cube"] = st.style.get("cube") or ""
+            self.recalibrated.emit(extra)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def on_recalibrated(self, extra):
+        self.session_extra = extra
+        n = sum(1 for p in self.photos if E.LUT_WARN in p.warn)
+        self.status.setText("Sesión recalculada." + (f" {n} fotos a revisar con el LUT (filtro «Avisos»)." if n else ""))
+        self.refresh_counts()
+        self.apply_filter()
+        self.grid.viewport().update()
+        if self.grid.currentRow() >= 0:
+            self.on_select(self.grid.currentRow())
+
+    def load_models(self):
+        """Carga (y la primera vez descarga) los modelos de IA en segundo plano: ojos cerrados (3,6 MB)
+        y tipo de evento (89 MB). Si no hay red, la app usa los métodos sin IA."""
+        model_dir = os.path.join(CFG_DIR, "modelos")
+
+        def prog(a, b):
+            if b:
+                self.models_status.emit(f"Descargando el modelo de IA de tipo de evento ({a * 100 // b} %)…")
+
+        def job():
+            ensure_extras()
+            E.setup_eyes(model_dir)
+            E.setup_scene_ai(model_dir, prog)
+            bits = ["ojos cerrados" if E.EYES["ready"] else "", "tipo de evento" if E.AI["ready"] else ""]
+            bits = [b for b in bits if b]
+            self.models_status.emit("IA lista: " + " y ".join(bits) + "." if bits else
+                                    "IA no disponible (sin conexión la primera vez): se usan los métodos clásicos.")
+
+        threading.Thread(target=job, daemon=True).start()
+
     def on_style_changed(self, name):
         if name == S.AUTO:
             if self.detected:
@@ -954,10 +1127,16 @@ class Main(QMainWindow):
                                         "Si lo sabes, elígelo tú.")
         else:
             self.style_info.setText(S.describe(S.all_styles(CFG_DIR).get(name, S.BASE)))
+        if hasattr(self, "lut_cb"):
+            self.reload_luts()
+            if not self._lut_loading:
+                self.recalibrate()
 
     def on_scene(self, name, params):
         self.detected = (name, params)
-        self.on_style_changed(self.style_cb.currentText())
+        self.style_info.setText(f"Detectado: {name} — {S.describe(params)}")
+        if self.style_cb.currentText() == S.AUTO:
+            self.reload_luts()
 
     def learn_style(self):
         dlg = LearnDialog(self)
@@ -1066,15 +1245,19 @@ class Main(QMainWindow):
         state = ph.error or ph.reason or ("Para editar" if ph.thumb else "Sin analizar")
         info = " · ".join(bits)
         self.p_info.setText(f"{state}{'  —  ' + info if info else ''}" + (f"\n⚠ {ph.warn}" if ph.warn else ""))
-        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt):
+        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut):
             w.blockSignals(True)
+        has_lut = self.lut_cb.currentData() is not None
+        self.p_lut.setEnabled(has_lut)
+        self.p_lut.setValue(int(round(100 * (ph.lut_strength if ph.lut_strength is not None
+                                             else self.lut_k.value() / 100))))
         self.p_keep.setChecked(ph.keep)
         self.p_ev.setValue(ph.ev)
         self.p_ang.setValue(ph.angle)
         self.p_fmt.clear()
         self.p_fmt.addItems(list(ph.crops) or ["Original"])
         self.p_fmt.setCurrentText(ph.best)
-        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt):
+        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut):
             w.blockSignals(False)
         self.p_card.setEnabled(bool(ph.thumb) and not ph.error and not self.worker)
         self.show_preview()
@@ -1084,8 +1267,17 @@ class Main(QMainWindow):
         if not ph or not (ph.preview or ph.preview_path):
             pm = self.thumb_pixmap(ph) if ph else None
             return self.preview.set_image(pm, None)
-        pm = np_to_pixmap(render_preview(ph))
+        pm = np_to_pixmap(render_preview(ph, self.settings().style))
         self.preview.set_image(pm, ph.crops.get(ph.best), dim=not ph.keep)
+
+    def on_photo_lut(self, v):
+        ph = self.cur
+        if not ph or not ph.thumb:
+            return
+        ph.lut_strength = None if v == self.lut_k.value() else v / 100
+        ph.warn = " · ".join(w for w in ph.warn.split(" · ") if w and not w.startswith(E.LUT_WARN))
+        self.show_preview()
+        self.grid.viewport().update()
 
     def on_photo_edit(self, *_):
         ph = self.cur
@@ -1133,6 +1325,7 @@ class Main(QMainWindow):
         self.sub.setText(f"{len(self.photos)} fotos · {src}")
         self.cur = None
         self.detected = None
+        self.session_extra = {}
         self.on_style_changed(self.style_cb.currentText())
         cloud = self.cloud_params() if auto else None
         if auto and cloud is None:
@@ -1164,6 +1357,7 @@ class Main(QMainWindow):
         self.run(Worker("export", self.photos, st, self.src.text().strip(), self.out_dir(), cloud))
 
     def run(self, worker):
+        st_cube = worker.st.style.get("cube") or ""
         if worker.mode in ("analyze", "auto"):
             E.prepare_detectors(worker.st.workers)  # en el hilo principal (ver engine.prepare_detectors)
         self.worker = worker
@@ -1173,6 +1367,7 @@ class Main(QMainWindow):
         worker.progress.connect(self.on_progress)
         worker.photo.connect(self.on_photo)
         worker.scene.connect(self.on_scene)
+        worker.calibrated.connect(lambda d: setattr(self, "session_extra", dict(d, _cube=st_cube)))
         worker.done.connect(self.on_done)
         worker.failed.connect(self.on_failed)
         self.busy(True)
@@ -1322,6 +1517,16 @@ def selftest() -> int:
         assert len(ps) == 2 and not any(p.error for p in ps), [p.error for p in ps]
         assert E._detector("yunet") is not False, "falta el modelo YuNet"
         assert not E._detector("eye").empty()
+        # la IA tiene que viajar dentro del .exe (los modelos se descargan al usarla; aquí solo los paquetes)
+        import eyes
+        import onnxruntime  # noqa: F401
+        import scene_ai  # noqa: F401
+        eyes._mediapipe()
+        assert os.path.exists(E.asset("text_embeddings.npy"))
+        import luts as LL
+        cube = os.path.join(d, "t.cube")
+        LL.write_cube(cube, 9, lambda x: x)
+        assert abs(float(LL.apply(np.full((4, 4, 3), 0.5, np.float32), cube).mean()) - 0.5) < 0.01
         E.cull(ps, st)
         for p in ps:
             p.keep = True

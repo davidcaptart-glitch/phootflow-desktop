@@ -171,6 +171,95 @@ class PhootFlowExtras(unittest.TestCase):
         self.assertGreater(out[..., 0].mean() - out[..., 2].mean(), img[..., 0].mean() - img[..., 2].mean())
 
 
+class Uniformity(unittest.TestCase):
+    """La sesión se edita de forma uniforme: un único ajuste para todas y brillos igualados."""
+
+    def _ph(self, name, sec, ev, face, **kw):
+        import datetime as dtm
+        p = E.Photo(path=name, name=name, when=dtm.datetime(2026, 1, 1, 22, 0, 0) + dtm.timedelta(seconds=sec),
+                    ev=ev, ev_auto=ev, face_lin=face, lum_med=0.01, thumb=b"x",
+                    tone_q=list(np.linspace(0, 100, 64)), chroma=10.0, ab=[1.0, 2.0], **kw)
+        return p
+
+    def test_exposure_is_equalized_and_style_is_one_for_all(self):
+        ps = [self._ph(f"p{i}", i * 10, 3.0, 0.02) for i in range(6)]
+        ps[2].face_lin = 0.005  # cara 2 EV más oscura que las demás
+        st = E.Settings(style={"target_q": list(np.linspace(5, 95, 256)), "target_chroma": 15.0, "strength": 0.6})
+        sess = E.calibrate_session(ps, st)
+        self.assertGreater(ps[2].ev, 3.5)  # sube para parecerse a sus vecinas
+        self.assertAlmostEqual(ps[0].ev, 3.0, delta=0.05)
+        self.assertEqual(len(sess["lut"]), 256)  # una sola curva para todas
+        self.assertIsNone(sess["target_q"])  # ya no se ajusta foto a foto
+        self.assertGreater(sess["chroma"], 1.0)
+
+    def test_burst_keeps_open_eyes_and_sharp_face(self):
+        ps = [self._ph(f"b{i}", 0.3 * i, 3.0, 0.02, sharp=0.05, face_sharp=0.05, dhash=0, eyes_open=1.0)
+              for i in range(4)]
+        ps[1].face_sharp = 0.09  # la más nítida… pero con los ojos cerrados
+        ps[1].eyes_open = 0.0
+        ps[3].face_sharp = 0.08
+        E.cull(ps, E.Settings(cull_focus=False, cull_exposure=False))
+        self.assertEqual([p.name for p in ps if p.keep], ["b3"])
+        self.assertIn("Ráfaga", ps[0].reason)
+
+    def test_noise_measure_tracks_real_noise(self):
+        rng = np.random.default_rng(3)
+        flat = np.full((800, 800), 0.4, np.float32)
+        lo = E.noise_sigma(flat + rng.normal(0, 0.01, flat.shape).astype(np.float32))
+        hi = E.noise_sigma(flat + rng.normal(0, 0.04, flat.shape).astype(np.float32))
+        self.assertAlmostEqual(hi / lo, 4.0, delta=0.6)
+
+
+class Luts(unittest.TestCase):
+    def setUp(self):
+        import luts as L
+        self.L = L
+        self.d = tempfile.mkdtemp()
+
+    def test_identity_warm_and_1d(self):
+        idp, warm = os.path.join(self.d, "id.cube"), os.path.join(self.d, "warm.cube")
+        self.L.write_cube(idp, 17, lambda x: x)
+        self.L.write_cube(warm, 17, lambda x: x * np.array([1.1, 1.0, 0.85], np.float32))
+        img = np.random.default_rng(1).random((50, 70, 3)).astype(np.float32)
+        self.assertLess(np.abs(self.L.apply(img, idp) - img).max(), 1e-4)
+        w = self.L.apply(img, warm)
+        self.assertGreater(w[..., 0].mean(), img[..., 0].mean())
+        half = self.L.apply(img, warm, 0.5)
+        self.assertAlmostEqual(float(half[..., 2].mean()), float((img[..., 2].mean() + w[..., 2].mean()) / 2),
+                               delta=1e-3)
+        one = os.path.join(self.d, "inv.cube")
+        with open(one, "w") as f:
+            f.write("LUT_1D_SIZE 2\n1 1 1\n0 0 0\n")
+        self.assertLess(np.abs(self.L.apply(img, one) - (1 - img)).max(), 1e-4)
+        with open(os.path.join(self.d, "malo.cube"), "w") as f:
+            f.write("hola\n")
+        with self.assertRaises(ValueError):
+            self.L.import_luts(self.d, "Boda", [os.path.join(self.d, "malo.cube")])
+        self.L.import_luts(self.d, "Boda", [warm])
+        self.assertEqual([n for n, _ in self.L.available(self.d, "Boda")], ["warm"])
+
+    def test_lut_review_flags_only_the_photos_it_ruins(self):
+        import io as _io
+        burn = os.path.join(self.d, "burn.cube")
+        self.L.write_cube(burn, 17, lambda x: np.clip(x * 1.25, 0, 1))
+        ps = []
+        for i, level in enumerate([0.3, 0.32, 0.35, 0.3, 0.85]):  # la última ya es muy clara
+            b = _io.BytesIO()
+            Image.fromarray(np.full((40, 60, 3), int(level * 255), np.uint8)).save(b, "JPEG")
+            ps.append(E.Photo(path=f"p{i}", name=f"p{i}", thumb=b.getvalue()))
+        n = E.lut_review(ps, burn, 1.0)
+        self.assertEqual(n, 1)
+        self.assertIn(E.LUT_WARN, ps[-1].warn)
+        ps[-1].lut_strength = 0.0  # el usuario quita el LUT en esa foto
+        self.assertEqual(E.lut_review(ps, burn, 1.0), 0)
+
+    def test_scene_detection_uses_ai_votes(self):
+        import styles as S
+        ps = [E.Photo(path=str(i), scene_ai={"Deporte": 0.7, "Boda": 0.3}) for i in range(3)]
+        ps += [E.Photo(path="x", scene_ai={"Deporte": 0.1, "Boda": 0.9})]
+        self.assertEqual(S.detect_scene(ps)[0], "Deporte")
+
+
 class Updater(unittest.TestCase):
     def test_versions(self):
         self.assertTrue(updater.is_newer("v0.10.0", "0.9.9"))

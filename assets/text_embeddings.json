@@ -1,0 +1,67 @@
+{
+ "model": "Xenova/clip-vit-base-patch32 (openai/clip-vit-base-patch32)",
+ "logit_scale": 100.0,
+ "keys": [
+  "Boda",
+  "Cumpleaños / fiesta",
+  "Discoteca / noche",
+  "Deporte",
+  "Retrato / estudio",
+  "Exterior / paisaje"
+ ],
+ "prompts": {
+  "Boda": [
+   "a photo of a wedding ceremony",
+   "a photo of a bride and groom",
+   "a bride in a white wedding dress",
+   "a wedding reception with guests",
+   "a photo of a first communion",
+   "a child in a first communion dress in a church",
+   "a religious ceremony in a church",
+   "elegant guests in formal attire at a wedding"
+  ],
+  "Cumpleaños / fiesta": [
+   "a photo of a birthday party",
+   "a birthday cake with candles",
+   "people celebrating at a party",
+   "a family celebration with balloons and decorations",
+   "a children's birthday party",
+   "a quinceañera party",
+   "friends having fun at a celebration",
+   "guests at a party table with food and drinks"
+  ],
+  "Discoteca / noche": [
+   "a photo of a nightclub",
+   "people dancing in a nightclub with colorful lights",
+   "a DJ playing music at a night party",
+   "a crowd at a concert with stage lights",
+   "a dark dance floor with laser lights",
+   "a night party with neon lights",
+   "young people partying at a disco at night"
+  ],
+  "Deporte": [
+   "a photo of a sports match",
+   "athletes playing football",
+   "a soccer game on a field",
+   "a basketball game",
+   "a runner in a race",
+   "a sports team on a field",
+   "a player in action during a game"
+  ],
+  "Retrato / estudio": [
+   "a studio portrait of a person",
+   "a professional headshot",
+   "a portrait photo against a plain background",
+   "a posed portrait photo in a photo studio",
+   "a close-up portrait of a face"
+  ],
+  "Exterior / paisaje": [
+   "a landscape photo",
+   "a photo of mountains and nature",
+   "a beach at sunset",
+   "a city skyline",
+   "a scenic outdoor view",
+   "a photo of a forest"
+  ]
+ }
+}

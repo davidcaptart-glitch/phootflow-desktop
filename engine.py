@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageCms, ImageOps, TiffImagePlugin
 
+import luts
 import styles
 
 try:
@@ -51,6 +52,7 @@ SHARP_ABS_MIN = 0.008  # por debajo de esto no hay nada nítido en la imagen
 EV_MAX = 5.0            # tope de subida de exposición
 EV_HOPELESS = 7.5       # a partir de aquí la foto se considera irrecuperable
 FACE_TARGET = 0.32      # luminancia lineal a la que se lleva la piel de las caras
+EYES_CLOSED = 0.35      # por debajo, ojos cerrados (escala 0..1 de Photo.eyes_open)
 
 # Salidas propias (DSC0001_4x5_max.jpg, DSC0001_original_1080.jpg…) y copias editadas: no se reeditan
 OWN_OUTPUT = re.compile(r"((_bn)?_(original|\d+x\d+)_(max|2048|1080)|_editada|_edited)$", re.I)
@@ -91,6 +93,9 @@ class Settings:
     bw: bool = False        # además, versión en blanco y negro editorial (carpeta ByN)
     cache_dir: str = ""     # vistas previas en disco (no en memoria): imprescindible con miles de fotos
     resume: bool = True     # al exportar, saltar las fotos que ya se terminaron en una pasada anterior
+    uniform: bool = True    # una sola curva y color para toda la sesión + exposición igualada
+    camera_look: bool = True  # partir del aspecto del JPEG que lleva el RAW (contraste y color de la cámara)
+    cull_eyes: bool = False   # descartar (no solo avisar) fotos con ojos cerrados claros
 
 
 @dataclass
@@ -119,6 +124,20 @@ class Photo:
     preview_angle: float = 0.0
     feats: dict = field(default_factory=dict)  # rasgos para detectar el tipo de sesión
     warn: str = ""              # avisos que no descartan (p. ej. ojos quizá cerrados)
+    ev_auto: float = 0.0        # exposición automática de la foto sola (antes de igualar la sesión)
+    face_lin: float = 0.0       # luminancia lineal de la piel a 0 EV (0 = sin caras)
+    lum_med: float = 0.0        # mediana de luminancia lineal a 0 EV
+    face_sharp: float = 0.0     # nitidez de la cara principal
+    eyes_open: float = 1.0      # 0 = ojos cerrados … 1 = abiertos (la peor de las caras grandes)
+    noise_y: float = 0.0        # ruido medido (luminancia / color) en la imagen de análisis
+    noise_c: float = 0.0
+    tone_q: list = field(default_factory=list)  # 64 cuantiles de L (Lab) del revelado de análisis
+    cam_q: list = field(default_factory=list)   # … y del JPEG de la cámara llevado al mismo brillo
+    chroma: float = 0.0         # croma mediana del revelado de análisis
+    cam_chroma: float = 0.0     # … y del JPEG de la cámara
+    ab: list = field(default_factory=list)      # mediana a, b del revelado de análisis
+    scene_ai: dict = field(default_factory=dict)  # probabilidad de cada tipo de evento (IA)
+    lut_strength: float | None = None  # intensidad del LUT en esta foto (None = la de la sesión)
     meta: dict = field(default_factory=dict)  # EXIF útil para copiar a los JPG
     error: str = ""
 
@@ -182,14 +201,19 @@ def is_raw(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in RAW_EXT
 
 
-def load_linear(path: str, half: bool) -> np.ndarray:
-    """Imagen en sRGB lineal float32, ya orientada."""
+def load_linear(path: str, half: bool, rebuild_highlights: bool = False) -> np.ndarray:
+    """Imagen en sRGB lineal float32, ya orientada.
+
+    `rebuild_highlights`: reconstruye los canales quemados (frentes y caras con flash directo) en vez de
+    mezclarlos; es más lento, así que solo se usa en las fotos que tienen zonas quemadas.
+    """
     if is_raw(path):
         if rawpy is None:
             raise RuntimeError("Falta la librería rawpy para leer RAW")
         with rawpy.imread(path) as r:
+            hm = rawpy.HighlightMode.Reconstruct(4) if rebuild_highlights else rawpy.HighlightMode.Blend
             kw = dict(use_camera_wb=True, no_auto_bright=True, output_bps=16, gamma=(1, 1),
-                      output_color=rawpy.ColorSpace.sRGB, highlight_mode=rawpy.HighlightMode.Blend)
+                      output_color=rawpy.ColorSpace.sRGB, highlight_mode=hm)
             if half:
                 rgb = r.postprocess(half_size=True, **kw)
             else:
@@ -299,6 +323,12 @@ def prepare_detectors(n: int) -> None:
             d = make()
             _KEEP.append(d)
             q.put(d)
+    if EYES["ready"]:
+        import eyes
+        try:
+            eyes.prepare(n)
+        except Exception:
+            EYES["ready"] = False
 
 
 def _detector(name: str):
@@ -331,8 +361,9 @@ _MAKERS = {"yunet": _make_yunet, "haar": _haar("haarcascade_frontalface_default.
            "eye": _haar("haarcascade_eye_tree_eyeglasses.xml")}
 
 
-def _faces(gray8: np.ndarray) -> list[tuple[int, int, int, int]]:
-    """Caras (x, y, w, h). YuNet aguanta mucho mejor ISO alto, perfiles y luz de discoteca que Haar."""
+def _faces(gray8: np.ndarray, raw: list | None = None) -> list[tuple[int, int, int, int]]:
+    """Caras (x, y, w, h). YuNet aguanta mucho mejor ISO alto, perfiles y luz de discoteca que Haar.
+    Si se pasa `raw`, se le añaden las filas completas de YuNet (con los puntos de ojos, nariz y boca)."""
     yunet = _detector("yunet")
     if yunet is not False:
         h, w = gray8.shape
@@ -342,8 +373,53 @@ def _faces(gray8: np.ndarray) -> list[tuple[int, int, int, int]]:
         m = 0.03 * min(h, w)
         if det is None:
             return []
-        return [(int(max(0, d[0])), int(max(0, d[1])), int(d[2]), int(d[3])) for d in det if d[2] >= m]
+        keep = [d for d in det if d[2] >= m]
+        if raw is not None:
+            raw.extend(keep)
+        return [(int(max(0, d[0])), int(max(0, d[1])), int(d[2]), int(d[3])) for d in keep]
     return _faces_haar(gray8)
+
+
+# --- ojos cerrados con MediaPipe (opcional: si no está o falta el modelo, se usa el aviso con Haar)
+EYES = {"ready": False}
+
+
+def setup_eyes(model_dir: str) -> bool:
+    """Descarga/verifica el modelo de puntos faciales y comprueba que MediaPipe carga. Llamar una vez."""
+    try:
+        import eyes
+        eyes.configure(model_path=eyes.ensure_model(model_dir))
+        eyes._mediapipe()
+        EYES["ready"] = True
+    except Exception as e:  # sin red, sin mediapipe… la app sigue funcionando
+        EYES["ready"], EYES["error"] = False, f"{type(e).__name__}: {e}"
+    return EYES["ready"]
+
+
+AI = {"ready": False, "obj": None}
+
+
+def setup_scene_ai(model_dir: str, progress=None) -> bool:
+    """Descarga/verifica el modelo CLIP (89 MB, la primera vez) y lo deja listo. Llamar una vez."""
+    try:
+        import scene_ai
+        path = scene_ai.ensure_model(model_dir, progress)
+        AI["obj"] = scene_ai.SceneAI(path, asset("text_embeddings.npy"), threads=2)
+        AI["obj"].scores(np.zeros((224, 224, 3), np.float32))  # carga la sesión de onnxruntime
+        AI["ready"] = True
+    except Exception as e:
+        AI["ready"], AI["error"] = False, f"{type(e).__name__}: {e}"
+    return AI["ready"]
+
+
+def _eyes_scores(rgb01: np.ndarray, raw: list) -> list:
+    if not EYES["ready"] or not raw:
+        return []
+    import eyes
+    try:
+        return eyes.eyes_open_scores(rgb01, np.asarray(raw, np.float32))
+    except Exception:
+        return []
 
 
 def _faces_haar(gray8: np.ndarray) -> list[tuple[int, int, int, int]]:
@@ -388,6 +464,22 @@ def face_sharpness(gray: np.ndarray, faces: list) -> float:
     return float(np.percentile(lap, 90) / rng)
 
 
+def face_lum(gray: np.ndarray, faces: list) -> float:
+    """Luminancia lineal de la piel (mediana ponderada por tamaño de cara) en la imagen `gray` (sRGB 0..1)."""
+    vals, wts = [], []
+    for (x, y, fw, fh) in faces:
+        c = gray[y + fh // 5: y + 4 * fh // 5, x + fw // 5: x + 4 * fw // 5]
+        if c.size:
+            v = float(np.median(c))
+            vals.append(((v + 0.055) / 1.055) ** 2.4 if v > 0.04045 else v / 12.92)
+            wts.append(fw * fh)
+    if not vals:
+        return 0.0
+    order = np.argsort(vals)
+    cum = np.cumsum(np.array(wts, float)[order])
+    return float(np.array(vals)[order][np.searchsorted(cum, cum[-1] / 2)])
+
+
 def _face_ev(gray: np.ndarray, faces: list) -> float:
     """Corrección de exposición (EV) para llevar la piel de las caras a su tono, acotada."""
     vals, wts = [], []
@@ -403,6 +495,60 @@ def _face_ev(gray: np.ndarray, faces: list) -> float:
     cum = np.cumsum(np.array(wts, float)[order])
     lum = max(float(np.array(vals)[order][np.searchsorted(cum, cum[-1] / 2)]), 1e-4)
     return float(np.clip(math.log2(FACE_TARGET / lum), -0.7, 0.9))
+
+
+def noise_sigma(ch: np.ndarray) -> float:
+    """Desviación del ruido (método de Immerkær) en una zona central de 768 px. Misma escala que `ch`."""
+    h, w = ch.shape
+    c = ch[max(0, h // 2 - 384): h // 2 + 384, max(0, w // 2 - 384): w // 2 + 384].astype(np.float32)
+    if min(c.shape) < 16:
+        return 0.0
+    k = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
+    r = np.abs(cv2.filter2D(c, -1, k))[1:-1, 1:-1]
+    # sin bordes ni texturas: solo el 50 % más plano de la imagen
+    r = r[r <= np.percentile(r, 50)]
+    return float(math.sqrt(math.pi / 2) * r.mean() / 6.0 * 1.6) if r.size else 0.0
+
+
+def lab_stats(rgb01: np.ndarray) -> tuple[list, float, list]:
+    """64 cuantiles de L, croma mediana y (a, b) medianos de una imagen pequeña."""
+    small = rgb01
+    if max(rgb01.shape[:2]) > 512:
+        s = 512 / max(rgb01.shape[:2])
+        small = cv2.resize(rgb01, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    lab = cv2.cvtColor(np.ascontiguousarray(small, dtype=np.float32), cv2.COLOR_RGB2Lab)
+    q = np.percentile(lab[..., 0], np.linspace(0, 100, 64))
+    mid = (lab[..., 0] > 20) & (lab[..., 0] < 85)
+    if not mid.any():
+        return [round(float(x), 3) for x in q], 0.0, [0.0, 0.0]
+    c = float(np.median(np.hypot(lab[..., 1], lab[..., 2])[mid]))
+    return ([round(float(x), 3) for x in q], round(c, 3),
+            [round(float(np.median(lab[..., 1][mid])), 3), round(float(np.median(lab[..., 2][mid])), 3)])
+
+
+def camera_render(path: str, ref_lin_median: float) -> np.ndarray | None:
+    """JPEG que lleva el RAW, llevado al mismo brillo medio que nuestro revelado (conserva su contraste y
+    color, no su exposición, que en fotos de evento suele ser oscura)."""
+    if not is_raw(path) or rawpy is None:
+        return None
+    try:
+        with rawpy.imread(path) as r:
+            th = r.extract_thumb()
+        if th.format != rawpy.ThumbFormat.JPEG:
+            return None
+        im = Image.open(io.BytesIO(th.data))
+        im.draft("RGB", (640, 640))
+        im = ImageOps.exif_transpose(im).convert("RGB")
+        im.thumbnail((512, 512))
+        x = np.asarray(im, np.float32) / 255.0
+        lin = np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+        med = float(np.median(_luma(lin)))
+        if med <= 1e-4:
+            return None
+        lin = np.clip(lin * (ref_lin_median / med), 0, 1)
+        return np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * np.power(lin, 1 / 2.4) - 0.055).astype(np.float32)
+    except Exception:
+        return None
 
 
 def sharpness(gray: np.ndarray) -> float:
@@ -487,7 +633,12 @@ def analyze(ph: Photo, st: Settings) -> Photo:
         read_meta(ph)
         lin = load_linear(ph.path, half=True)
         ph.ev, ph.ev_raw, ph.clipped = estimate_ev(lin)
+        ph.lum_med = float(np.median(_luma(lin[::4, ::4])))
         g = tone(lin, ph.ev)
+        ycc = cv2.cvtColor(g, cv2.COLOR_RGB2YCrCb)
+        ph.noise_y = noise_sigma(ycc[..., 0])
+        ph.noise_c = max(noise_sigma(ycc[..., 1]), noise_sigma(ycc[..., 2]))
+        del ycc
         s = 1600 / max(g.shape[:2])
         if s < 1:
             g = cv2.resize(g, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
@@ -499,7 +650,8 @@ def analyze(ph: Photo, st: Settings) -> Photo:
         if ph.angle:
             g, gray = rotate(g, ph.angle), rotate(gray, ph.angle)
             g8 = (np.clip(gray, 0, 1) * 255).astype(np.uint8)
-        faces = _faces(g8)
+        raw_faces: list = []
+        faces = _faces(g8, raw_faces)
         ph.faces = len(faces)
         # medición en las caras: en fotos de evento lo que tiene que quedar bien expuesto es la piel
         d_ev = _face_ev(gray, faces)
@@ -510,15 +662,37 @@ def analyze(ph: Photo, st: Settings) -> Photo:
                 g = cv2.resize(g, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
             g = rotate(g, ph.angle)
             gray = cv2.cvtColor(g, cv2.COLOR_RGB2GRAY)
-        ph.ev = ev
+        ph.ev = ph.ev_auto = ev
+        # piel a 0 EV (para igualar la sesión): la medida está hecha con la exposición `ev`
+        fl = face_lum(gray, faces)
+        ph.face_lin = fl / (2 ** ev) if fl else 0.0
         del lin
         ph.crops, ph.scores, ph.best = plan_crops(gray, faces)
-        closed = _eyes_closed((np.clip(gray, 0, 1) * 255).astype(np.uint8), faces)
-        ph.warn = f"Revisar: {closed} cara(s) quizá con ojos cerrados" if closed else ""
-        fs = face_sharpness(gray, faces)
+        ph.warn = ""
+        if EYES["ready"]:  # YuNet trabajó sobre `g8`, que es la misma imagen (ya girada) que `g`
+            sc = [x for x in _eyes_scores(np.clip(g, 0, 1), raw_faces) if x is not None]
+            ph.eyes_open = float(min(sc)) if sc else 1.0
+            if ph.eyes_open < EYES_CLOSED:
+                ph.warn = "Ojos cerrados"
+        else:
+            closed = _eyes_closed((np.clip(gray, 0, 1) * 255).astype(np.uint8), faces)
+            ph.warn = f"Revisar: {closed} cara(s) quizá con ojos cerrados" if closed else ""
+        fs = ph.face_sharp = face_sharpness(gray, faces)
         if faces and 0 < fs < 0.5 * ph.sharp:
             ph.warn = (ph.warn + " · " if ph.warn else "") + "La cara está menos nítida que el fondo"
         ph.feats = styles.scene_features(g, ph)
+        if AI["ready"]:
+            try:
+                ph.scene_ai = AI["obj"].scores(np.clip(g, 0, 1))
+            except Exception:
+                ph.scene_ai = {}
+        ph.tone_q, ph.chroma, ph.ab = lab_stats(g)
+        if st.camera_look:
+            gc = np.clip(g, 0, 1)
+            cam = camera_render(ph.path, float(np.median(_luma(
+                np.where(gc <= 0.04045, gc / 12.92, ((gc + 0.055) / 1.055) ** 2.4)))))
+            if cam is not None:
+                ph.cam_q, ph.cam_chroma, _ = lab_stats(cam)
         t = Image.fromarray((np.clip(g, 0, 1) * 255).astype(np.uint8))
         ph.preview_ev, ph.preview_angle = ph.ev, ph.angle
         if st.cache_dir:
@@ -540,6 +714,132 @@ def analyze(ph: Photo, st: Settings) -> Photo:
     return ph
 
 
+def _rolling_median(vals: list[float], window: int) -> list[float]:
+    out = []
+    for i in range(len(vals)):
+        a, b = max(0, i - window // 2), min(len(vals), i + window // 2 + 1)
+        out.append(float(np.median(vals[a:b])))
+    return out
+
+
+def equalize_exposure(photos: list[Photo]) -> None:
+    """Iguala el brillo entre fotos de la misma parte de la sesión.
+
+    Parte de la exposición automática de cada foto (`ev_auto`) y la acerca a la mediana de sus vecinas en el
+    tiempo (ventana de 31 fotos): así la ceremonia y la fiesta pueden tener brillos distintos, pero dentro de
+    cada momento todas las fotos quedan iguales. Con caras manda la piel; sin caras, el brillo medio.
+    """
+    ok = sorted([p for p in photos if not p.error and p.thumb],
+                key=lambda p: (p.when or dt.datetime.min, p.name))
+    if len(ok) < 3:
+        return
+    for key, gain, lim in (("face_lin", 0.85, 0.8), ("lum_med", 0.6, 0.5)):
+        group = [p for p in ok if (p.face_lin > 0) == (key == "face_lin") and getattr(p, key) > 0]
+        if len(group) < 3:
+            continue
+        out = [math.log2(getattr(p, key)) + p.ev_auto for p in group]  # brillo resultante, en EV
+        target = _rolling_median(out, 31)
+        for p, o, t in zip(group, out, target):
+            p.ev = float(np.clip(p.ev_auto + np.clip(gain * (t - o), -lim, lim), -2.5, EV_MAX + 0.5))
+
+
+def calibrate_session(photos: list[Photo], st: Settings) -> dict:
+    """Ajustes ÚNICOS para toda la sesión (mismo revelado para todas las fotos).
+
+    - Estilo aprendido de fotos acabadas: una sola curva y un solo color que llevan la sesión entera a tu
+      aspecto (antes se ajustaba cada foto por separado).
+    - Preset: curva y croma de la cámara (mediana de toda la sesión), a media fuerza.
+    Devuelve los parámetros que se suman al estilo (`Settings.style`).
+    """
+    ok = [p for p in photos if not p.error and len(p.tone_q) == 64]
+    if not ok:
+        return {}
+    if st.uniform:
+        equalize_exposure(photos)
+    sty = dict(styles.BASE, **(st.style or {}))
+    if sty.get("cube"):
+        # el LUT da el aspecto: fuera la curva y el color propios para no duplicarlos; el LUT recibe
+        # imágenes de brillo igualado y contraste normal, que es para lo que están hechos
+        out = {"session": True, "target_q": None, "lut": None, "chroma": 1.0, "tint": 0.0, "warmth": 0.0,
+               "contrast": round(float(sty["contrast"]) * 0.5, 3), "saturation": 1.0, "black": 0.02}
+        lut_review(photos, sty["cube"], float(sty.get("cube_strength", 1.0)))
+        return out
+    ours = np.median(np.array([p.tone_q for p in ok]), axis=0)
+    ours = np.maximum.accumulate(ours + np.arange(64) * 1e-4)
+    grid = np.linspace(0, 100, 256)
+    out = {"session": True}
+    if sty.get("target_q") is not None:
+        tq = np.asarray(sty["target_q"], np.float32)
+        tq64 = np.interp(np.linspace(0, 1, 64), np.linspace(0, 1, len(tq)), tq)
+        k = float(sty.get("strength", 0.6))
+        lut = (1 - k) * grid + k * np.interp(grid, ours, tq64)
+        chroma = float(np.median([p.chroma for p in ok if p.chroma > 0] or [1.0]))
+        ratio = float(np.clip((sty.get("target_chroma") or chroma) / max(chroma, 1e-3), 0.6, 1.6))
+        c = 1 + k * (ratio - 1)
+        a_med = float(np.median([p.ab[0] for p in ok if p.ab] or [0.0]))
+        b_med = float(np.median([p.ab[1] for p in ok if p.ab] or [0.0]))
+        out.update(lut=[round(float(x), 3) for x in np.maximum.accumulate(lut)], chroma=round(c, 3),
+                   tint=round(float(np.clip(0.5 * k * (float(sty.get("target_a", 0)) - a_med * c), -5, 5)), 2),
+                   warmth=round(float(np.clip(0.5 * k * (float(sty.get("target_b", 0)) - b_med * c), -7, 7)), 2),
+                   target_q=None, contrast=0.0, black=0.0, saturation=1.0)
+    elif st.camera_look:
+        cams = [p for p in ok if len(p.cam_q) == 64]
+        if len(cams) >= max(1, len(ok) // 3):
+            cam = np.median(np.array([p.cam_q for p in cams]), axis=0)
+            mine = np.median(np.array([p.tone_q for p in cams]), axis=0)
+            mine = np.maximum.accumulate(mine + np.arange(64) * 1e-4)
+            lut = 0.5 * grid + 0.5 * np.interp(grid, mine, cam)
+            ratio = float(np.median([p.cam_chroma / p.chroma for p in cams if p.chroma > 1]) or 1.0) \
+                if any(p.chroma > 1 for p in cams) else 1.0
+            out.update(lut=[round(float(x), 3) for x in np.maximum.accumulate(lut)],
+                       chroma=round(float(np.clip(1 + 0.5 * (ratio - 1), 0.85, 1.25)), 3),
+                       contrast=round(float(sty["contrast"]) * 0.5, 3))
+    return out
+
+
+LUT_WARN = "Revisar LUT"
+
+
+def lut_review(photos: list[Photo], cube: str, strength: float) -> int:
+    """Marca las fotos a las que el LUT les sienta claramente peor que al resto de la sesión.
+
+    Se mira la miniatura con el LUT: zonas que se queman o se empastan de más, y cambios de brillo muy
+    distintos del cambio típico de la sesión. Devuelve cuántas se marcan (aviso en «Avisos»; no descarta).
+    """
+    rows = []
+    for p in photos:
+        p.warn = " · ".join(w for w in p.warn.split(" · ") if w and not w.startswith(LUT_WARN))
+        if not p.thumb or p.error:
+            continue
+        try:
+            a = np.asarray(Image.open(io.BytesIO(p.thumb)).convert("RGB"), np.float32) / 255.0
+            k = strength if p.lut_strength is None else p.lut_strength
+            b = luts.apply(a, cube, k)
+        except Exception:
+            continue
+        la = cv2.cvtColor(a, cv2.COLOR_RGB2Lab)[..., 0]
+        lb = cv2.cvtColor(b, cv2.COLOR_RGB2Lab)[..., 0]
+        rows.append((p, float((b.max(-1) > 0.985).mean() - (a.max(-1) > 0.985).mean()),
+                     float((b.max(-1) < 0.02).mean() - (a.max(-1) < 0.02).mean()),
+                     float(lb.mean() - la.mean())))
+    if not rows:
+        return 0
+    med_shift = float(np.median([r[3] for r in rows]))
+    n = 0
+    for p, hi, lo, shift in rows:
+        why = []
+        if hi > 0.03:
+            why.append(f"quema {hi:.0%}")
+        if lo > 0.06:
+            why.append(f"empasta {lo:.0%}")
+        if abs(shift - med_shift) > 10:
+            why.append("brillo muy distinto al resto")
+        if why:
+            p.warn = (p.warn + " · " if p.warn else "") + f"{LUT_WARN}: " + ", ".join(why)
+            n += 1
+    return n
+
+
 def cull(photos: list[Photo], st: Settings) -> None:
     """Marca los descartes. No mueve ni borra nada."""
     ok = [p for p in photos if not p.error]
@@ -557,26 +857,44 @@ def cull(photos: list[Photo], st: Settings) -> None:
         for p in ok:
             if p.keep and p.sharp < thr:
                 p.keep, p.reason = False, "Desenfocada o movida"
+    if st.cull_eyes:
+        for p in ok:
+            if p.keep and p.eyes_open < EYES_CLOSED:
+                p.keep, p.reason = False, "Ojos cerrados"
     if st.cull_dupes:
         maxd = {"Baja": 4, "Normal": 6, "Alta": 9}[st.sensitivity]
         seq = sorted(ok, key=lambda p: (p.when or dt.datetime.min, p.name))
+        med_sharp = float(np.median([p.sharp for p in ok])) or 1.0
+        faced = [p.face_sharp for p in ok if p.face_sharp > 0]
+        med_face = float(np.median(faced)) if faced else 1.0
         group = []
+
+        def score(p):
+            """Mejor foto de la ráfaga: cara nítida, ojos abiertos y sin quemados."""
+            sh = p.face_sharp / med_face if p.face_sharp > 0 else p.sharp / med_sharp
+            return sh * (0.35 + 0.65 * p.eyes_open) * (1 - min(0.5, 4 * p.clipped))
 
         def close(g):
             live = [p for p in g if p.keep]
             if len(live) > 1:
-                clean = [p for p in live if p.clipped < 0.05] or live
-                best = max(clean, key=lambda p: p.sharp)
+                best = max(live, key=score)
+                burst = len({p.when for p in live if p.when}) > 1
                 for p in live:
                     if p is not best:
-                        p.keep, p.reason = False, f"Casi duplicada de {best.name}"
+                        p.keep = False
+                        p.reason = (f"Ráfaga: la mejor es {best.name}" if burst else f"Casi duplicada de {best.name}")
 
         for p in seq:
             if group:
                 q = group[-1]
-                near = all(bin(p.dhash ^ o.dhash).count("1") <= maxd for o in (group[0], q))
+                d_first = bin(p.dhash ^ group[0].dhash).count("1")
+                d_last = bin(p.dhash ^ q.dhash).count("1")
+                near = max(d_first, d_last) <= maxd
                 if p.when and q.when:
-                    near = near and abs((p.when - q.when).total_seconds()) <= 5
+                    gap = abs((p.when - q.when).total_seconds())
+                    # ráfaga: disparos seguidos (≤ 1 s) del mismo encuadre, aunque el sujeto se mueva
+                    burst = gap <= 1.0 and d_last <= 2 * maxd
+                    near = (near and gap <= 5) or burst
                 if not near:
                     close(group)
                     group = []
@@ -596,10 +914,19 @@ def _nlm(ch: np.ndarray, h: float, search: int) -> np.ndarray:
 def develop(ph: Photo, st: Settings) -> np.ndarray:
     """Revelado a resolución completa: exposición, grano, contraste, nitidez, estilo y giro. RGB 0..1."""
     sty = dict(styles.BASE, **(st.style or {}))
-    g = tone(load_linear(ph.path, half=False), ph.ev + float(sty["ev_bias"]))
+    g = tone(load_linear(ph.path, half=False, rebuild_highlights=ph.clipped > 0.002),
+             ph.ev + float(sty["ev_bias"]))
     mult = NR_LEVELS[st.nr] * float(sty["nr"])
-    hl = (0.8 + 0.35 * (math.log2(max(ph.iso, 100) / 100) + max(ph.ev, 0))) * mult
-    hc = min(2.8 * hl, 14.0)
+    # grano: según el ruido MEDIDO en la foto (a resolución completa ≈ el doble que en la de análisis,
+    # y corregido por la diferencia de exposición). Si no hay medida, por ISO y exposición.
+    # (half_size de LibRaw toma un píxel por celda, no promedia: el ruido medido ya es el de resolución completa)
+    scale = 2 ** (ph.ev - ph.ev_auto) * 255
+    if ph.noise_y > 0:
+        hl = float(np.clip(0.9 * ph.noise_y * scale, 0.6, 12.0)) * mult
+        hc = float(np.clip(max(2.4 * hl, 1.8 * ph.noise_c * scale * mult), 1.0, 16.0))
+    else:
+        hl = (0.8 + 0.35 * (math.log2(max(ph.iso, 100) / 100) + max(ph.ev, 0))) * mult
+        hc = min(2.8 * hl, 14.0)
     ycc = cv2.cvtColor(g, cv2.COLOR_RGB2YCrCb)
     del g
     y0 = ycc[..., 0].copy()
@@ -623,6 +950,9 @@ def develop(ph: Photo, st: Settings) -> np.ndarray:
     out = np.clip(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB), 0, 1)
     del ycc
     out = styles.apply_color(out, sty)
+    if sty.get("cube"):
+        k = float(sty.get("cube_strength", 1.0)) if ph.lut_strength is None else float(ph.lut_strength)
+        out = luts.apply(out, sty["cube"], k)
     if sty.get("bw"):
         out = bw_editorial(out, seed=ph.dhash & 0xFFFFFFFF)
     return np.clip(rotate(out, ph.angle), 0, 1)
@@ -825,7 +1155,7 @@ _CACHE_SKIP = {"thumb", "preview", "keep", "reason"}
 def _sig(ph: Photo, st: Settings) -> str:
     try:
         stt = os.stat(ph.path)
-        base = f"{os.path.basename(ph.path)}|{stt.st_size}|{stt.st_mtime_ns}|{st.straighten}|{st.ev_comp:.2f}|v2"
+        base = f"{os.path.basename(ph.path)}|{stt.st_size}|{stt.st_mtime_ns}|{st.straighten}|{st.ev_comp:.2f}|v3"
     except OSError:
         return ""
     return hashlib.sha1(base.encode()).hexdigest()[:16]

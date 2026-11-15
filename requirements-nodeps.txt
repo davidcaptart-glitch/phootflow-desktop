@@ -1,0 +1,5 @@
+# Se instalan con --no-deps: mediapipe pide opencv-contrib y matplotlib, que no hacen falta (solo usamos
+# mediapipe.tasks) y chocar?an con opencv-python-headless.
+mediapipe==1.2.3
+absl-py==2.5.1
+flatbuffers==25.12.19

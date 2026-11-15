@@ -114,6 +114,7 @@ def install_source(zip_path: str, target: str = APP_DIR) -> None:
     if not os.path.exists(os.path.join(src, "app.py")):
         raise RuntimeError("Paquete de actualización no válido: falta app.py")
     req_old = _read(os.path.join(target, "requirements.txt"))
+    nodeps_old = _read(os.path.join(target, "requirements-nodeps.txt"))
     for root, dirs, files in os.walk(src):
         dirs[:] = [d for d in dirs if d not in _KEEP_ON_UPDATE]
         rel = os.path.relpath(root, src)
@@ -121,9 +122,11 @@ def install_source(zip_path: str, target: str = APP_DIR) -> None:
         for f in files:
             shutil.copy2(os.path.join(root, f), os.path.join(target, rel, f))
     shutil.rmtree(tmp, ignore_errors=True)
-    if _read(os.path.join(target, "requirements.txt")) != req_old:
-        subprocess.run([_python(console=True), "-m", "pip", "install", "--disable-pip-version-check", "-q", "-r",
-                        os.path.join(target, "requirements.txt")], check=False, creationflags=_NO_WINDOW)
+    for name, extra, old in (("requirements.txt", [], req_old), ("requirements-nodeps.txt", ["--no-deps"], nodeps_old)):
+        path = os.path.join(target, name)
+        if os.path.exists(path) and _read(path) != old:
+            subprocess.run([_python(console=True), "-m", "pip", "install", "--disable-pip-version-check", "-q",
+                            *extra, "-r", path], check=False, creationflags=_NO_WINDOW)
 
 
 def restart_source() -> None:

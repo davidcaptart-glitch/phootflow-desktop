@@ -53,7 +53,8 @@ def learned(cfg_dir: str) -> dict[str, dict]:
                 try:
                     with open(os.path.join(d, f), encoding="utf-8") as fh:
                         s = json.load(fh)
-                    out["Mi estilo: " + s.get("name", f[:-5])] = dict(BASE, **s.get("params", {}))
+                    out["Mi estilo: " + s.get("name", f[:-5])] = dict(BASE, **s.get("params", {}),
+                                                                      _base=s.get("base", ""))
                 except (OSError, ValueError):
                     pass
     return out
@@ -114,7 +115,19 @@ def scene_scores(f: dict) -> dict[str, float]:
 
 
 def detect_scene(photos) -> tuple[str, dict[str, float]]:
-    """Tipo de sesión por mayoría ponderada de todas las fotos analizadas."""
+    """Tipo de sesión. Con la IA (CLIP): voto de cada foto por su tipo más probable (15/15 sesiones
+    reales acertadas). Sin IA: mayoría ponderada de la heurística."""
+    votes = {k: 0 for k in PRESETS}
+    for p in photos:
+        sa = getattr(p, "scene_ai", None)
+        if sa:
+            k = max(sa, key=sa.get)
+            if k in votes:
+                votes[k] += 1
+    n_ai = sum(votes.values())
+    if n_ai:
+        best = max(votes, key=votes.get)
+        return best, {k: round(v / n_ai, 2) for k, v in votes.items()}
     total = {k: 0.0 for k in PRESETS}
     n = 0
     for p in photos:
