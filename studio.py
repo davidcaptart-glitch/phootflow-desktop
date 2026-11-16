@@ -24,7 +24,7 @@ import luts as L
 import studio_engine as SE
 import theme as T
 
-DRAFT_PX, FULL_PX = 1024, 2048
+DRAFT_PX, FULL_PX = 860, 1600
 ROLE = Qt.UserRole + 7
 
 
@@ -786,6 +786,8 @@ class StudioView(QWidget):
         self.preset_cb.addItem("Presets…", None)
         for name, s in SE.list_presets(self.cfg_dir).items():
             self.preset_cb.addItem(name, s)
+        for name, s in SE.LIGHTCRAFT_PRESETS.items():  # integrados (LightCraft, Apache-2.0)
+            self.preset_cb.addItem("LightCraft · " + name, s)
 
     def apply_preset(self, i):
         s = self.preset_cb.itemData(i)

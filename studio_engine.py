@@ -80,6 +80,9 @@ def _srgb(x: np.ndarray) -> np.ndarray:
     return np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(x, 1 / 2.4) - 0.055)
 
 
+_SRGB_LUT = None  # se rellena abajo: codificación sRGB tabulada (65536 niveles lineales)
+
+
 def _lin(x: np.ndarray) -> np.ndarray:
     return np.where(x <= 0.04045, x / 12.92, ((np.clip(x, 0, None) + 0.055) / 1.055) ** 2.4)
 
@@ -107,110 +110,246 @@ def _hue_weights(h: np.ndarray, center: float, width: float = 45.0) -> np.ndarra
 
 # ------------------------------------------------------------------ revelado
 
+# Fórmulas portadas de LightCraft (https://github.com/storytold/lightcraft, Apache-2.0, © sus autores):
+# crates/pipeline/src/{finish.rs, tone.rs, local.rs, colorops.rs, curve.rs}. Adaptadas a numpy y a sRGB lineal.
+
+_M1 = np.array([[0.4122214708, 0.5363325363, 0.0514459929],   # sRGB lineal → LMS (Ottosson)
+                [0.2119034982, 0.6806995451, 0.1073969566],
+                [0.0883024619, 0.2817188376, 0.6299787005]], np.float32)
+_M2 = np.array([[0.2104542553, 0.7936177850, -0.0040720468],  # LMS^(1/3) → OkLab
+                [1.9779984951, -2.4285922050, 0.4505937099],
+                [0.0259040371, 0.7827717662, -0.8086757660]], np.float32)
+_M1i, _M2i = np.linalg.inv(_M1).astype(np.float32), np.linalg.inv(_M2).astype(np.float32)
+
+
+def to_oklab(lin):
+    return np.cbrt(lin @ _M1.T) @ _M2.T
+
+
+def from_oklab(lab):
+    return (lab @ _M2i.T) ** 3 @ _M1i.T
+
+
+def _oklch_hue_of_hsv(deg: float) -> float:
+    rgb = cv2.cvtColor(np.array([[[deg, 1.0, 1.0]]], np.float32), cv2.COLOR_HSV2RGB)[0, 0]
+    lab = to_oklab(_lin(rgb)[None, :])[0]
+    return float(math.atan2(lab[2], lab[1]))
+
+
+_BAND_H = [_oklch_hue_of_hsv(c) for _, _, c in HSL_BANDS]
+_SKIN_H = _oklch_hue_of_hsv(25)
+
+
+def _wrap(x):
+    return (x + math.pi) % (2 * math.pi) - math.pi
+
+
+def _smoothstep(a, b, x):
+    t = np.clip((x - a) / (b - a), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def _gauss(x, sigma):
+    """Desenfoque gaussiano rápido (en pequeño y vuelta) para planos de baja frecuencia."""
+    if sigma < 4:
+        return cv2.GaussianBlur(x, (0, 0), sigma)
+    f = 4.0 / sigma
+    small = cv2.resize(x, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (0, 0), 4.0)
+    return cv2.resize(small, (x.shape[1], x.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+
+def guided(p, sigma, eps):
+    """Filtro guiado auto-guiado (He et al.) con ventanas gaussianas: suaviza sin cruzar bordes."""
+    m = _gauss(p, sigma)
+    var = np.maximum(_gauss(p * p, sigma) - m * m, 0)
+    a = var / (var + eps)
+    b = m - a * m
+    return _gauss(a, sigma) * p + _gauss(b, sigma)
+
+
+def _tonemap_lut(contrast, whites, blacks, n=4096):
+    """Curva base filmic (Reinhard extendido + rodilla), sobre ev = log2(Y/0.18). `tone.rs:241-284`.
+    Contraste de partida +0,35: la curva de LightCraft es más plana que la de Lightroom (su Auto pone +68)."""
+    c = contrast / 100 + 0.35
+    w, b = whites / 100, blacks / 100
+    ev = np.linspace(-14, 10, n)
+    slope = 1 + 0.55 * c if c >= 0 else 1 + 0.4 * c
+    wl = 0.18 * 2 ** (2.9 - 1.6 * w)
+    pre = 1 + 0.18 / wl
+    y = 0.18 * 2 ** (ev * slope) * pre
+    rh = lambda v: v * (1 + v / wl ** 2) / (1 + v)  # noqa: E731
+    knee = wl * 2 ** -0.5
+    ok = rh(knee)
+    ks = (1 + knee * (2 + knee) / wl ** 2) / (1 + knee) ** 2
+    cr = ks * knee / (1 - ok)
+    o = np.where(y <= knee, rh(y), 1 - (1 - ok) / (1 + cr * (y / knee - 1)))
+    o = np.minimum(o, 1)
+    if b < 0:
+        k, e = -0.035 * b, 0.004
+        soft = lambda v: ((v - k) + np.sqrt((v - k) ** 2 + e * e)) / 2  # noqa: E731
+        o = (soft(o) - soft(0)) / (soft(1) - soft(0))
+    elif b > 0:
+        k = 0.03 * b
+        o = k + (1 - k) * o
+    return ev.astype(np.float32), np.clip(o, 0, 1).astype(np.float32)
+
+
+_SRGB_LUT = _srgb(np.linspace(0, 1, 65536, dtype=np.float32)).astype(np.float32)
+
+
+def _param_curve_lut(s, n=4096):
+    """Curva paramétrica (cuatro regiones, cosenos alzados, monótona). `curve.rs:32-62`."""
+    x = np.linspace(0, 1, n, dtype=np.float32)
+    d = np.zeros_like(x)
+    for a0, b0, amt in ((0, .25, s["curve_shadows"]), (.25, .5, s["curve_darks"]), (.5, .75, s["curve_lights"]),
+                        (.75, 1, s["curve_highlights"])):
+        if amt:
+            ctr, half = (a0 + b0) / 2, (b0 - a0) * 0.75 + 0.05
+            t = np.clip((x - ctr) / half, -1, 1)
+            d += amt / 100 * 0.22 * (0.5 + 0.5 * np.cos(np.pi * t))
+    return np.maximum.accumulate(np.clip(x + d * 4 * x * (1 - x), 0, 1))
+
+
 def tone_stage(lin: np.ndarray, s: dict) -> np.ndarray:
-    """Luz (lineal → sRGB perceptual 0..1): BB, exposición, blancos/negros, altas luces/sombras, contraste."""
-    x = lin * _wb_gains(s["temp"], s["tint"])[None, None, :]
-    x = x * np.float32(2.0 ** s["exposure"])
-    # altas luces y sombras: ajuste local con una base suavizada de la luminancia (sin halos grandes)
-    lum = np.maximum(E._luma(x), 1e-6)
+    """Luz: BB, exposición, tono local (altas luces, sombras, claridad, textura) y curva base.
+    Devuelve sRGB lineal de pantalla (0..1) para la etapa de color."""
+    h, w = lin.shape[:2]
+    ppl = max(h, w)
+    c = lin * _wb_gains(s["temp"], s["tint"])[None, None, :]
+    Y = np.maximum(E._luma(c), 1e-6)
+    l = np.log2(Y / 0.18).astype(np.float32)  # plano log sin exposición (finish.rs: los planos no la llevan)
+    ev = float(s["exposure"])
+    delta = np.zeros_like(l)
     if s["highlights"] or s["shadows"]:
-        lg = np.log2(lum)
-        small = cv2.resize(lg, None, fx=0.125, fy=0.125, interpolation=cv2.INTER_AREA)
-        base = cv2.resize(cv2.GaussianBlur(small, (0, 0), 6), (lg.shape[1], lg.shape[0]),
-                          interpolation=cv2.INTER_LINEAR)
-        hi = _smooth(base, -2.5, 0.0)   # zonas claras
-        sh = 1 - _smooth(base, -6.0, -2.5)  # zonas oscuras
-        d = (s["highlights"] / 100.0) * 1.6 * hi + (s["shadows"] / 100.0) * 1.8 * sh
-        x = x * (2 ** d)[..., None]
-    # hombro suave (como el motor de Events) y paso a sRGB
-    a = 0.6 + 0.2 * (s["whites"] / 100.0)
-    y = np.where(x < a, x, a + (1 - a) * (1 - np.exp(-(x - a) / max(1 - a, 1e-3))))
-    y = _srgb(y)
-    # blancos y negros: puntos extremos
-    w = 1.0 - 0.12 * (s["whites"] / 100.0)
-    b = -0.06 * (s["blacks"] / 100.0)
-    y = (y - b) / max(w - b, 1e-3)
-    # contraste: curva S alrededor del gris medio perceptual
-    k = s["contrast"] / 100.0
-    if k:
-        yc = np.clip(y, 0, 1)
-        sc = yc * yc * (3 - 2 * yc)
-        y = y + (sc - yc) * k * (1.0 if k > 0 else 0.8)
-    # curva tonal paramétrica (cuatro regiones)
-    if any(s[c] for c in ("curve_highlights", "curve_lights", "curve_darks", "curve_shadows")):
-        yy = np.clip(y, 0, 1)
-        bump = lambda c, w0: np.exp(-((yy - c) ** 2) / (2 * w0 * w0))  # noqa: E731
-        y = y + 0.12 * (s["curve_shadows"] / 100 * bump(0.12, 0.09) + s["curve_darks"] / 100 * bump(0.35, 0.11)
-                        + s["curve_lights"] / 100 * bump(0.62, 0.11) + s["curve_highlights"] / 100 * bump(0.88, 0.09))
-    return np.clip(y, 0, 1).astype(np.float32)
+        base = guided(cv2.medianBlur(l, 3), max(1.0, 0.015 * ppl), 0.35)
+        B = base + ev
+        ws = 1 - _smoothstep(-4.8, 0.3, B)
+        wh = _smoothstep(-1.0, 2.8, B)
+        delta += (s["shadows"] / 100) * 1.7 * ws * np.sqrt(ws) + (s["highlights"] / 100) * 1.7 * wh
+    if s["clarity"]:
+        base = guided(l, max(1.0, 0.012 * ppl), 0.8)
+        mid = 1 - np.clip(np.abs(l + ev + 1.0) / 4.0, 0, 1)  # más en medios tonos
+        delta += (s["clarity"] / 100) * 0.9 * np.clip(l - base, -1.5, 1.5) * (0.35 + 0.65 * mid)
+    if s["texture"]:
+        fine = l - cv2.GaussianBlur(l, (0, 0), max(0.6, 0.0018 * ppl))
+        delta += (s["texture"] / 100) * 1.1 * np.clip(fine, -1, 1) * 0.6
+    gain = (2 ** (ev + delta)).astype(np.float32)
+    c = c * gain[..., None]
+    if s["dehaze"]:
+        k = s["dehaze"] / 100
+        dark = _gauss(c.min(-1), max(1.0, 0.02 * ppl))
+        air = max(float(np.percentile(E._luma(c[::4, ::4]), 99.5)), 1e-3)
+        if k > 0:
+            t = np.maximum(1 - 0.9 * k * dark / air, 0.12)[..., None]
+            c = np.maximum((c - air * (1 - t)) / t, 0)
+        else:
+            c = c * (1 + 0.35 * k) - 0.35 * k * air
+    # curva base sobre la luminancia, conservando las proporciones RGB (finish.rs:544-557)
+    xs, ys = _tonemap_lut(s["contrast"], s["whites"], s["blacks"])
+    Yc = np.maximum(E._luma(c), 1e-9)
+    idx = np.clip((np.log2(Yc / 0.18) + 14.0) * ((len(ys) - 1) / 24.0), 0, len(ys) - 1)
+    o = ys[(idx + 0.5).astype(np.int32)]  # tabla de 4096 puntos en 24 EV: ~0,006 EV por paso
+    d = c * (o / Yc)[..., None]
+    mx = d.max(-1)
+    t = np.clip((mx - 1) / np.maximum(mx - o, 1e-6), 0, 1)[..., None]  # desatura hacia blanco lo que se sale
+    d = d + (o[..., None] - d) * np.where(mx[..., None] > 1, t, 0)
+    return np.clip(d, 0, 1).astype(np.float32)
 
 
 def presence_stage(y: np.ndarray, s: dict) -> np.ndarray:
-    """Textura, claridad y neblina sobre sRGB 0..1."""
-    h, w = y.shape[:2]
-    scale = max(h, w) / 2048.0
-    lum = (0.2126 * y[..., 0] + 0.7152 * y[..., 1] + 0.0722 * y[..., 2]).astype(np.float32)
-    if s["dehaze"]:
-        k = s["dehaze"] / 100.0
-        dark = cv2.erode(y.min(-1), np.ones((15, 15), np.uint8))
-        air = float(np.percentile(lum, 99.5))
-        t = np.clip(1 - 0.85 * k * dark / max(air, 1e-3), 0.25, 1.6)[..., None] if k > 0 else 1 - 0.3 * k
-        y = np.clip((y - air * (1 - t)) / t, 0, 1) if k > 0 else np.clip(y * (1 + 0.3 * k) - 0.3 * k * air, 0, 1)
-        lum = (0.2126 * y[..., 0] + 0.7152 * y[..., 1] + 0.0722 * y[..., 2]).astype(np.float32)
-    d = np.zeros_like(lum)
-    if s["clarity"]:
-        base = cv2.GaussianBlur(lum, (0, 0), 18 * scale + 1)
-        mid = 1 - np.abs(lum - 0.5) * 2
-        d += (lum - base) * (s["clarity"] / 100.0) * 0.9 * np.clip(mid * 1.5, 0, 1)
-    if s["texture"]:
-        base = cv2.GaussianBlur(lum, (0, 0), 3 * scale + 0.6)
-        d += (lum - base) * (s["texture"] / 100.0) * 1.2
-    if d.any():
-        y = np.clip(y + d[..., None], 0, 1)
+    """(Claridad, textura y neblina ya van en tone_stage, como en LightCraft.)"""
     return y
 
 
-def color_stage(y: np.ndarray, s: dict) -> np.ndarray:
-    """Intensidad, saturación, HSL por bandas y gradación de color (en HSV/Lab sobre sRGB 0..1)."""
+def color_stage(d: np.ndarray, s: dict) -> np.ndarray:
+    """Color en OkLCh sobre lineal de pantalla: mezclador HSL → intensidad → saturación → gradación.
+    Devuelve sRGB codificado 0..1 con la curva paramétrica aplicada."""
     hsl_on = any(s[f"hsl_{b}_{p}"] for b, _, _ in HSL_BANDS for p in "hsl")
-    if s["vibrance"] or s["saturation"] or hsl_on:
-        hsv = cv2.cvtColor(np.clip(y, 0, 1).astype(np.float32), cv2.COLOR_RGB2HSV)  # H 0..360
-        hue, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-        sat = sat * (1 + s["saturation"] / 100.0)
+    grade_on = any(s[k] for k in ("grade_sh_sat", "grade_mid_sat", "grade_hi_sat"))
+    if s["vibrance"] or s["saturation"] or hsl_on or grade_on:
+        lab = to_oklab(np.maximum(d, 0))
+        L, A, Bc = lab[..., 0], lab[..., 1], lab[..., 2]
+        C = np.hypot(A, Bc)
+        H = np.arctan2(Bc, A)
+        if hsl_on:  # partición de la unidad con coseno alzado entre bandas vecinas (colorops.rs:32-49)
+            order = np.argsort(_BAND_H)
+            cs = np.array(_BAND_H)[order]
+            ext = np.concatenate([cs, [cs[0] + 2 * math.pi]])
+            hh = (H - cs[0]) % (2 * math.pi) + cs[0]
+            idx = np.clip(np.searchsorted(ext, hh, side="right") - 1, 0, len(cs) - 1)
+            t = (hh - ext[idx]) / (ext[idx + 1] - ext[idx])
+            sm = 0.5 - 0.5 * np.cos(np.pi * t)
+            vals = {pp: np.array([s[f"hsl_{HSL_BANDS[o][0]}_{pp}"] for o in order], np.float32) / 100 for pp in "hsl"}
+            nxt = (idx + 1) % len(cs)
+            dh = (1 - sm) * vals["h"][idx] + sm * vals["h"][nxt]
+            ds = (1 - sm) * vals["s"][idx] + sm * vals["s"][nxt]
+            dl = (1 - sm) * vals["l"][idx] + sm * vals["l"][nxt]
+            cw = np.minimum(C / 0.12, 1)
+            H = H + dh * 0.5 * cw
+            C = C * np.maximum(0, 1 + ds)
+            L = L + dl * 0.18 * cw * np.sqrt(np.maximum(L, 0.05))
         if s["vibrance"]:
-            v = s["vibrance"] / 100.0
-            skin = _hue_weights(hue, 25, 30) * 0.5  # protege la piel, como Lightroom
-            sat = sat * (1 + v * (1 - np.clip(sat, 0, 1)) * (1 - skin))
-        if hsl_on:
-            dh, ds, dl = np.zeros_like(hue), np.zeros_like(hue), np.zeros_like(hue)
-            for b, _, c in HSL_BANDS:
-                ph, ps, pl = s[f"hsl_{b}_h"], s[f"hsl_{b}_s"], s[f"hsl_{b}_l"]
-                if ph or ps or pl:
-                    wgt = _hue_weights(hue, c) * np.clip(sat * 3, 0, 1)
-                    dh += wgt * ph / 100.0 * 30
-                    ds += wgt * ps / 100.0
-                    dl += wgt * pl / 100.0
-            hue = (hue + dh) % 360
-            sat = sat * (1 + ds)
-            val = val * (1 + 0.5 * dl)
-        hsv = np.stack([hue, np.clip(sat, 0, 1), np.clip(val, 0, 1)], -1).astype(np.float32)
-        y = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
-    if any(s[k] for k in ("grade_sh_sat", "grade_mid_sat", "grade_hi_sat")):
-        lum = 0.2126 * y[..., 0] + 0.7152 * y[..., 1] + 0.0722 * y[..., 2]
-        bal = s["grade_balance"] / 100.0 * 0.25
-        blend = 0.15 + 0.35 * s["grade_blend"] / 100.0
-        w_sh = 1 - _smooth(lum, 0.0, 0.45 + bal + blend * 0.3)
-        w_hi = _smooth(lum, 0.55 + bal - blend * 0.3, 1.0)
-        w_mid = np.clip(1 - w_sh - w_hi, 0, 1)
-        out = y.copy()
-        for wgt, hk, sk in ((w_sh, "grade_sh_hue", "grade_sh_sat"), (w_mid, "grade_mid_hue", "grade_mid_sat"),
-                            (w_hi, "grade_hi_hue", "grade_hi_sat")):
-            if s[sk]:
-                tint = cv2.cvtColor(np.array([[[s[hk], 1.0, 1.0]]], np.float32), cv2.COLOR_HSV2RGB)[0, 0]
-                tint = tint - tint.mean()
-                out = out + wgt[..., None] * tint[None, None, :] * (s[sk] / 100.0) * 0.25
-        y = out
+            v = s["vibrance"] / 100
+            low = 1 - np.clip(C / 0.22, 0, 1)
+            skin = 1 - 0.6 * np.exp(-(_wrap(H - _SKIN_H) / 0.35) ** 2) if v > 0 else 1.0
+            C = C * np.maximum(0, 1 + v * low ** 2 * skin * 1.2)
+        if s["saturation"]:
+            C = C * max(0.0, 1 + s["saturation"] / 100)
+        A, Bc = C * np.cos(H), C * np.sin(H)
+        if grade_on:  # colorops.rs:252-266
+            m = 0.5 - 0.25 * s["grade_balance"] / 100
+            width = 0.15 + 0.5 * s["grade_blend"] / 100
+            w_sh = 1 - _smoothstep(m - width, m + 0.25 * width, L)
+            w_hi = _smoothstep(m - 0.25 * width, m + width, L)
+            w_mid = np.maximum(0, 1 - w_sh - w_hi)
+            for wt, hk, sk in ((w_sh, "grade_sh_hue", "grade_sh_sat"), (w_mid, "grade_mid_hue", "grade_mid_sat"),
+                               (w_hi, "grade_hi_hue", "grade_hi_sat")):
+                if s[sk]:
+                    hh = _oklch_hue_of_hsv(s[hk])
+                    k = s[sk] / 100 * 0.09
+                    A = A + wt * k * math.cos(hh)
+                    Bc = Bc + wt * k * math.sin(hh)
+        d = np.clip(from_oklab(np.stack([L, A, Bc], -1)), 0, None)
+        mx = d.max(-1, keepdims=True)
+        d = np.where(mx > 1, d / mx, d)  # gamut simple
+    y = _SRGB_LUT[(np.clip(d, 0, 1) * (len(_SRGB_LUT) - 1) + 0.5).astype(np.int32)]
+    if any(s[c] for c in ("curve_highlights", "curve_lights", "curve_darks", "curve_shadows")):
+        lut = _param_curve_lut(s)
+        y = lut.astype(np.float32)[(np.clip(y, 0, 1) * (len(lut) - 1) + 0.5).astype(np.int32)]
     return np.clip(y, 0, 1).astype(np.float32)
+
+
+# Los 18 presets originales de LightCraft (crates/engine/src/presets.rs, Apache-2.0), en controles de PhootFlow.
+# Temperatura en K → deslizador relativo: (K − 5500) / 40 (aprox.).
+def _p(**kw):
+    return kw
+
+
+LIGHTCRAFT_PRESETS = {
+    "Warm Glow": _p(temp=43, tint=8, contrast=8, shadows=12, vibrance=18),
+    "Cool Morning": _p(temp=2, tint=-4, highlights=-20, vibrance=10, grade_sh_hue=215, grade_sh_sat=12),
+    "Teal & Orange": _p(grade_sh_hue=195, grade_sh_sat=28, grade_hi_hue=35, grade_hi_sat=22, grade_balance=10,
+                        vibrance=12, contrast=14),
+    "Vivid Pop": _p(vibrance=40, saturation=8, contrast=18, whites=10, blacks=-10, clarity=12),
+    "Soft Pastel": _p(contrast=-25, highlights=-30, shadows=35, blacks=20, saturation=-18, vibrance=10,
+                      curve_shadows=25),
+    "Faded Matte": _p(curve_shadows=40, curve_highlights=-15, contrast=-10, saturation=-12, grain=18),
+    "Warm Film": _p(temp=35, tint=5, curve_shadows=22, grade_hi_hue=45, grade_hi_sat=15, grain=22, vignette=-12),
+    "Muted Film": _p(saturation=-25, vibrance=5, contrast=10, curve_shadows=18, grain=15),
+    "High Contrast B&W": _p(bw=True, contrast=45, whites=20, blacks=-25, clarity=20),
+    "Soft B&W": _p(bw=True, contrast=-15, shadows=25, curve_shadows=15),
+    "Selenium Tone": _p(bw=True, contrast=20, grade_sh_hue=285, grade_sh_sat=18, grade_hi_hue=40, grade_hi_sat=10),
+    "Crisp Landscape": _p(highlights=-45, shadows=30, contrast=12, clarity=22, dehaze=12, texture=15, vibrance=25),
+    "Golden Hour": _p(temp=52, tint=12, highlights=-35, shadows=20, grade_hi_hue=38, grade_hi_sat=25, vignette=-15),
+    "Blue Hour Boost": _p(temp=-8, tint=6, shadows=25, hsl_blue_s=25, hsl_purple_s=15),
+    "Soft Skin": _p(texture=-25, clarity=-10, contrast=-5, shadows=15, hsl_orange_s=-8, hsl_orange_l=10),
+    "Bright & Airy": _p(contrast=-15, highlights=-40, shadows=40, whites=15, vibrance=8, saturation=-8),
+    "Moody": _p(contrast=20, highlights=-30, blacks=-15, saturation=-20, grade_sh_hue=200, grade_sh_sat=15,
+                vignette=-30),
+    "Cinematic": _p(curve_shadows=20, curve_highlights=-10, grade_sh_hue=190, grade_sh_sat=25, grade_hi_hue=30,
+                    grade_hi_sat=18, contrast=15, vignette=-20),
+}
 
 
 def detail_stage(y: np.ndarray, s: dict) -> np.ndarray:

@@ -34,7 +34,7 @@ jobs:
           pyinstaller --noconfirm --onefile --windowed --name PhootFlow
           --icon assets/icon.ico --add-data "assets;assets"
           --collect-all rawpy --collect-data cv2 --collect-all mediapipe --collect-all onnxruntime
-          --hidden-import scene_ai --hidden-import eyes --hidden-import luts app.py
+          --hidden-import scene_ai --hidden-import eyes --hidden-import luts --hidden-import studio --hidden-import studio_engine app.py
       - name: Comprobar que el .exe arranca y procesa
         shell: pwsh
         run: |
@@ -45,7 +45,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force pkg\PhootFlow | Out-Null
-          Copy-Item app.py, engine.py, styles.py, luts.py, eyes.py, scene_ai.py, theme.py, drive.py, net.py, updater.py, version.py, requirements.txt, requirements-nodeps.txt, instalar.ps1, README.md pkg\PhootFlow\
+          Copy-Item app.py, engine.py, styles.py, luts.py, studio.py, studio_engine.py, eyes.py, scene_ai.py, theme.py, drive.py, net.py, updater.py, version.py, requirements.txt, requirements-nodeps.txt, instalar.ps1, README.md pkg\PhootFlow\
           Copy-Item -Recurse assets pkg\PhootFlow\assets
           Compress-Archive -Path pkg\PhootFlow -DestinationPath dist\PhootFlow-src.zip
       - name: Sumas de verificación

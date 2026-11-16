@@ -6,3 +6,4 @@
 - `text_embeddings.npy` — frases de texto codificadas con CLIP ViT-B/32 (OpenAI, MIT). El modelo de imagen (Xenova/clip-vit-base-patch32, MIT) se descarga al usarlo.
 - Modelo `face_landmarker.task` de MediaPipe (Google, Apache-2.0): se descarga al usarlo.
 - Paquetes: onnxruntime (Microsoft, MIT), mediapipe (Google, Apache-2.0).
+- Fórmulas de revelado de Studio (curva base, tono local, OkLab/OkLCh, mezclador HSL, gradación, curva paramétrica) y los 18 presets originales: portados de [LightCraft](https://github.com/storytold/lightcraft) (Apache-2.0).

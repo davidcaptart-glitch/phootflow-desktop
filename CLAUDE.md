@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 11 pruebas, sin fotos reales
+python -m unittest discover -s tests   # 19 pruebas, sin fotos reales
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -34,6 +34,11 @@ python -m unittest discover -s tests   # 11 pruebas, sin fotos reales
 - `theme.py` — QSS con los colores del logo (`#05070F`, magenta `#F50D8A`, blanco).
 - `updater.py` — modos `exe` (sustituye el .exe con un .bat), `source` (descarga `PhootFlow-src.zip`,
   verifica SHA-256, copia encima, pip si cambió `requirements.txt`, reinicia) y `dev` (clon git: solo avisa).
+- `studio.py` / `studio_engine.py` — entorno **Studio** (tipo Lightroom): `StudioView` (biblioteca, lienzo con
+  antes/después, histograma, paneles de sliders, historial, presets, exportar) y el revelado no destructivo
+  `render(lin, ajustes)`. Ajustes por foto en `<carpeta>/.phootflow/studio/<foto>.json`. Proxy de 2048 px y
+  borrador de 1024 px mientras se arrastra. `Shell` (app.py) aloja Events (`Main`) y Studio con el interruptor.
+- `luts.py` — LUT .cube por tipo de sesión; `eyes.py` (MediaPipe) y `scene_ai.py` (CLIP, onnxruntime): IA local.
 - `drive.py` — OAuth de escritorio con PKCE y Drive v3 por REST.
 - `.github/workflows/build.yml` — en etiquetas `v*`: pruebas, PyInstaller, selftest del .exe, zip de código,
   sumas y release.
@@ -48,21 +53,8 @@ python -m unittest discover -s tests   # 11 pruebas, sin fotos reales
   un `CascadeClassifier` creado en un hilo secundario tumba el proceso al salir (Windows).
   No usar `os._exit` con la ventana Qt viva: también da access violation; salir con `sys.exit`.
 
-## Estado (v0.2.0)
+## Estado (v0.4.0, en curso)
 
-Probado en el PC de David: motor con 8 ARW reales del cumpleaños (ISO 2500–6400), selftest, 11 pruebas.
-Estilos aprendidos de sus fotos acabadas (solo en su PC, `%APPDATA%\PhootFlow\estilos`): Deporte, Boda y comunión,
-Cumpleaños, Quinceañera, Discoteca (Drive, miniaturas de 1600 px vía `drive.google.com/thumbnail`, ≈40 por carpeta)
-y Baile (álbum compartido de Lightroom, 329 fotos a 2048 px por la API `/v2/spaces/<id>/albums/<id>/assets`).
-Las muestras están en `%LOCALAPPDATA%\PhootFlow\aprendizaje`. Google limita la descarga de originales de 16 MB.
-
-Sin probar: el `.exe` en un PC sin Smart App Control, Drive contra cuenta real, sesión completa de 2000 fotos.
-
-## Ideas pendientes
-
-- Curva base «look de cámara» desde el JPEG embebido del RAW (`rawpy.extract_thumb`, igualación de CDF).
-- Ojos cerrados con puntos faciales (MediaPipe Face Landmarker, blendshape `eyeBlink`) en lugar de Haar.
-- Ráfagas por hora EXIF (≤1 s) + puntuación combinada (nitidez de cara, ojos, exposición).
-- Reducción de ruido según el ruido medido de cada foto; balance de blancos con luces de colores.
-- Detección del tipo de escena con un modelo (CLIP/SigLIP) en vez de heurística.
-- Firmar el `.exe` (Azure Trusted Signing) para evitar SmartScreen y Smart App Control.
+Events: edición uniforme por sesión, LUT por tipo, IA de tipo de evento (15/15 sesiones reales) y ojos cerrados.
+Studio: primera versión; fórmulas propias, por afinar con las de LightCraft (Apache-2.0,
+github.com/storytold/lightcraft, crates/pipeline). Sin probar: sesión de 2000 fotos, Drive con cuenta real.
