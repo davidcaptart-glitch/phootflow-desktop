@@ -344,6 +344,38 @@ class StylesPerPhoto(unittest.TestCase):
         self.assertTrue(os.listdir(os.path.join(d, "out", "ByN")))
 
 
+class Masks(unittest.TestCase):
+    """Máscaras de Studio sin IA (las de IA necesitan los modelos descargados)."""
+
+    def test_geometric_and_range_masks_and_local_adjust(self):
+        import masks as M
+        import studio_engine as SE
+        img = np.asarray(scene()).astype(np.float32) / 255
+        rad = M.build(dict(M.new_mask("radial"), params=dict(cx=0.5, cy=0.5, rx=0.2, ry=0.2, feather=30)), img)
+        self.assertGreater(rad[img.shape[0] // 2, img.shape[1] // 2], 0.9)
+        self.assertLess(rad[5, 5], 0.01)
+        lin = M.build(dict(M.new_mask("linear"), params=dict(x0=0.5, y0=0.0, x1=0.5, y1=0.5)), img)
+        self.assertGreater(lin[0, 10], 0.9)
+        self.assertLess(lin[-1, 10], 0.01)
+        inv = M.build(dict(M.new_mask("linear"), params=dict(x0=0.5, y0=0.0, x1=0.5, y1=0.5), invert=True), img)
+        self.assertAlmostEqual(float(inv[0, 10] + lin[0, 10]), 1.0, delta=1e-4)
+        br = dict(M.new_mask("brush"), params=dict(strokes=[[0.5, 0.5, 0.05, 1], [0.5, 0.5, 0.02, -1]], feather=0))
+        b = M.build(br, img)
+        self.assertLess(b[img.shape[0] // 2, img.shape[1] // 2], 0.1)  # borrado en el centro
+        self.assertGreater(b.max(), 0.9)
+        luma = M.build(dict(M.new_mask("luma"), params=dict(lo=60, hi=100, feather=5)), img)
+        self.assertGreater(float(luma[img.mean(-1) > 0.75].mean()), float(luma[img.mean(-1) < 0.2].mean()))
+        m = dict(M.new_mask("radial"), params=dict(cx=0.5, cy=0.5, rx=0.2, ry=0.2, feather=30))
+        m["adj"]["exposure"] = 1.0
+        out = M.apply_all(img, [m])
+        c = (img.shape[0] // 2, img.shape[1] // 2)
+        self.assertGreater(out[c].mean(), img[c].mean())  # dentro se aclara
+        self.assertAlmostEqual(float(out[5, 5].mean()), float(img[5, 5].mean()), delta=1e-3)  # fuera no cambia
+        lin_img = (img ** 2.2).astype(np.float32)
+        r = SE.render(lin_img, SE.new_settings(masks=[m]), key="t")
+        self.assertEqual(r.shape, img.shape)
+
+
 class ReviewFlow(unittest.TestCase):
     def test_studio_overrides_are_found_for_export(self):
         import review

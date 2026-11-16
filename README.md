@@ -72,6 +72,13 @@ carpeta** se elige en cuál trabajarla.
   y los 18 de LightCraft, y exportación. No destructivo: los ajustes se guardan en `.phootflow/studio/`.
   Fórmulas de revelado portadas de [LightCraft](https://github.com/storytold/lightcraft) (Apache-2.0).
 
+### Máscaras (Studio)
+
+Como en Lightroom: **pincel**, **degradado lineal y radial**, **rango de luz y de color**; con IA local
+(MediaPipe): **persona, piel de la cara, piel, pelo, ropa y fondo**, y partes de la cara: **ojos, iris, cejas,
+labios y dientes**; **cielo** aproximado. Cada máscara tiene sus ajustes (exposición, contraste, altas luces,
+sombras, temperatura, matiz, saturación, claridad, nitidez), cantidad e invertir. **O** muestra la máscara.
+
 ### Revisión antes de exportar (Events)
 
 Antes de exportar se abre la revisión: cada foto con su edición final, **Aprobar (A) / Rechazar (R)**, flechas

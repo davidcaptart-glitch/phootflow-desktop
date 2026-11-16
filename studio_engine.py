@@ -63,7 +63,7 @@ HSL_BANDS = [("red", "Rojo", 0), ("orange", "Naranja", 30), ("yellow", "Amarillo
 
 DEFAULTS: dict = {k: v for _, ctrls in PANELS for k, *_rest, v in [(c[0], c[5]) for c in ctrls]}
 DEFAULTS.update({f"hsl_{b}_{p}": 0 for b, _, _ in HSL_BANDS for p in ("h", "s", "l")})
-DEFAULTS.update({"bw_style": "Editorial", "bw": False, "crop": [0.0, 0.0, 1.0, 1.0], "crop_ratio": "Original", "lut": "", "lut_strength": 100,
+DEFAULTS.update({"masks": [], "bw_style": "Editorial", "bw": False, "crop": [0.0, 0.0, 1.0, 1.0], "crop_ratio": "Original", "lut": "", "lut_strength": 100,
                  "rating": 0, "flag": 0, "profile": "Neutro"})
 
 
@@ -389,13 +389,18 @@ def effects_stage(y: np.ndarray, s: dict, seed: int = 0) -> np.ndarray:
     return y
 
 
-def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True) -> np.ndarray:
-    """Revelado completo. `lin`: sRGB lineal float32 (de engine.load_linear). Devuelve sRGB 0..1."""
+def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True, key: str = "",
+           show_mask: int | None = None) -> np.ndarray:
+    """Revelado completo. `lin`: sRGB lineal float32 (de engine.load_linear). Devuelve sRGB 0..1.
+    `key` identifica la foto (caché de las máscaras de IA); `show_mask`: índice de máscara a superponer."""
+    import masks as M
     s = dict(DEFAULTS, **s)
     y = tone_stage(lin, s)
     y = presence_stage(y, s)
     y = color_stage(y, s)
     y = detail_stage(y, s)
+    if s.get("masks"):
+        y = M.apply_all(y, s["masks"], key)
     if s.get("lut"):
         try:
             y = L.apply(y, s["lut"], s.get("lut_strength", 100) / 100.0)
@@ -404,6 +409,8 @@ def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True) -> np.nda
     if s["bw"]:
         y = E.bw_editorial(y, seed=seed, style=s.get("bw_style") or "Editorial")
     y = effects_stage(y, s, seed)
+    if show_mask is not None and 0 <= show_mask < len(s.get("masks") or []):
+        y = M.overlay(M.build(s["masks"][show_mask], y, key), y)
     if s["angle"]:
         y = E.rotate(y, s["angle"])
     if crop and s["crop"] != [0.0, 0.0, 1.0, 1.0]:
@@ -496,7 +503,7 @@ def save_preset(cfg_dir: str, name: str, s: dict) -> str:
 
 def export(photo_path: str, s: dict, out_path: str, quality: int = 95, long_side: int | None = None) -> str:
     lin = E.load_linear(photo_path, half=False, rebuild_highlights=True)
-    img = render(lin, s, seed=hash(os.path.basename(photo_path)) & 0xFFFF)
+    img = render(lin, s, seed=hash(os.path.basename(photo_path)) & 0xFFFF, key=photo_path + "#full")
     if long_side and max(img.shape[:2]) > long_side:
         f = long_side / max(img.shape[:2])
         img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
