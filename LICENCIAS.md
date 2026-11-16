@@ -110,7 +110,11 @@ Ya está cambiado en esta rama:
 - Para volver a desplegar la función: el código está en `servidor_licencias/functions/licencias/index.ts`.
   Despliégala con `verify_jwt = false` (la app no lleva claves de Supabase).
 
-## Pendiente para cobrar
+## Cobro: desactivado
+
+Por ahora **no hay nada de cobro**: ni Stripe, ni Lemon Squeezy, ni webhooks, ni en la app ni en Supabase. Las
+licencias solo se gestionan a mano: `crear` para dar acceso, `revocar` para quitarlo y `reactivar` para
+devolverlo. Ideas para cuando quieras cobrar:
 
 - **Pasarela de pago.** Stripe Checkout o Lemon Squeezy, este último si quieres que gestione el IVA como
   *merchant of record*. Un webhook iría a una segunda Edge Function que crea la licencia (`crear`) y manda la
