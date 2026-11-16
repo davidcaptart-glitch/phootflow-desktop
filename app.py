@@ -570,7 +570,6 @@ class Main(QMainWindow):
         QShortcut(QKeySequence("P"), self, lambda: self.set_keep(True))
         QShortcut(QKeySequence("X"), self, lambda: self.set_keep(False))
         QShortcut(QKeySequence(Qt.Key_Space), self, lambda: self.cur and self.set_keep(not self.cur.keep))
-        QShortcut(QKeySequence("Ctrl+O"), self, lambda: self.pick(self.src))
         self.upd_timer = QTimer(self)
         self.upd_timer.timeout.connect(lambda: self.check_update(False))
         self.upd_timer.start(UPDATE_EVERY_MS)
@@ -600,6 +599,7 @@ class Main(QMainWindow):
         bh.addWidget(word)
         bh.addStretch(1)
         outer.addWidget(brand)
+        self.brand = brand
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1474,6 +1474,157 @@ class Main(QMainWindow):
         e.accept()
 
 
+# ------------------------------------------------------------------ entornos: Events y Studio
+
+ENV_EVENTS, ENV_STUDIO = "events", "studio"
+
+
+class ModeDialog(QDialog):
+    """Al abrir una carpeta: ¿en qué entorno la usamos?"""
+
+    def __init__(self, parent, folder: str):
+        super().__init__(parent)
+        self.setWindowTitle("Abrir carpeta")
+        self.choice = ""
+        v = QVBoxLayout(self)
+        v.setSpacing(12)
+        t = QLabel(f"<b>{os.path.basename(os.path.normpath(folder))}</b>")
+        t.setObjectName("h1")
+        sub = QLabel("¿Cómo quieres trabajar con esta carpeta? Puedes cambiar de entorno cuando quieras.")
+        sub.setObjectName("muted")
+        sub.setWordWrap(True)
+        v.addWidget(t)
+        v.addWidget(sub)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        for key, title, text in (
+                (ENV_EVENTS, "Events", "Edición automática de la sesión completa: selección, revelado uniforme, "
+                                       "formatos y exportación de cientos de fotos de una vez."),
+                (ENV_STUDIO, "Studio", "Edición foto a foto, como Lightroom: sliders de revelado, curva, color, "
+                                       "antes/después, presets y LUT.")):
+            b = QPushButton(f"{title}\n\n{text}")
+            b.setObjectName("primary" if key == ENV_EVENTS else "")
+            b.setMinimumSize(250, 140)
+            b.setStyleSheet("QPushButton { text-align: left; padding: 14px; font-weight: 500; }")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _, k=key: (setattr(self, "choice", k), self.accept()))
+            row.addWidget(b)
+        v.addLayout(row)
+
+
+class Shell(QMainWindow):
+    """Ventana principal: cabecera con la marca, el interruptor de entorno y «Abrir carpeta»."""
+
+    def __init__(self):
+        super().__init__()
+        import studio
+        self.setWindowTitle(APP)
+        self.setWindowIcon(QIcon(E.asset("icon.ico")))
+        self.resize(1500, 920)
+        self.s = QSettings(APP, APP)
+        root = QWidget()
+        root.setObjectName("root")
+        self.setCentralWidget(root)
+        v = QVBoxLayout(root)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        head = QFrame()
+        head.setObjectName("sidebar")
+        head.setFixedHeight(56)
+        hh = QHBoxLayout(head)
+        hh.setContentsMargins(18, 8, 18, 8)
+        mark = QLabel()
+        mark.setPixmap(QPixmap(E.asset("mark.png")).scaledToHeight(30, Qt.SmoothTransformation))
+        word = QLabel()
+        word.setPixmap(QPixmap(E.asset("wordmark.png")).scaledToHeight(18, Qt.SmoothTransformation))
+        hh.addWidget(mark)
+        hh.addSpacing(8)
+        hh.addWidget(word)
+        hh.addSpacing(28)
+        seg = QFrame()
+        seg.setObjectName("segBar")
+        sh = QHBoxLayout(seg)
+        sh.setContentsMargins(3, 3, 3, 3)
+        sh.setSpacing(2)
+        self.env_btn = {}
+        group = QButtonGroup(self)
+        for key, text, tip in ((ENV_EVENTS, "Events", "Edición automática de sesiones completas"),
+                               (ENV_STUDIO, "Studio", "Edición foto a foto, como Lightroom")):
+            b = button(text, "seg", tip)
+            b.setCheckable(True)
+            b.setMinimumWidth(96)
+            b.clicked.connect(lambda _, k=key: self.switch(k))
+            group.addButton(b)
+            sh.addWidget(b)
+            self.env_btn[key] = b
+        hh.addWidget(seg)
+        self.folder_lbl = QLabel("")
+        self.folder_lbl.setObjectName("muted")
+        hh.addSpacing(16)
+        hh.addWidget(self.folder_lbl, 1)
+        b_open = button("Abrir carpeta…", "primary", "Elige la sesión y en qué entorno trabajarla (Ctrl+O)")
+        b_open.clicked.connect(self.open_folder)
+        hh.addWidget(b_open)
+        v.addWidget(head)
+
+        from PySide6.QtWidgets import QStackedWidget
+        self.stack = QStackedWidget()
+        self.events = Main()
+        self.events.brand.hide()  # la marca ya está en la cabecera
+        self.studio = studio.StudioView(CFG_DIR, self.events_photo)
+        self.stack.addWidget(self.events)
+        self.stack.addWidget(self.studio)
+        v.addWidget(self.stack, 1)
+        QShortcut(QKeySequence("Ctrl+O"), self, self.open_folder)
+        QShortcut(QKeySequence("Ctrl+Tab"), self, lambda: self.switch(
+            ENV_STUDIO if self.env == ENV_EVENTS else ENV_EVENTS))
+        self.folder = self.events.src.text().strip()
+        self.env = ""
+        self.switch(self.s.value("env", ENV_EVENTS))
+
+    def events_photo(self, path: str):
+        for p in self.events.photos:
+            if os.path.normcase(p.path) == os.path.normcase(path):
+                return p
+        return None
+
+    def open_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Elegir carpeta de la sesión", self.folder)
+        if not d:
+            return
+        d = os.path.normpath(d)
+        dlg = ModeDialog(self, d)
+        if dlg.exec() != QDialog.Accepted or not dlg.choice:
+            return
+        self.folder = d
+        self.events.src.setText(d)
+        self.events.save()
+        if dlg.choice == ENV_STUDIO:
+            self.studio.open_folder(d)
+        self.switch(dlg.choice)
+
+    def switch(self, env: str):
+        """Cambia de entorno conservando la carpeta: lo de un lado se ve en el otro."""
+        env = env if env in (ENV_EVENTS, ENV_STUDIO) else ENV_EVENTS
+        folder = self.events.src.text().strip() or self.folder
+        if env == ENV_STUDIO and folder and os.path.isdir(folder):
+            self.studio.open_folder(folder)  # no hace nada si ya está abierta
+        if env == ENV_EVENTS and self.studio.folder and not self.events.src.text().strip():
+            self.events.src.setText(self.studio.folder)
+        self.env = env
+        self.stack.setCurrentWidget(self.events if env == ENV_EVENTS else self.studio)
+        self.env_btn[env].setChecked(True)
+        self.folder = folder
+        self.folder_lbl.setText(os.path.basename(folder) if folder else "")
+        self.s.setValue("env", env)
+
+    def closeEvent(self, e):
+        self.events.closeEvent(e)
+        if e.isAccepted():
+            self.studio.shutdown()
+
+
 # ------------------------------------------------------------------ arranque
 
 def make_app() -> QApplication:
@@ -1493,6 +1644,7 @@ def make_app() -> QApplication:
 
 
 _SELFTEST_WIN = None
+_SELFTEST_SHELL = None
 
 
 def selftest() -> int:
@@ -1542,6 +1694,17 @@ def selftest() -> int:
         m.fill_grid()
         m.grid.setCurrentRow(0)
         assert m.preview.pm is not None
+        # los dos entornos y el interruptor
+        global _SELFTEST_SHELL
+        sh = _SELFTEST_SHELL = Shell()
+        sh.events.src.setText(d)
+        sh.switch(ENV_STUDIO)
+        assert sh.studio.items and sh.stack.currentWidget() is sh.studio
+        import studio_engine as SE
+        lin = E.load_linear(sh.studio.items[0].path, half=True)
+        assert SE.render(lin, SE.new_settings(exposure=0.5, clarity=20, hsl_orange_s=10)).shape[2] == 3
+        sh.switch(ENV_EVENTS)
+        assert sh.stack.currentWidget() is sh.events
         with open(log, "w", encoding="utf-8") as f:
             f.write(f"OK {__version__} libraw {rawpy.libraw_version} archivos {n}\n")
         return 0
@@ -1556,7 +1719,7 @@ def main():
         sys.exit(selftest())
     migrate_old_config()
     app = make_app()
-    m = Main()
+    m = Shell()
     m.show()
     code = app.exec()
     del m

@@ -260,6 +260,54 @@ class Luts(unittest.TestCase):
         self.assertEqual(S.detect_scene(ps)[0], "Deporte")
 
 
+class Studio(unittest.TestCase):
+    """Entorno Studio: revelado tipo Lightroom no destructivo."""
+
+    def setUp(self):
+        import studio_engine as SE
+        self.SE = SE
+        rng = np.random.default_rng(2)
+        g = np.linspace(0, 1, 256, dtype=np.float32)
+        base = np.tile(g, (160, 1))
+        self.lin = np.stack([base * 0.5, base * 0.4, base * 0.3], -1) ** 2.2 + rng.random((160, 256, 3)).astype(
+            np.float32) * 0.002
+        self.lin = self.lin.astype(np.float32)
+
+    def L(self, img):
+        return float((0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]).mean())
+
+    def test_each_slider_moves_in_the_right_direction(self):
+        SE = self.SE
+        n = SE.render(self.lin, SE.new_settings(sharpen=0, nr_color=0))
+        for key, up in (("exposure", 1), ("shadows", 60), ("whites", 60), ("curve_lights", 60)):
+            self.assertGreater(self.L(SE.render(self.lin, SE.new_settings(**{key: up}))), self.L(n), key)
+        self.assertLess(self.L(SE.render(self.lin, SE.new_settings(blacks=-60))), self.L(n))
+        warm = SE.render(self.lin, SE.new_settings(temp=60))
+        self.assertGreater(warm[..., 0].mean() - warm[..., 2].mean(), n[..., 0].mean() - n[..., 2].mean())
+        sat = SE.render(self.lin, SE.new_settings(saturation=80))
+        self.assertGreater(np.std(sat, -1).mean(), np.std(n, -1).mean())
+        bw = SE.render(self.lin, SE.new_settings(bw=True))
+        self.assertLess(np.abs(bw[..., 0] - bw[..., 2]).max(), 0.02)
+        cut = SE.render(self.lin, SE.new_settings(crop=[0.25, 0.0, 0.75, 1.0]))
+        self.assertAlmostEqual(cut.shape[1], n.shape[1] / 2, delta=2)
+
+    def test_settings_presets_and_export_are_non_destructive(self):
+        SE = self.SE
+        d = tempfile.mkdtemp()
+        src = os.path.join(d, "a.jpg")
+        scene().save(src, quality=93)
+        before = open(src, "rb").read()
+        s = SE.new_settings(exposure=0.5, contrast=20, rating=4)
+        SE.save(d, src, s)
+        self.assertEqual(SE.load(d, src)["contrast"], 20)
+        p = SE.save_preset(d, "Mi look", s)
+        self.assertNotIn("rating", json.load(open(p, encoding="utf-8")))  # un preset no copia la valoración
+        self.assertIn("Mi look", SE.list_presets(d))
+        out = SE.export(src, s, os.path.join(d, "Studio", "a.jpg"), 90, 400)
+        self.assertEqual(max(Image.open(out).size), 400)
+        self.assertEqual(open(src, "rb").read(), before)  # el original no se toca
+
+
 class Updater(unittest.TestCase):
     def test_versions(self):
         self.assertTrue(updater.is_newer("v0.10.0", "0.9.9"))
