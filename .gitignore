@@ -15,3 +15,7 @@ comparativa*.jpg
 *.ARW
 *.NEF
 
+
+# administración de licencias: la clave secreta de Supabase nunca va al repo
+admin.env
+*.env

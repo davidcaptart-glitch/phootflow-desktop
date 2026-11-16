@@ -1,4 +1,4 @@
-"""Actualización automática desde las Releases públicas de GitHub.
+"""Actualización automática desde las Releases públicas de GitHub (repo «phootflow-releases»).
 
 Tres formas de estar instalado:
 - «exe»: el PhootFlow.exe compilado. Se descarga el .exe nuevo, se verifica y un .bat lo sustituye.
@@ -21,7 +21,8 @@ import urllib.request
 import net
 import zipfile
 
-REPO = "davidcaptart-glitch/phootflow-desktop"
+# El código está en un repo privado; las versiones se publican en este repo público, solo de releases.
+REPO = "davidcaptart-glitch/phootflow-releases"
 ASSET_EXE = "PhootFlow.exe"
 ASSET_SRC = "PhootFlow-src.zip"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))

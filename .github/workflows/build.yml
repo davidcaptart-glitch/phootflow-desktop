@@ -34,7 +34,7 @@ jobs:
           pyinstaller --noconfirm --onefile --windowed --name PhootFlow
           --icon assets/icon.ico --add-data "assets;assets"
           --collect-all rawpy --collect-data cv2 --collect-all mediapipe --collect-all onnxruntime
-          --hidden-import scene_ai --hidden-import eyes --hidden-import luts --hidden-import studio --hidden-import studio_engine --hidden-import review app.py
+          --hidden-import scene_ai --hidden-import eyes --hidden-import luts --hidden-import studio --hidden-import studio_engine --hidden-import review --hidden-import license app.py
       - name: Comprobar que el .exe arranca y procesa
         shell: pwsh
         run: |
@@ -45,7 +45,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force pkg\PhootFlow | Out-Null
-          Copy-Item app.py, engine.py, styles.py, luts.py, studio.py, studio_engine.py, review.py, eyes.py, scene_ai.py, theme.py, drive.py, net.py, updater.py, version.py, requirements.txt, requirements-nodeps.txt, instalar.ps1, README.md pkg\PhootFlow\
+          Copy-Item app.py, engine.py, styles.py, luts.py, studio.py, studio_engine.py, review.py, eyes.py, scene_ai.py, theme.py, drive.py, net.py, updater.py, license.py, version.py, requirements.txt, requirements-nodeps.txt, instalar.ps1, README.md pkg\PhootFlow\
           Copy-Item -Recurse assets pkg\PhootFlow\assets
           Compress-Archive -Path pkg\PhootFlow -DestinationPath dist\PhootFlow-src.zip
       - name: Sumas de verificación
@@ -63,4 +63,17 @@ jobs:
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/PhootFlow.exe dist/PhootFlow.exe.sha256 dist/PhootFlow-src.zip dist/PhootFlow-src.zip.sha256 --title "PhootFlow ${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" dist/PhootFlow.exe dist/PhootFlow.exe.sha256 dist/PhootFlow-src.zip dist/PhootFlow-src.zip.sha256 instalar.ps1 --title "PhootFlow ${{ github.ref_name }}" --generate-notes
+      # El código es privado: las apps instaladas buscan las versiones en este repo público, solo de releases.
+      # RELEASES_TOKEN: token fine-grained con «Contents: read and write» solo en phootflow-releases (ver LICENCIAS.md).
+      - name: Publicar en el repo público de releases
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          if (-not $env:RELEASES_TOKEN) { throw "Falta el secreto RELEASES_TOKEN: las apps instaladas no verían esta versión." }
+          gh release view "${{ github.ref_name }}" --json body -q .body | Set-Content -Path notas.md -Encoding utf8
+          $env:GH_TOKEN = $env:RELEASES_TOKEN
+          gh release create "${{ github.ref_name }}" dist/PhootFlow.exe dist/PhootFlow.exe.sha256 dist/PhootFlow-src.zip dist/PhootFlow-src.zip.sha256 instalar.ps1 --repo davidcaptart-glitch/phootflow-releases --title "PhootFlow ${{ github.ref_name }}" --notes-file notas.md

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 
 import drive as gdrive
 import engine as E
+import license as LIC
 import luts as L
 import styles as S
 import theme as T
@@ -806,6 +807,9 @@ class Main(QMainWindow):
         self.b_upd.clicked.connect(lambda: self.check_update(True))
         fh.addWidget(ver)
         fh.addStretch(1)
+        b_lic = button("Licencia", "ghost", "Estado de la licencia de este equipo")
+        b_lic.clicked.connect(lambda: LIC.show_status(self))
+        fh.addWidget(b_lic)
         fh.addWidget(self.b_upd)
         outer.addWidget(foot)
         return side
@@ -1838,6 +1842,9 @@ def selftest() -> int:
         assert SE.render(lin, SE.new_settings(exposure=0.5, clarity=20, hsl_orange_s=10)).shape[2] == 3
         sh.switch(ENV_EVENTS)
         assert sh.stack.currentWidget() is sh.events
+        # licencias: sin red ni licencia (el build no tiene clave); solo que el módulo y sus diálogos cargan
+        assert LIC.decode_token("x.y") is None and len(LIC.fingerprint()) == 32
+        LIC._dialog_classes()[0](LIC.Estado(False, "sin_licencia", "prueba")).close()
         with open(log, "w", encoding="utf-8") as f:
             f.write(f"OK {__version__} libraw {rawpy.libraw_version} archivos {n}\n")
         return 0
@@ -1852,8 +1859,11 @@ def main():
         sys.exit(selftest())
     migrate_old_config()
     app = make_app()
+    if not LIC.ensure():
+        sys.exit(0)
     m = Shell()
     m.show()
+    LIC.watch(m)
     code = app.exec()
     del m
     sys.exit(code)

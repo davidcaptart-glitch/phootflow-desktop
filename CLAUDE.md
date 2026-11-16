@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 19 pruebas, sin fotos reales
+python -m unittest discover -s tests   # 26 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -40,6 +40,10 @@ python -m unittest discover -s tests   # 19 pruebas, sin fotos reales
   borrador de 1024 px mientras se arrastra. `Shell` (app.py) aloja Events (`Main`) y Studio con el interruptor.
 - `luts.py` — LUT .cube por tipo de sesión; `eyes.py` (MediaPipe) y `scene_ai.py` (CLIP, onnxruntime): IA local.
 - `drive.py` — OAuth de escritorio con PKCE y Drive v3 por REST.
+- `license.py` — licencias: `ensure()` en `main()` (pide clave, valida en la Edge Function `licencias` de
+  Supabase, token Ed25519 verificado en Python puro, 7 días sin conexión, huella del equipo), `watch()` cada 6 h,
+  `show_status()` (botón «Licencia» del pie de la barra lateral). Servidor en `servidor_licencias/`,
+  administración con `admin_licencias.py` (no va en el paquete). Ver `LICENCIAS.md`. El selftest no usa licencia.
 - `.github/workflows/build.yml` — en etiquetas `v*`: pruebas, PyInstaller, selftest del .exe, zip de código,
   sumas y release.
 
@@ -48,7 +52,8 @@ python -m unittest discover -s tests   # 19 pruebas, sin fotos reales
 - Nunca borrar originales: los descartes se **mueven** a `Descartadas/`; el ZIP no toca los RAW.
 - Nada se mueve en el análisis. Los XMP nunca pisan uno existente.
 - No subir fotos reales al repositorio (es público). Las pruebas usan imágenes sintéticas.
-- No guardar credenciales en el repo.
+- No guardar credenciales en el repo (la clave secreta de Supabase va en `%APPDATA%\PhootFlow\admin.env`).
+  No borrar la tabla `ajustes` de Supabase: guarda la clave de firma de las licencias.
 - Los detectores de OpenCV se crean en el hilo principal (`prepare_detectors`) y se reparten por hilo:
   un `CascadeClassifier` creado en un hilo secundario tumba el proceso al salir (Windows).
   No usar `os._exit` con la ventana Qt viva: también da access violation; salir con `sys.exit`.

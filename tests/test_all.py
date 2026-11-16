@@ -1,4 +1,5 @@
-"""Pruebas sin fotos reales: motor sobre imágenes sintéticas, actualizador y Drive contra un servidor simulado."""
+"""Pruebas sin fotos reales: motor sobre imágenes sintéticas, actualizador, y Drive y licencias contra servidores
+simulados."""
 import http.server
 import json
 import os
@@ -14,8 +15,10 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import admin_licencias  # noqa: E402
 import drive  # noqa: E402
 import engine as E  # noqa: E402
+import license as LIC  # noqa: E402
 import updater  # noqa: E402
 
 
@@ -471,6 +474,197 @@ class Drive(unittest.TestCase):
         self.assertEqual(drive.folder_id_from(fid), fid)
         with self.assertRaises(drive.DriveError):
             drive.folder_id_from("mi carpeta")
+
+
+TEST_SEED = bytes(range(32))  # clave de firma solo para las pruebas
+
+
+class FakeLicencias(http.server.BaseHTTPRequestHandler):
+    """Imita la Edge Function «licencias» (servidor_licencias/functions/licencias/index.ts)."""
+    db = {}       # clave -> {estado, titular, max_equipos, dias_offline, caduca, equipos: {huella: nombre}}
+    seed = TEST_SEED
+    down = False
+
+    def _json(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+        if FakeLicencias.down:
+            return self._json(503, {"error": "caido"})
+        clave, huella = body.get("clave", "").upper(), body.get("huella", "")
+        lic = self.db.get(clave)
+        if not lic:
+            return self._json(404, {"error": "clave_no_valida"})
+        now = int(time.time())
+        estado = ("revocada" if lic["estado"] == "revocada"
+                  else "caducada" if lic.get("caduca") and lic["caduca"] <= now else "activa")
+        eqs = lic.setdefault("equipos", {})
+        if huella not in eqs and estado == "activa":
+            if len(eqs) >= lic.get("max_equipos", 1):
+                return self._json(409, {"error": "limite_equipos", "equipos": list(eqs.values())})
+            eqs[huella] = body.get("nombre", "")
+        hasta = now + lic.get("dias_offline", 7) * 86400
+        if lic.get("caduca"):
+            hasta = min(hasta, lic["caduca"])
+        tok = LIC.make_token(self.seed, {"v": 1, "clave": clave, "huella": huella, "estado": estado,
+                                         "titular": lic.get("titular", ""), "emitido": now, "hasta": hasta,
+                                         "caduca": lic.get("caduca")})
+        self._json(200, {"token": tok, "estado": estado})
+
+    def log_message(self, *a):
+        pass
+
+
+class Licencias(unittest.TestCase):
+    KEY = "PF-AAAAA-BBBBB-CCCCC-DDDDD"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeLicencias)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.saved = (LIC.PUBLIC_KEY, LIC.STORE, os.environ.get("PHOOTFLOW_LICENCIAS_URL"))
+        LIC.PUBLIC_KEY = LIC.ed25519_public(TEST_SEED).hex()
+        os.environ["PHOOTFLOW_LICENCIAS_URL"] = f"http://127.0.0.1:{cls.srv.server_port}/"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+        LIC.PUBLIC_KEY, LIC.STORE, url = cls.saved
+        if url is None:
+            os.environ.pop("PHOOTFLOW_LICENCIAS_URL", None)
+        else:
+            os.environ["PHOOTFLOW_LICENCIAS_URL"] = url
+
+    def setUp(self):
+        LIC.STORE = os.path.join(tempfile.mkdtemp(), "licencia.json")
+        FakeLicencias.db = {self.KEY: {"estado": "activa", "titular": "Ana"}}
+        FakeLicencias.seed, FakeLicencias.down = TEST_SEED, False
+
+    def test_ed25519_rfc8032(self):
+        sk = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+        pk = LIC.ed25519_public(sk)
+        self.assertEqual(pk.hex(), "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+        sig = LIC.ed25519_sign(sk, b"")
+        self.assertEqual(sig.hex()[:32], "e5564300c360ac729086e2cc806e828a")
+        self.assertTrue(LIC.ed25519_verify(pk, b"", sig))
+        self.assertFalse(LIC.ed25519_verify(pk, b"x", sig))
+
+    def test_activate_revoke_reactivate_and_offline(self):
+        lic = FakeLicencias.db[self.KEY]
+        self.assertEqual(LIC.refresh().codigo, "sin_licencia")
+        with self.assertRaises(LIC.ErrorLicencia):
+            LIC.activate("PF-NO-EXISTE")
+        st = LIC.activate(" pf-aaaaa-bbbbb-ccccc-ddddd ")
+        self.assertTrue(st.ok and st.en_linea)
+        self.assertEqual(st.titular, "Ana")
+        self.assertIn(LIC.fingerprint(), lic["equipos"])
+        # sin conexión vale el token hasta «hasta», ni un segundo más; y un reloj atrasado no cuela
+        FakeLicencias.down = True
+        st = LIC.refresh()
+        self.assertTrue(st.ok)
+        self.assertFalse(st.en_linea)
+        self.assertEqual(LIC.evaluate(ahora=time.time() + 8 * 86400).codigo, "vencida")
+        self.assertEqual(LIC.evaluate(ahora=time.time() - 3 * 86400).codigo, "reloj")
+        FakeLicencias.down = False
+        # revocar: deja de valer, también sin conexión después
+        lic["estado"] = "revocada"
+        self.assertEqual(LIC.refresh().codigo, "revocada")
+        FakeLicencias.down = True
+        self.assertEqual(LIC.refresh().codigo, "revocada")
+        FakeLicencias.down = False
+        lic["estado"] = "activa"
+        self.assertTrue(LIC.refresh().ok)
+        # caducada
+        lic["caduca"] = int(time.time()) - 10
+        self.assertEqual(LIC.refresh().codigo, "caducada")
+        # clave borrada en el servidor
+        del FakeLicencias.db[self.KEY]
+        self.assertEqual(LIC.refresh().codigo, "clave_no_valida")
+        self.assertEqual(LIC.evaluate().codigo, "clave_no_valida")
+
+    def test_one_machine_tampering_and_foreign_signatures(self):
+        lic = FakeLicencias.db[self.KEY]
+        lic["equipos"] = {"f" * 32: "Otro PC"}
+        with self.assertRaisesRegex(LIC.ErrorLicencia, "otro equipo"):
+            LIC.activate(self.KEY)
+        lic["equipos"] = {}
+        self.assertTrue(LIC.activate(self.KEY).ok)
+        # editar el token a mano rompe la firma
+        d = LIC._load()
+        p, s = d["token"].split(".")
+        data = json.loads(LIC._b64d(p))
+        data["hasta"] += 365 * 86400
+        d["token"] = LIC._b64e(json.dumps(data).encode()) + "." + s
+        self.assertEqual(LIC.evaluate(d).codigo, "sin_licencia")
+        # copiar licencia.json a otro equipo no sirve
+        d = LIC._load()
+        real = LIC.fingerprint
+        LIC.fingerprint = lambda: "0" * 32
+        try:
+            self.assertEqual(LIC.evaluate(d).codigo, "otro_equipo")
+        finally:
+            LIC.fingerprint = real
+        # un servidor que firma con otra clave no puede dar licencias
+        FakeLicencias.seed = bytes(32)
+        with self.assertRaises(LIC.ErrorLicencia):
+            LIC.activate(self.KEY)
+
+    def test_admin_tool(self):
+        import contextlib
+        import io
+        calls = []
+
+        class Resp:
+            def __init__(self, obj):
+                self.raw = json.dumps(obj).encode()
+
+            def read(self):
+                return self.raw
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        row = {"id": "u1", "clave": "PF-X", "titular": "Ana", "estado": "activa", "max_equipos": 1,
+               "dias_offline": 7, "caduca": None, "email": "", "notas": "", "creada": "2026-11-16T10:00:00+00:00",
+               "equipos": [{"id": "e1", "huella": "abcdef0123", "nombre": "PORTATIL", "version": "0.6.0",
+                            "primera": None, "ultima": None}]}
+
+        def opener(req, timeout=0):
+            body = json.loads(req.data) if req.data else None
+            calls.append((req.get_method(), req.full_url, body, dict(req.header_items())))
+            if req.get_method() in ("POST", "PATCH"):
+                return Resp([{**row, **body}])
+            return Resp([] if req.get_method() == "DELETE" else [row])
+
+        adm = admin_licencias.Admin("https://x.supabase.co", "sb_secret_prueba", opener)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            admin_licencias.main(["crear", "Luis", "--email", "l@x.es"], adm)
+            admin_licencias.main(["revocar", "pf-x"], adm)
+            admin_licencias.main(["liberar", "PF-X", "portatil"], adm)
+            admin_licencias.main(["listar"], adm)
+        m, url, body, hdr = calls[0]
+        self.assertEqual((m, url), ("POST", "https://x.supabase.co/rest/v1/licencias"))
+        self.assertRegex(body["clave"], r"^PF(-[0-9A-HJKMNP-TV-Z]{5}){4}$")
+        self.assertEqual((body["titular"], body["max_equipos"], body["dias_offline"]), ("Luis", 1, 7))
+        self.assertEqual(hdr.get("Apikey"), "sb_secret_prueba")
+        self.assertNotIn("Authorization", hdr)
+        patch = [c for c in calls if c[0] == "PATCH"][0]
+        self.assertTrue(patch[1].endswith("licencias?id=eq.u1"))
+        self.assertEqual(patch[2]["estado"], "revocada")
+        self.assertTrue([c for c in calls if c[0] == "DELETE"][0][1].endswith("equipos?id=eq.e1"))
+        self.assertIn(body["clave"], out.getvalue())
+        self.assertIn("PORTATIL", out.getvalue())
 
 
 if __name__ == "__main__":

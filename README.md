@@ -12,7 +12,7 @@ opcional. Antes se llamaba *EventEdits*.
 | Opción | Cuándo |
 |---|---|
 | **`instalar.ps1`** (recomendada) | Cualquier PC con Python 3.11+. Imprescindible si Windows tiene **Smart App Control** activo: bloquea el `.exe` sin firmar. |
-| **`PhootFlow.exe`** de la [última versión](https://github.com/davidcaptart-glitch/phootflow-desktop/releases/latest) | PCs sin Smart App Control. Al no estar firmado, Windows avisa la primera vez: *Más información → Ejecutar de todas formas*. |
+| **`PhootFlow.exe`** de la [última versión](https://github.com/davidcaptart-glitch/phootflow-releases/releases/latest) | PCs sin Smart App Control. Al no estar firmado, Windows avisa la primera vez: *Más información → Ejecutar de todas formas*. |
 
 ```
 powershell -ExecutionPolicy Bypass -File instalar.ps1
@@ -20,6 +20,9 @@ powershell -ExecutionPolicy Bypass -File instalar.ps1
 
 Las dos se **actualizan solas**: al abrirse (y cada 4 horas) miran si hay una versión nueva, la descargan,
 comprueban su SHA-256 y se reinician.
+
+La primera vez, PhootFlow pide una **clave de activación** (te la da David). Queda vinculada a tu equipo y
+funciona sin conexión hasta 7 días seguidos. El estado se ve en el botón *Licencia* de la barra lateral.
 
 ## Uso
 

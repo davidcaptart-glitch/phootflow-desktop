@@ -2,7 +2,7 @@
 # Uso:  powershell -ExecutionPolicy Bypass -File instalar.ps1
 # Es la vía recomendada en PCs con Smart App Control, que bloquea el .exe sin firmar.
 $ErrorActionPreference = "Stop"
-$repo = "davidcaptart-glitch/phootflow-desktop"
+$repo = "davidcaptart-glitch/phootflow-releases"
 $dest = Join-Path $env:LOCALAPPDATA "Programs\PhootFlow"
 
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
