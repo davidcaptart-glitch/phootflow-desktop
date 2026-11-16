@@ -60,6 +60,26 @@ Sesión/
 - **Blanco y negro editorial** (opción): mezcla de canales pensada para la piel, contraste local, negros densos
   sin empastar, blancos limpios y grano fino.
 
+## Dos entornos: Events y Studio
+
+El interruptor **Events | Studio** de la cabecera cambia de entorno conservando la carpeta. Al **abrir una
+carpeta** se elige en cuál trabajarla.
+
+- **Events**: edición automática de sesiones completas (lo de abajo).
+- **Studio**: edición foto a foto como Lightroom — biblioteca con estrellas y marcas (P/X/U, 0–5), revelado
+  en vivo (Básico, Presencia, Curva, Mezcla HSL de 8 bandas, Gradación de color, Detalle, Efectos, Enderezar,
+  LUT, B/N), antes/después (`\`), historial (Ctrl+Z / Ctrl+Y), copiar/pegar/sincronizar ajustes, presets propios
+  y los 18 de LightCraft, y exportación. No destructivo: los ajustes se guardan en `.phootflow/studio/`.
+  Fórmulas de revelado portadas de [LightCraft](https://github.com/storytold/lightcraft) (Apache-2.0).
+
+### Revisión antes de exportar (Events)
+
+Antes de exportar se abre la revisión: cada foto con su edición final, **Aprobar (A) / Rechazar (R)**, flechas
+para moverse, filtros (aprobadas, rechazadas, pendientes), **Ver B/N (B)** y **recortes alternativos** para
+elegir otro formato. **Editar en Studio (E)** abre la foto en Studio partiendo de la edición de Events; con
+«Usar en Events y volver» esa foto se exportará con la edición de Studio. Se puede desactivar con la casilla
+«Revisar antes de exportar».
+
 ## Edición uniforme
 
 La sesión entera se revela con **un único ajuste**, como al sincronizar ajustes en Lightroom: una sola curva y

@@ -77,6 +77,7 @@ class Worker(QThread):
         super().__init__()
         self.mode, self.photos, self.st, self.src, self.out, self.cloud = mode, photos, st, src, out, cloud or {}
         self.cancel = False
+        self.overrides: dict = {}  # ruta (normcase) -> ajustes de Studio para exportar esa foto con ellos
 
     def run(self):
         keep_awake(True)
@@ -140,7 +141,8 @@ class Worker(QThread):
         return detected + f"Análisis: {keep} para editar, {n - keep} descartadas" + (f", {warn} con avisos." if warn else ".")
 
     def export(self, prefix: str = ""):
-        keep = [p for p in self.photos if p.keep]
+        studio_keep = [p for p in self.photos if p.keep and os.path.normcase(p.path) in self.overrides]
+        keep = [p for p in self.photos if p.keep and os.path.normcase(p.path) not in self.overrides]
         before = E.exported_names(self.out) if self.st.resume else set()
         resumed = sum(1 for p in keep if os.path.basename(p.path) in before)
         t0 = time.time()
@@ -153,6 +155,20 @@ class Worker(QThread):
         extra = f", {resumed} ya hechas antes" if resumed else ""
         self.progress.emit(0, len(keep), f"Editando {len(keep)} fotos ({self.st.workers} a la vez{extra})…")
         files = E.export_many(keep, self.st, self.out, __version__, on_done, lambda: self.cancel)
+        if studio_keep and not self.cancel:
+            import studio_engine as SE
+            for j, p in enumerate(studio_keep):
+                self.progress.emit(j, len(studio_keep), f"Exportando las retocadas en Studio ({j + 1}/{len(studio_keep)})…")
+                s = self.overrides[os.path.normcase(p.path)]
+                for size in self.st.sizes:
+                    side = None if size == "max" else int(size)
+                    try:
+                        SE.export(p.path, s, os.path.join(self.out, "Sugeridas", f"{p.name}_studio_{size}.jpg"),
+                                  self.st.quality, side)
+                        files += 1
+                    except Exception as e:
+                        p.error = f"{type(e).__name__}: {e}"
+            keep = keep + studio_keep
         if self.cancel:
             E.write_report(self.photos, self.out)
             return self.done.emit("Exportación cancelada (lo ya exportado se conserva).", "")
@@ -539,6 +555,7 @@ class PreviewLabel(QLabel):
 class Main(QMainWindow):
     update_found = Signal(dict, bool)  # info, comprobación pedida a mano
     recalibrated = Signal(dict)        # ajustes de sesión recalculados (p. ej. al cambiar de LUT)
+    request_studio = Signal(object)    # la revisión pide retocar esta foto en Studio
     models_status = Signal(str)        # mensajes de la descarga/carga de los modelos de IA
 
     def __init__(self):
@@ -737,7 +754,10 @@ class Main(QMainWindow):
         self.c_xmp.setToolTip("Exposición, giro, recorte y reducción de ruido; los descartes como «rechazadas».\n"
                               "Nunca sobrescribe un XMP que ya exista.")
         self.c_zip = QCheckBox("Guardar los originales en un ZIP sin pérdida")
-        for w in (self.c_exif, self.c_xmp, self.c_zip):
+        self.c_review = QCheckBox("Revisar antes de exportar (una a una)")
+        self.c_review.setToolTip("Antes de exportar se abre la revisión: aprobar/rechazar, ver B/N, probar\n"
+                                 "otros recortes y retocar en Studio las que no convenzan.")
+        for w in (self.c_review, self.c_exif, self.c_xmp, self.c_zip):
             cv.addWidget(w)
         self.workers = QSpinBox()
         self.workers.setRange(1, max(1, min(8, (os.cpu_count() or 2))))
@@ -821,10 +841,12 @@ class Main(QMainWindow):
                              "Si se corta, al volver a pulsarlo sigue donde se quedó.")
         self.b_an.clicked.connect(lambda: self.start_analyze(False))
         self.b_ex.clicked.connect(self.start_export)
+        self.b_rev = button("Revisar", "", "Revisión una a una antes de exportar")
+        self.b_rev.clicked.connect(lambda: self.open_review())
         self.b_auto.clicked.connect(lambda: self.start_analyze(True))
         self.b_ca.clicked.connect(self.do_cancel)
         self.b_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.out_dir())))
-        for b in (self.b_open, self.b_ca, self.b_an, self.b_ex, self.b_auto):
+        for b in (self.b_open, self.b_ca, self.b_an, self.b_rev, self.b_ex, self.b_auto):
             head.addWidget(b)
         v.addLayout(head)
 
@@ -963,6 +985,7 @@ class Main(QMainWindow):
         self.c_eyes.setChecked(b("eyes", False))
         self.style_cb.setCurrentText(g("style", S.AUTO))
         self.c_zip.setChecked(b("zip", True))
+        self.c_review.setChecked(b("review", True))
         self.c_up_orig.setChecked(b("up_orig", True))
         self.q.setValue(int(g("quality", 95)))
         self.workers.setValue(int(g("workers", min(3, max(1, (os.cpu_count() or 2) // 4)))))
@@ -976,7 +999,7 @@ class Main(QMainWindow):
                      ("orig", st.export_original_ratio), ("exif", st.keep_exif), ("xmp", st.write_xmp), ("bw", st.bw),
                      ("uniform", st.uniform), ("cam", st.camera_look), ("eyes", st.cull_eyes),
                      ("style", self.style_cb.currentText()),
-                     ("zip", st.archive_originals), ("up_orig", self.c_up_orig.isChecked()),
+                     ("zip", st.archive_originals), ("review", self.c_review.isChecked()), ("up_orig", self.c_up_orig.isChecked()),
                      ("quality", st.quality), ("workers", st.workers),
                      ("cloud", self.cloud.currentIndex()), ("cloud_folder", self.cloud_folder.text())]:
             self.s.setValue(k, v)
@@ -1308,6 +1331,7 @@ class Main(QMainWindow):
     def busy(self, on: bool):
         self.b_an.setEnabled(not on)
         self.b_auto.setEnabled(not on)
+        self.b_rev.setEnabled(not on and any(p.thumb for p in self.photos))
         self.b_ex.setEnabled(not on and any(p.keep and p.thumb for p in self.photos))
         self.b_ca.setVisible(on)
         self.b_open.setVisible(not on and bool(self.src.text().strip()))
@@ -1331,7 +1355,9 @@ class Main(QMainWindow):
         if auto and cloud is None:
             return
         self.fill_grid()
-        self.run(Worker("auto" if auto else "analyze", self.photos, self.settings(), src, self.out_dir(), cloud))
+        self._review_after = bool(auto and self.c_review.isChecked())
+        mode = "analyze" if (not auto or self._review_after) else "auto"
+        self.run(Worker(mode, self.photos, self.settings(), src, self.out_dir(), cloud))
 
     def cloud_params(self):
         cloud = {"kind": self.cloud.currentIndex(), "folder": self.cloud_folder.text().strip(),
@@ -1348,13 +1374,52 @@ class Main(QMainWindow):
             return None
         return cloud
 
-    def start_export(self):
+    def start_export(self, reviewed: bool = False):
+        if self.c_review.isChecked() and not reviewed:
+            return self.open_review()
         st = self.settings()
         cloud = self.cloud_params()
         if cloud is None:
             return
         self.save()
-        self.run(Worker("export", self.photos, st, self.src.text().strip(), self.out_dir(), cloud))
+        import review
+        w = Worker("export", self.photos, st, self.src.text().strip(), self.out_dir(), cloud)
+        w.overrides = review.pending_studio_paths(self.src.text().strip())
+        self.run(w)
+
+    # ----------------------------------------------------- revisión
+    def open_review(self, start: int = 0):
+        import review
+        import studio_engine as SE
+        if not any(p.thumb for p in self.photos):
+            return QMessageBox.information(self, APP, "Analiza primero la sesión.")
+        style = self.settings().style
+        overrides = review.pending_studio_paths(self.src.text().strip())
+
+        def render_fn(ph, bw):
+            return render_preview(ph, dict(style, bw=bool(bw or style.get("bw"))))
+
+        def studio_fn(ph, bw):
+            s = overrides[os.path.normcase(ph.path)]
+            lin = E.load_linear(ph.path, half=True)
+            f = 1600 / max(lin.shape[:2])
+            if f < 1:
+                import cv2
+                lin = cv2.resize(lin, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+            return SE.render(lin, dict(s, bw=bool(bw or s.get("bw"))))
+
+        dlg = review.ReviewDialog(self, render_fn, studio_fn,
+                                  lambda ph: os.path.normcase(ph.path) in overrides, start)
+        dlg.exec()
+        self.refresh_counts()
+        self.apply_filter()
+        self.grid.viewport().update()
+        if self.grid.currentRow() >= 0:
+            self.on_select(self.grid.currentRow())
+        if dlg.action == "export":
+            self.start_export(reviewed=True)
+        elif dlg.action == "studio":
+            self.request_studio.emit(dlg.studio_photo)
 
     def run(self, worker):
         st_cube = worker.st.style.get("cube") or ""
@@ -1397,6 +1462,13 @@ class Main(QMainWindow):
 
     def on_done(self, msg, link):
         self.worker = None
+        if getattr(self, "_review_after", False):
+            self._review_after = False
+            self.busy(False)
+            self.status.setText(msg + " Revisa y aprueba antes de exportar.")
+            self.refresh_counts()
+            self.grid.viewport().update()
+            return self.open_review()
         self.pb.setMaximum(1)
         self.pb.setValue(1)
         self.status.setText(msg + (f"  Enlace para compartir: {link}" if link else ""))
@@ -1575,6 +1647,7 @@ class Shell(QMainWindow):
         self.studio = studio.StudioView(CFG_DIR, self.events_photo)
         self.stack.addWidget(self.events)
         self.stack.addWidget(self.studio)
+        self.events.request_studio.connect(self.edit_in_studio)
         v.addWidget(self.stack, 1)
         QShortcut(QKeySequence("Ctrl+O"), self, self.open_folder)
         QShortcut(QKeySequence("Ctrl+Tab"), self, lambda: self.switch(
@@ -1618,6 +1691,24 @@ class Shell(QMainWindow):
         self.folder = folder
         self.folder_lbl.setText(os.path.basename(folder) if folder else "")
         self.s.setValue("env", env)
+
+    def edit_in_studio(self, ph):
+        """Desde la revisión: retocar esta foto en Studio partiendo de la edición de Events."""
+        import studio_engine as SE
+        style = self.events.settings().style
+        init = SE.from_style(SE.auto_settings(ph), style)
+        if style.get("cube"):
+            init.update(lut=style["cube"], lut_strength=int(100 * float(style.get("cube_strength", 1.0))))
+        self.switch(ENV_STUDIO)
+        self.studio.edit_for_events(ph.path, init, lambda: self.back_to_review(ph, True),
+                                    lambda: self.back_to_review(ph, False))
+
+    def back_to_review(self, ph, use: bool):
+        if use:
+            ph.keep, ph.reviewed, ph.reason = True, True, ""
+        self.switch(ENV_EVENTS)
+        photos = [p for p in self.events.photos if p.thumb and not p.error]
+        self.events.open_review(photos.index(ph) if ph in photos else 0)
 
     def closeEvent(self, e):
         self.events.closeEvent(e)

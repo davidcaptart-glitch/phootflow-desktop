@@ -308,6 +308,20 @@ class Studio(unittest.TestCase):
         self.assertEqual(open(src, "rb").read(), before)  # el original no se toca
 
 
+class ReviewFlow(unittest.TestCase):
+    def test_studio_overrides_are_found_for_export(self):
+        import review
+        import studio_engine as SE
+        d = tempfile.mkdtemp()
+        for n in ("a.jpg", "b.jpg"):
+            scene().save(os.path.join(d, n))
+        SE.save(d, os.path.join(d, "a.jpg"), SE.new_settings(exposure=0.4, _events_override=True))
+        SE.save(d, os.path.join(d, "b.jpg"), SE.new_settings(exposure=0.2))  # editada en Studio, no para Events
+        found = review.pending_studio_paths(d)
+        self.assertEqual(list(found), [os.path.normcase(os.path.join(d, "a.jpg"))])
+        self.assertEqual(found[os.path.normcase(os.path.join(d, "a.jpg"))]["exposure"], 0.4)
+
+
 class Updater(unittest.TestCase):
     def test_versions(self):
         self.assertTrue(updater.is_newer("v0.10.0", "0.9.9"))

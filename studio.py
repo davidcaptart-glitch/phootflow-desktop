@@ -400,6 +400,21 @@ class StudioView(QWidget):
         for b in (self.b_before, self.b_auto, self.b_reset, self.b_copy, self.b_paste, self.b_sync, self.b_export):
             bar.addWidget(b)
         v.addLayout(bar)
+        self.banner = QFrame()
+        self.banner.setObjectName("banner")
+        bh = QHBoxLayout(self.banner)
+        bh.setContentsMargins(12, 6, 6, 6)
+        self.banner_txt = QLabel("")
+        self.b_use = _btn("Usar en Events y volver", "primary")
+        self.b_back = _btn("Volver sin cambios", "ghost")
+        bh.addWidget(self.banner_txt, 1)
+        bh.addWidget(self.b_back)
+        bh.addWidget(self.b_use)
+        self.banner.hide()
+        self.b_use.clicked.connect(lambda: self._finish_events(True))
+        self.b_back.clicked.connect(lambda: self._finish_events(False))
+        self._events_cb = None
+        v.addWidget(self.banner)
         self.canvas = Canvas()
         v.addWidget(self.canvas, 1)
         foot = QHBoxLayout()
@@ -867,6 +882,36 @@ class StudioView(QWidget):
         self.status.setText(text)
         if i >= n:
             QTimer.singleShot(2500, self.pb.hide)
+
+    # ---------------------------------------------------------- ida y vuelta con Events
+    def edit_for_events(self, path, initial: dict, on_use, on_back):
+        """Abre `path` para retocarla y usarla en la exportación de Events."""
+        idx = next((i for i, it in enumerate(self.items) if os.path.normcase(it.path) == os.path.normcase(path)), -1)
+        if idx < 0:
+            return
+        it = self.items[idx]
+        if not it.settings or not it.settings.get("_events_override"):
+            it.settings = dict(initial)
+            it.needs_auto_ev = False
+        self._events_cb = (on_use, on_back)
+        self.banner_txt.setText(f"<b>Editando {it.name} para Events.</b> Ajusta lo que quieras; al volver, se "
+                                "exportará con esta edición.")
+        self.banner.show()
+        for row in range(self.film.count()):
+            if self.film.item(row).data(ROLE) == idx:
+                self.film.setCurrentRow(row)
+                break
+        self.select(self.film.currentRow())
+
+    def _finish_events(self, use: bool):
+        if not self._events_cb or not self.cur:
+            return
+        if use:
+            self.cur.settings["_events_override"] = True
+        self._save_cur()
+        self.banner.hide()
+        cb, self._events_cb = self._events_cb[0 if use else 1], None
+        cb()
 
     def shutdown(self):
         self._save_cur()

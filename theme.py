@@ -20,7 +20,13 @@ QSS = f"""
     font-size: 10pt;
     color: {TEXT};
 }}
-QMainWindow, QWidget#root {{ background: {BG}; }}
+QMainWindow, QDialog, QWidget#root {{ background: {BG}; }}
+QListWidget {{ background: {BG}; border: none; outline: none; }}
+QListWidget::item {{ color: {MUTED}; }}
+QListWidget::item:selected {{ background: {SURFACE_3}; color: {TEXT}; border-radius: 6px; }}
+QTabWidget::pane {{ border: none; }}
+QTabBar::tab {{ background: transparent; color: {MUTED}; padding: 6px 10px; }}
+QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {ACCENT}; }}
 QWidget#sidebar {{ background: {SURFACE}; border-right: 1px solid {BORDER}; }}
 QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; border: none; }}
 QFrame#card {{
