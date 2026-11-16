@@ -63,7 +63,7 @@ HSL_BANDS = [("red", "Rojo", 0), ("orange", "Naranja", 30), ("yellow", "Amarillo
 
 DEFAULTS: dict = {k: v for _, ctrls in PANELS for k, *_rest, v in [(c[0], c[5]) for c in ctrls]}
 DEFAULTS.update({f"hsl_{b}_{p}": 0 for b, _, _ in HSL_BANDS for p in ("h", "s", "l")})
-DEFAULTS.update({"bw": False, "crop": [0.0, 0.0, 1.0, 1.0], "crop_ratio": "Original", "lut": "", "lut_strength": 100,
+DEFAULTS.update({"bw_style": "Editorial", "bw": False, "crop": [0.0, 0.0, 1.0, 1.0], "crop_ratio": "Original", "lut": "", "lut_strength": 100,
                  "rating": 0, "flag": 0, "profile": "Neutro"})
 
 
@@ -402,7 +402,7 @@ def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True) -> np.nda
         except Exception:
             pass
     if s["bw"]:
-        y = E.bw_editorial(y, seed=seed)
+        y = E.bw_editorial(y, seed=seed, style=s.get("bw_style") or "Editorial")
     y = effects_stage(y, s, seed)
     if s["angle"]:
         y = E.rotate(y, s["angle"])

@@ -416,8 +416,12 @@ def render_preview(ph: E.Photo, style: dict | None = None) -> np.ndarray:
                 a = L.apply(a, style["cube"], k)
             except Exception:
                 pass
+        if not style.get("_no_look"):
+            a = E.apply_look(a, ph.look or style.get("look") or "Natural")
         if style.get("bw"):
-            a = E.bw_editorial(a, seed=ph.dhash & 0xFFFFFFFF)
+            bws = ph.bw_style or style.get("bw_style") or "Editorial"
+            if bws != E.BW_NONE:
+                a = E.bw_editorial(a, seed=ph.dhash & 0xFFFFFFFF, style=bws)
     return (np.clip(a, 0, 1) * 255).astype(np.uint8)
 
 
@@ -697,6 +701,12 @@ class Main(QMainWindow):
                               "No se usa con los estilos aprendidos, que ya llevan tu aspecto.")
         cv.addWidget(labeled("Reducción de grano", self.nr))
         cv.addWidget(labeled("Compensar exposición", self.evc))
+        self.look_cb = QComboBox()
+        self.look_cb.addItems(list(E.COLOR_LOOKS))
+        self.look_cb.setToolTip("Look de color de la sesión. En cada foto se puede elegir otro (panel de la foto\n"
+                                "o revisión).")
+        self.look_cb.currentTextChanged.connect(lambda _: self.show_preview() if hasattr(self, "preview") else None)
+        cv.addWidget(labeled("Look de color", self.look_cb))
         cv.addWidget(self.straight)
         cv.addWidget(self.c_uniform)
         cv.addWidget(self.c_cam)
@@ -742,6 +752,11 @@ class Main(QMainWindow):
         self.c_bw.setToolTip("Además del color, una versión B/N de catálogo en «ByN/»: mezcla pensada para la piel,\n"
                              "contraste local, negros densos sin empastar, blancos limpios y grano fino.")
         cv.addWidget(self.c_bw)
+        self.bw_style_cb = QComboBox()
+        self.bw_style_cb.addItems(list(E.BW_STYLES))
+        self.bw_style_cb.setToolTip("Estilo de blanco y negro de la sesión. En cada foto se puede elegir otro\n"
+                                    "(panel de la foto o revisión), o quitarle la versión B/N.")
+        cv.addWidget(labeled("Estilo B/N", self.bw_style_cb))
         self.q = QSpinBox()
         self.q.setRange(70, 100)
         cv.addWidget(labeled("Calidad JPG", self.q))
@@ -957,6 +972,16 @@ class Main(QMainWindow):
         self.p_lut.setToolTip("Intensidad del LUT solo en esta foto (las demás no cambian).")
         self.p_lut.valueChanged.connect(self.on_photo_lut)
         cv.addWidget(labeled("LUT en esta foto", self.p_lut))
+        self.p_bw = QComboBox()
+        self.p_bw.addItems(["Como la sesión"] + list(E.BW_STYLES) + [E.BW_NONE])
+        self.p_bw.setToolTip("Estilo de blanco y negro solo para esta foto, o sin versión B/N.")
+        self.p_bw.currentTextChanged.connect(self.on_photo_bw)
+        cv.addWidget(labeled("B/N en esta foto", self.p_bw))
+        self.p_look = QComboBox()
+        self.p_look.addItems(["Como la sesión"] + list(E.COLOR_LOOKS))
+        self.p_look.setToolTip("Look de color solo para esta foto.")
+        self.p_look.currentTextChanged.connect(self.on_photo_look)
+        cv.addWidget(labeled("Look en esta foto", self.p_look))
         v.addWidget(c)
         self.p_card = c
         c.setEnabled(False)
@@ -980,6 +1005,8 @@ class Main(QMainWindow):
         self.c_exif.setChecked(b("exif", True))
         self.c_xmp.setChecked(b("xmp", False))
         self.c_bw.setChecked(b("bw", False))
+        self.bw_style_cb.setCurrentText(g("bw_style", "Editorial"))
+        self.look_cb.setCurrentText(g("look", "Natural"))
         self.c_uniform.setChecked(b("uniform", True))
         self.c_cam.setChecked(b("cam", True))
         self.c_eyes.setChecked(b("eyes", False))
@@ -996,7 +1023,7 @@ class Main(QMainWindow):
         st = self.settings()
         for k, v in [("src", self.src.text()), ("out", self.out.text()), ("nr", st.nr), ("sens", st.sensitivity),
                      ("ratios", ",".join(st.ratios)), ("sizes", ",".join(st.sizes)),
-                     ("orig", st.export_original_ratio), ("exif", st.keep_exif), ("xmp", st.write_xmp), ("bw", st.bw),
+                     ("orig", st.export_original_ratio), ("exif", st.keep_exif), ("xmp", st.write_xmp), ("bw", st.bw), ("bw_style", st.bw_style), ("look", st.look),
                      ("uniform", st.uniform), ("cam", st.camera_look), ("eyes", st.cull_eyes),
                      ("style", self.style_cb.currentText()),
                      ("zip", st.archive_originals), ("review", self.c_review.isChecked()), ("up_orig", self.c_up_orig.isChecked()),
@@ -1031,6 +1058,7 @@ class Main(QMainWindow):
             quality=self.q.value(), move_discards=self.c_move.isChecked(),
             archive_originals=self.c_zip.isChecked(), keep_exif=self.c_exif.isChecked(),
             write_xmp=self.c_xmp.isChecked(), workers=self.workers.value(), bw=self.c_bw.isChecked(),
+            bw_style=self.bw_style_cb.currentText(), look=self.look_cb.currentText(),
             cache_dir=os.path.join(work_dir(self.out_dir()), "previas"), resume=True)
 
     def out_dir(self) -> str:
@@ -1268,8 +1296,10 @@ class Main(QMainWindow):
         state = ph.error or ph.reason or ("Para editar" if ph.thumb else "Sin analizar")
         info = " · ".join(bits)
         self.p_info.setText(f"{state}{'  —  ' + info if info else ''}" + (f"\n⚠ {ph.warn}" if ph.warn else ""))
-        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut):
+        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut, self.p_bw, self.p_look):
             w.blockSignals(True)
+        self.p_look.setCurrentText(ph.look or "Como la sesión")
+        self.p_bw.setCurrentText(ph.bw_style or "Como la sesión")
         has_lut = self.lut_cb.currentData() is not None
         self.p_lut.setEnabled(has_lut)
         self.p_lut.setValue(int(round(100 * (ph.lut_strength if ph.lut_strength is not None
@@ -1280,7 +1310,7 @@ class Main(QMainWindow):
         self.p_fmt.clear()
         self.p_fmt.addItems(list(ph.crops) or ["Original"])
         self.p_fmt.setCurrentText(ph.best)
-        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut):
+        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut, self.p_bw, self.p_look):
             w.blockSignals(False)
         self.p_card.setEnabled(bool(ph.thumb) and not ph.error and not self.worker)
         self.show_preview()
@@ -1292,6 +1322,16 @@ class Main(QMainWindow):
             return self.preview.set_image(pm, None)
         pm = np_to_pixmap(render_preview(ph, self.settings().style))
         self.preview.set_image(pm, ph.crops.get(ph.best), dim=not ph.keep)
+
+    def on_photo_look(self, text):
+        if self.cur:
+            self.cur.look = "" if text == "Como la sesión" else text
+            self.show_preview()
+            self.grid.viewport().update()
+
+    def on_photo_bw(self, text):
+        if self.cur:
+            self.cur.bw_style = "" if text == "Como la sesión" else text
 
     def on_photo_lut(self, v):
         ph = self.cur
@@ -1397,7 +1437,7 @@ class Main(QMainWindow):
         overrides = review.pending_studio_paths(self.src.text().strip())
 
         def render_fn(ph, bw):
-            return render_preview(ph, dict(style, bw=bool(bw or style.get("bw"))))
+            return render_preview(ph, dict(style, bw=False, _no_look=True))
 
         def studio_fn(ph, bw):
             s = overrides[os.path.normcase(ph.path)]
@@ -1406,10 +1446,12 @@ class Main(QMainWindow):
             if f < 1:
                 import cv2
                 lin = cv2.resize(lin, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
-            return SE.render(lin, dict(s, bw=bool(bw or s.get("bw"))))
+            return SE.render(lin, dict(s, bw=False))
 
         dlg = review.ReviewDialog(self, render_fn, studio_fn,
-                                  lambda ph: os.path.normcase(ph.path) in overrides, start)
+                                  lambda ph: os.path.normcase(ph.path) in overrides, start,
+                                  bw_style=self.bw_style_cb.currentText(), bw_on=self.c_bw.isChecked(),
+                                  look=self.look_cb.currentText())
         dlg.exec()
         self.refresh_counts()
         self.apply_filter()

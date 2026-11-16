@@ -108,7 +108,8 @@ class ReviewDialog(QDialog):
     aplican directamente a las fotos."""
     studio_requested = Signal(object)
 
-    def __init__(self, main, render_fn, studio_render_fn, is_studio_fn, start=0):
+    def __init__(self, main, render_fn, studio_render_fn, is_studio_fn, start=0, bw_style="Editorial",
+                 bw_on=False, look="Natural"):
         super().__init__(main)
         self.setWindowTitle("Revisión antes de exportar")
         self.setWindowState(Qt.WindowMaximized)
@@ -117,6 +118,9 @@ class ReviewDialog(QDialog):
         self.photos = [p for p in main.photos if p.thumb and not p.error]
         self.action, self.studio_photo = "", None
         self.bw = False
+        self.bw_style = bw_style  # estilo de B/N de la sesión
+        self.bw_on = bw_on        # ¿se exporta versión B/N?
+        self.look = look          # look de color de la sesión
         self._cache: dict = {}
 
         v = QVBoxLayout(self)
@@ -170,6 +174,17 @@ class ReviewDialog(QDialog):
         row.addWidget(self.b_no)
         self.b_studio = _btn("Editar en Studio", "ghost", "Retocar esta foto foto a foto en Studio (E)")
         self.b_studio.clicked.connect(self._studio)
+        self.bw_t = QLabel("ESTILO B/N DE ESTA FOTO")
+        self.bw_t.setObjectName("cardTitle")
+        self.bw_list = QListWidget()
+        self.bw_list.setViewMode(QListView.IconMode)
+        self.bw_list.setResizeMode(QListView.Adjust)
+        self.bw_list.setMovement(QListView.Static)
+        self.bw_list.setWrapping(True)
+        self.bw_list.setIconSize(QSize(88, 70))
+        self.bw_list.setGridSize(QSize(100, 96))
+        self.bw_list.setFixedHeight(214)
+        self.bw_list.itemClicked.connect(self._pick_bw)
         crops_t = QLabel("RECORTE")
         crops_t.setObjectName("cardTitle")
         self.crops = QListWidget()
@@ -187,6 +202,8 @@ class ReviewDialog(QDialog):
         sv.addLayout(row)
         sv.addWidget(self.b_studio)
         sv.addSpacing(6)
+        sv.addWidget(self.bw_t)
+        sv.addWidget(self.bw_list)
         sv.addWidget(crops_t)
         sv.addWidget(self.crops, 1)
         mid.addWidget(side)
@@ -248,9 +265,9 @@ class ReviewDialog(QDialog):
     # ---------------------------------------------------------- foto actual
     def _base(self, ph):
         """Foto revelada entera (sin recortar) con el estilo de la sesión, en color o B/N."""
-        key = (ph.path, self.bw, round(ph.ev, 2), round(ph.angle, 2), self.is_studio(ph))
+        key = (ph.path, round(ph.ev, 2), round(ph.angle, 2), self.is_studio(ph))
         if key not in self._cache:
-            a = self.studio_render_fn(ph, self.bw) if self.is_studio(ph) else self.render_fn(ph, self.bw)
+            a = self.studio_render_fn(ph, False) if self.is_studio(ph) else self.render_fn(ph, False)
             self._cache[key] = a
             if len(self._cache) > 40:
                 self._cache.pop(next(iter(self._cache)))
@@ -273,9 +290,22 @@ class ReviewDialog(QDialog):
         self.info.setText("\n".join(bits))
         base = self._base(ph)
         box = (0.0, 0.0, 1.0, 1.0) if studio else ph.crops.get(ph.best, (0.0, 0.0, 1.0, 1.0))
-        self.big.set(_pm(crop(base, box)), f"Formato: {'Studio' if studio else ph.best}"
-                     + ("  ·  B/N" if self.bw else ""), rejected=not ph.keep)
+        color = crop(base, box)
+        if not studio:
+            color = E.apply_look(color.astype(np.float32) / 255.0 if color.dtype == np.uint8 else color,
+                                 self.photo_look(ph))
+        img = color
+        bws = self.photo_bw(ph)
+        label = f"Formato: {'Studio' if studio else ph.best}" + ("" if studio else f"  ·  Look {self.photo_look(ph)}")
+        if self.bw:
+            if bws == E.BW_NONE:
+                label += "  ·  sin versión B/N"
+            else:
+                img = E.bw_editorial(color, seed=ph.dhash & 0xFFFFFFFF, style=bws)
+                label += f"  ·  B/N {bws}"
+        self.big.set(_pm(img), label, rejected=not ph.keep)
         self._fill_crops(ph, base, studio)
+        self._fill_bw(ph, color if self.bw else crop(base, box), studio)
 
     def _fill_crops(self, ph, base, studio):
         self.crops.clear()
@@ -289,6 +319,49 @@ class ReviewDialog(QDialog):
             it.setData(ROLE, name)
             it.setToolTip("Recorte sugerido" if name == ph.best else f"Usar {name}")
             self.crops.addItem(it)
+
+    def photo_bw(self, ph) -> str:
+        return ph.bw_style or self.bw_style or "Editorial"
+
+    def photo_look(self, ph) -> str:
+        return ph.look or self.look or "Natural"
+
+    def _fill_bw(self, ph, img, studio=False):
+        """Propuestas de estilo para esta foto: estilos de B/N en la vista B/N, looks de color en la de color."""
+        from PySide6.QtGui import QIcon
+        self.bw_list.clear()
+        if studio and not self.bw:
+            self.bw_t.setText("LOOK: SE AJUSTA EN STUDIO")
+            return
+        small = img.astype(np.float32) / 255.0 if img.dtype == np.uint8 else img
+        f = 160 / max(small.shape[:2])
+        if f < 1:
+            import cv2
+            small = cv2.resize(small, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        if self.bw:
+            self.bw_t.setText("ESTILO B/N DE ESTA FOTO")
+            cur, session, names = self.photo_bw(ph), self.bw_style, list(E.BW_STYLES) + [E.BW_NONE]
+            make = lambda n: small if n == E.BW_NONE else E.bw_editorial(small, seed=1, style=n)  # noqa: E731
+        else:
+            self.bw_t.setText("LOOK DE COLOR DE ESTA FOTO")
+            cur, session, names = self.photo_look(ph), self.look, list(E.COLOR_LOOKS)
+            make = lambda n: E.apply_look(small, n)  # noqa: E731
+        for name in names:
+            label = ("● " if name == cur else "") + name + (" (sesión)" if name == session else "")
+            it = QListWidgetItem(QIcon(_pm(make(name))), label)
+            it.setData(ROLE, name)
+            self.bw_list.addItem(it)
+
+    def _pick_bw(self, it):
+        ph = self.cur()
+        name = it.data(ROLE)
+        if not ph or not name:
+            return
+        if self.bw:
+            ph.bw_style = "" if name == self.bw_style else name
+        else:
+            ph.look = "" if name == self.look else name
+        self.show_photo()
 
     def _pick_crop(self, it):
         name = it.data(ROLE)

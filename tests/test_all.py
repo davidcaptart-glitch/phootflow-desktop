@@ -308,6 +308,42 @@ class Studio(unittest.TestCase):
         self.assertEqual(open(src, "rb").read(), before)  # el original no se toca
 
 
+class StylesPerPhoto(unittest.TestCase):
+    def test_bw_styles_are_distinct_and_per_photo_wins(self):
+        img = np.asarray(scene()).astype(np.float32) / 255
+        outs = {n: E.bw_editorial(img, 1, n) for n in E.BW_STYLES}
+        means = [round(float(o.mean()), 3) for o in outs.values()]
+        self.assertGreater(len(set(means)), 7)  # cada estilo da un resultado distinto
+        self.assertLess(np.abs(outs["Editorial"][..., 0] - outs["Editorial"][..., 2]).max(), 1e-6)  # neutro
+        sep = outs["Sepia"]
+        self.assertGreater(sep[..., 0].mean(), sep[..., 2].mean())  # sepia = cálido
+        st = E.Settings(bw_style="Noir", look="Vivo")
+        ph = E.Photo(path="x")
+        self.assertEqual(E.photo_bw_style(ph, st), "Noir")
+        self.assertEqual(E.photo_look(ph, st), "Vivo")
+        ph.bw_style, ph.look = "Clave alta", "Frío"
+        self.assertEqual((E.photo_bw_style(ph, st), E.photo_look(ph, st)), ("Clave alta", "Frío"))
+
+    def test_color_looks_and_no_bw_export(self):
+        img = np.asarray(scene()).astype(np.float32) / 255
+        self.assertIs(E.apply_look(img, "Natural"), img)
+        warm, cold = E.apply_look(img, "Cálido"), E.apply_look(img, "Frío")
+        self.assertGreater(warm[..., 0].mean() - warm[..., 2].mean(), cold[..., 0].mean() - cold[..., 2].mean())
+        vivid = E.apply_look(img, "Vivo")
+        self.assertGreater(np.std(vivid, -1).mean(), np.std(img, -1).mean())
+        d = tempfile.mkdtemp()
+        scene().save(os.path.join(d, "a.jpg"), quality=93)
+        st = E.Settings(ratios=[], sizes=["max"], bw=True)
+        ps = E.list_photos(d)
+        E.analyze(ps[0], st)
+        ps[0].bw_style = E.BW_NONE  # a esta foto no le va el B/N
+        E.export(ps[0], st, os.path.join(d, "out"))
+        self.assertFalse(os.path.isdir(os.path.join(d, "out", "ByN")))
+        ps[0].bw_style = "Selenio"
+        E.export(ps[0], st, os.path.join(d, "out"))
+        self.assertTrue(os.listdir(os.path.join(d, "out", "ByN")))
+
+
 class ReviewFlow(unittest.TestCase):
     def test_studio_overrides_are_found_for_export(self):
         import review

@@ -80,6 +80,15 @@ elegir otro formato. **Editar en Studio (E)** abre la foto en Studio partiendo d
 «Usar en Events y volver» esa foto se exportará con la edición de Studio. Se puede desactivar con la casilla
 «Revisar antes de exportar».
 
+## Estilos de blanco y negro y looks de color
+
+- **10 estilos de B/N**: Editorial, Alto contraste, Suave mate, Película clásica, Filtro rojo, Filtro verde, Clave alta,
+  Noir, Selenio y Sepia.
+- **10 looks de color**: Natural, Cálido, Frío, Vivo, Suave, Mate, Cinematográfico, Película, Dorado y Noche azul.
+
+Se elige uno para la sesión y, en cada foto que no convenza, otro distinto (panel de la foto o revisión, con
+miniaturas para comparar). Una foto puede quedarse **sin versión B/N**.
+
 ## Edición uniforme
 
 La sesión entera se revela con **un único ajuste**, como al sincronizar ajustes en Lightroom: una sola curva y

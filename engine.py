@@ -90,7 +90,9 @@ class Settings:
     workers: int = 2
     style: dict = field(default_factory=dict)  # parámetros del estilo (styles.PRESETS o aprendido)
     style_name: str = ""
-    bw: bool = False        # además, versión en blanco y negro editorial (carpeta ByN)
+    bw: bool = False        # además, versión en blanco y negro (carpeta ByN)
+    bw_style: str = "Editorial"  # estilo de B/N de la sesión (BW_STYLES); cada foto puede tener el suyo
+    look: str = "Natural"       # look de color de la sesión (COLOR_LOOKS); cada foto puede tener el suyo
     cache_dir: str = ""     # vistas previas en disco (no en memoria): imprescindible con miles de fotos
     resume: bool = True     # al exportar, saltar las fotos que ya se terminaron en una pasada anterior
     uniform: bool = True    # una sola curva y color para toda la sesión + exposición igualada
@@ -138,6 +140,8 @@ class Photo:
     ab: list = field(default_factory=list)      # mediana a, b del revelado de análisis
     scene_ai: dict = field(default_factory=dict)  # probabilidad de cada tipo de evento (IA)
     lut_strength: float | None = None  # intensidad del LUT en esta foto (None = la de la sesión)
+    bw_style: str = ""          # estilo de B/N de esta foto ("" = el de la sesión; BW_NONE = sin B/N)
+    look: str = ""              # look de color de esta foto ("" = el de la sesión)
     meta: dict = field(default_factory=dict)  # EXIF útil para copiar a los JPG
     error: str = ""
 
@@ -953,45 +957,127 @@ def develop(ph: Photo, st: Settings) -> np.ndarray:
     if sty.get("cube"):
         k = float(sty.get("cube_strength", 1.0)) if ph.lut_strength is None else float(ph.lut_strength)
         out = luts.apply(out, sty["cube"], k)
+    out = apply_look(out, photo_look(ph, st))
     if sty.get("bw"):
-        out = bw_editorial(out, seed=ph.dhash & 0xFFFFFFFF)
+        bws = photo_bw_style(ph, st)
+        if bws != BW_NONE:
+            out = bw_editorial(out, seed=ph.dhash & 0xFFFFFFFF, style=bws)
     return np.clip(rotate(out, ph.angle), 0, 1)
 
 
-def bw_editorial(rgb: np.ndarray, seed: int = 0) -> np.ndarray:
-    """Blanco y negro de catálogo editorial a partir del revelado en color (RGB 0..1, sRGB).
+BW_NONE = "Sin B/N"  # valor por foto: esta foto no tiene versión en blanco y negro
+_BW = dict(mix=(0.42, 0.46, 0.12), local=0.35, sharp=0.25, s=0.55, gamma=1.0, black=0.02, white=0.975,
+           grain=0.010, grain_size=1.0, vignette=0.0, tone_sh=(0, 0, 0), tone_hi=(0, 0, 0))
+BW_STYLES: dict[str, dict] = {
+    "Editorial": dict(_BW),
+    "Alto contraste": dict(_BW, mix=(0.45, 0.45, 0.10), local=0.55, s=0.9, gamma=1.05, black=0.0, white=1.0,
+                           grain=0.006),
+    "Suave mate": dict(_BW, mix=(0.38, 0.48, 0.14), local=0.15, s=0.2, gamma=0.95, black=0.09, white=0.94,
+                       grain=0.008),
+    "Película clásica": dict(_BW, mix=(0.40, 0.48, 0.12), local=0.3, s=0.65, black=0.03, white=0.97, grain=0.020,
+                             grain_size=1.6),
+    "Filtro rojo": dict(_BW, mix=(0.75, 0.25, 0.0), s=0.6, grain=0.012),
+    "Filtro verde": dict(_BW, mix=(0.20, 0.70, 0.10), s=0.5),
+    "Clave alta": dict(_BW, gamma=0.75, local=0.2, s=0.3, black=0.05, white=1.0, grain=0.006),
+    "Noir": dict(_BW, gamma=1.35, s=0.85, local=0.45, black=0.0, white=0.96, vignette=0.35, grain=0.015),
+    "Selenio": dict(_BW, tone_sh=(-0.010, -0.004, 0.020), tone_hi=(0.006, 0.004, 0.0)),
+    "Sepia": dict(_BW, s=0.5, black=0.04, tone_sh=(0.035, 0.012, -0.025), tone_hi=(0.045, 0.022, -0.030)),
+}
 
-    - Mezcla de canales con peso en el rojo: la piel queda luminosa y limpia (como un filtro naranja suave).
-    - Contraste local de radio grande (≈ «claridad»): volumen sin halos.
-    - Curva en S: negros densos pero con detalle (punto negro levantado 2 %), blancos limpios sin quemar.
-    - Grano fino de luminancia, más en medios tonos que en sombras y luces: textura de papel, no ruido.
-    Devuelve RGB 0..1 neutro (los tres canales iguales).
+
+def bw_editorial(rgb: np.ndarray, seed: int = 0, style: str = "Editorial") -> np.ndarray:
+    """Blanco y negro a partir del revelado en color (RGB 0..1, sRGB), en uno de los `BW_STYLES`.
+
+    Todos comparten la misma receta, con distintos parámetros:
+    - Mezcla de canales (como los filtros de color en B/N: rojo aclara la piel y oscurece cielos; verde al revés).
+    - Contraste local de radio grande (volumen sin halos) y nitidez fina.
+    - Clave (gamma) y curva en S; puntos negro y blanco (negros levantados = mate).
+    - Grano de luminancia, más en medios tonos; viñeta opcional; virado opcional (selenio, sepia).
+    Devuelve RGB 0..1 (neutro salvo en los estilos virados).
     """
+    p = BW_STYLES.get(style) or BW_STYLES["Editorial"]
     h, w = rgb.shape[:2]
     lin = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
-    y = 0.42 * lin[..., 0] + 0.46 * lin[..., 1] + 0.12 * lin[..., 2]
+    mr, mg, mb = p["mix"]
+    y = mr * lin[..., 0] + mg * lin[..., 1] + mb * lin[..., 2]
     y = np.where(y <= 0.0031308, 12.92 * y, 1.055 * np.power(np.maximum(y, 1e-9), 1 / 2.4) - 0.055)
     y = np.clip(y, 0, 1).astype(np.float32)
-    # contraste local (radio proporcional al tamaño) protegido en sombras y luces
-    r = max(4.0, 0.012 * max(h, w))
-    base = cv2.GaussianBlur(y, (0, 0), r)
+    if p["gamma"] != 1.0:
+        y = np.power(y, p["gamma"]).astype(np.float32)
     mid = 1 - np.abs(y - 0.5) * 2
-    y = y + (y - base) * 0.35 * np.clip(mid * 1.6, 0, 1)
-    # nitidez fina suave
-    y = y + (y - cv2.GaussianBlur(y, (0, 0), 1.0)) * 0.25
+    if p["local"]:
+        base = cv2.GaussianBlur(y, (0, 0), max(4.0, 0.012 * max(h, w)))
+        y = y + (y - base) * p["local"] * np.clip(mid * 1.6, 0, 1)
+    if p["sharp"]:
+        y = y + (y - cv2.GaussianBlur(y, (0, 0), 1.0)) * p["sharp"]
     y = np.clip(y, 0, 1)
-    # curva en S editorial
-    s_curve = y * y * (3 - 2 * y)
-    y = 0.45 * y + 0.55 * s_curve
-    y = 0.02 + 0.955 * y  # negro 2 %, blanco 97,5 %: aire de impresión
-    # grano fino
-    rng = np.random.default_rng(seed)
-    g = rng.standard_normal((h, w)).astype(np.float32)
-    g = cv2.GaussianBlur(g, (0, 0), 0.6 + 0.0002 * max(h, w))
-    g /= g.std() + 1e-6
-    y = y + g * 0.010 * (0.35 + np.clip(mid, 0, 1))
-    y = np.clip(y, 0, 1)
-    return np.repeat(y[..., None], 3, axis=2)
+    y = (1 - p["s"]) * y + p["s"] * (y * y * (3 - 2 * y))
+    y = p["black"] + (p["white"] - p["black"]) * y
+    if p["vignette"]:
+        yy, xx = np.ogrid[0:h, 0:w]
+        r = np.hypot((xx - w / 2) / (w / 2), (yy - h / 2) / (h / 2)) / math.sqrt(2)
+        y = y * (1 - p["vignette"] * np.clip((r - 0.35) / 0.65, 0, 1) ** 2)
+    if p["grain"]:
+        rng = np.random.default_rng(seed)
+        g = rng.standard_normal((h, w)).astype(np.float32)
+        g = cv2.GaussianBlur(g, (0, 0), (0.6 + 0.0002 * max(h, w)) * p["grain_size"])
+        g /= g.std() + 1e-6
+        y = y + g * p["grain"] * (0.35 + np.clip(mid, 0, 1))
+    y = np.clip(y, 0, 1).astype(np.float32)
+    out = np.repeat(y[..., None], 3, axis=2)
+    if any(p["tone_sh"]) or any(p["tone_hi"]):
+        sh = ((1 - y) ** 2)[..., None] * np.array(p["tone_sh"], np.float32) * 4
+        hi = (y ** 2)[..., None] * np.array(p["tone_hi"], np.float32) * 4
+        out = np.clip(out + (sh + hi) * (y * (1 - y))[..., None] * 4, 0, 1)
+    return out
+
+
+_LK = dict(warm=0.0, tint=0.0, sat=1.0, contrast=0.0, fade=0.0, sh=(0.0, 0.0), hi=(0.0, 0.0), bright=0.0)
+COLOR_LOOKS: dict[str, dict] = {
+    "Natural": dict(_LK),
+    "Cálido": dict(_LK, warm=5.0, tint=1.0, sat=1.03),
+    "Frío": dict(_LK, warm=-5.0, tint=-0.5, sat=0.97),
+    "Vivo": dict(_LK, sat=1.22, contrast=0.18),
+    "Suave": dict(_LK, sat=0.92, contrast=-0.18, fade=0.02, bright=0.02),
+    "Mate": dict(_LK, sat=0.88, contrast=-0.08, fade=0.07),
+    "Cinematográfico": dict(_LK, contrast=0.12, sh=(-4.0, -7.0), hi=(3.0, 7.0), sat=0.95),
+    "Película": dict(_LK, fade=0.045, sat=0.9, hi=(1.5, 5.0), contrast=0.05),
+    "Dorado": dict(_LK, warm=8.0, tint=2.0, hi=(2.0, 6.0), sat=1.05),
+    "Noche azul": dict(_LK, warm=-3.0, sh=(1.0, -9.0), contrast=0.1, sat=1.05),
+}
+
+
+def apply_look(rgb01: np.ndarray, name: str) -> np.ndarray:
+    """Look de color sobre la imagen ya revelada (sRGB 0..1), en Lab: calidez/matiz, saturación, contraste,
+    desvaído (negros levantados), tono en sombras y luces. «Natural» no cambia nada."""
+    p = COLOR_LOOKS.get(name)
+    if not p or p == _LK:
+        return rgb01
+    lab = cv2.cvtColor(np.ascontiguousarray(np.clip(rgb01, 0, 1), dtype=np.float32), cv2.COLOR_RGB2Lab)
+    L = lab[..., 0] / 100.0
+    if p["contrast"]:
+        L = L + (L * L * (3 - 2 * L) - L) * p["contrast"] * 2
+    if p["bright"]:
+        L = L + p["bright"] * (1 - L)
+    if p["fade"]:
+        L = p["fade"] + (1 - p["fade"]) * L
+    L = np.clip(L, 0, 1)
+    w_sh = (1 - L) ** 2
+    w_hi = L ** 2
+    lab[..., 1] = lab[..., 1] * p["sat"] + p["tint"] + w_sh * p["sh"][0] + w_hi * p["hi"][0]
+    lab[..., 2] = lab[..., 2] * p["sat"] + p["warm"] + w_sh * p["sh"][1] + w_hi * p["hi"][1]
+    lab[..., 0] = L * 100
+    return np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
+
+
+def photo_look(ph: "Photo", st: "Settings") -> str:
+    """Look de color de esta foto: el suyo si se eligió a mano, si no el de la sesión."""
+    return ph.look or st.look or "Natural"
+
+
+def photo_bw_style(ph: "Photo", st: "Settings") -> str:
+    """Estilo de B/N de esta foto: el suyo si se eligió a mano, si no el de la sesión. `BW_NONE` = sin B/N."""
+    return ph.bw_style or st.bw_style or "Editorial"
 
 
 def _tag(ratio: str) -> str:
@@ -1079,11 +1165,11 @@ def export(ph: Photo, st: Settings, out_dir: str, version: str = "") -> list[str
             p = os.path.join(folder, f"{ph.name}_{_tag(ratio) if ratio != 'Original' else 'original'}_{size}.jpg")
             _save(r, p, st.quality, exif)
             written.append(p)
-    if st.bw and not st.style.get("bw"):  # versión B/N solo del formato sugerido, en todos los tamaños
+    if st.bw and not st.style.get("bw") and photo_bw_style(ph, st) != BW_NONE:  # B/N del formato sugerido
         x0, y0, x1, y1 = ph.crops[ph.best]
         c = img[int(round(y0 * H)):int(round(y1 * H)), int(round(x0 * W)):int(round(x1 * W))]
         del img
-        bw = bw_editorial(c, seed=ph.dhash & 0xFFFFFFFF)
+        bw = bw_editorial(c, seed=ph.dhash & 0xFFFFFFFF, style=photo_bw_style(ph, st))
         tag = _tag(ph.best) if ph.best != "Original" else "original"
         for size in st.sizes:
             ch, cw = bw.shape[:2]
