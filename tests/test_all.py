@@ -428,6 +428,208 @@ class Zoom(unittest.TestCase):
         self.assertEqual(z.pct, 0.5)
         z.toggle(None, area, pm)
         self.assertFalse(z.active)
+class Edits(unittest.TestCase):
+    """Entorno Edits: retoque tipo Photoshop por capas, no destructivo."""
+
+    def setUp(self):
+        import edits_engine as EE
+        self.EE = EE
+        rng = np.random.default_rng(5)
+        img = np.clip(0.5 + 0.05 * rng.standard_normal((600, 900, 3)), 0, 1).astype(np.float32)
+        self.clean = cv2.GaussianBlur(img, (0, 0), 1.0)
+        self.img = self.clean.copy()
+        cv2.circle(self.img, (450, 300), 10, (0.9, 0.1, 0.1), -1)  # un «grano» rojo
+
+    def spot(self, a):
+        return a[288:313, 438:463]
+
+    def test_heal_clone_and_fill_remove_a_spot_keeping_the_texture(self):
+        EE = self.EE
+        texture = float(self.clean[100:125, 100:125].std())
+        for tool in ("heal", "fill", "clone"):
+            op = {"tool": tool, "r": 13 / 900, "pts": [[450 / 899, 300 / 599]]}
+            op["src"] = EE.find_source(self.img, op)
+            self.assertIsNotNone(op["src"], tool)
+            out = EE.apply_retouch(self.img, {"ops": [op]})
+            reg = self.spot(out)
+            self.assertLess(float(np.abs(reg[..., 0] - reg[..., 1]).mean()), 0.06, tool)  # sin rojo
+            self.assertLess(abs(float(reg.std()) - texture), 0.01, tool)  # misma textura que alrededor
+            self.assertLess(float(np.abs(out[:200] - self.img[:200]).max()), 1e-6, tool)  # nada más cambia
+
+    def test_layers_order_visibility_opacity_crop_and_text(self):
+        EE = self.EE
+        doc = EE.new_doc()
+        EE.add_layer(doc, "text", text="© Prueba", size=8, x=0.5, y=0.5, anchor="mm")
+        r = EE.add_layer(doc, "retouch")
+        EE.add_layer(doc, "liquify")
+        self.assertEqual([l["kind"] for l in doc["layers"]], ["liquify", "retouch", "text"])
+        op = {"tool": "heal", "r": 13 / 900, "pts": [[450 / 899, 300 / 599]]}
+        op["src"] = EE.find_source(self.img, op)
+        r["ops"].append(op)
+        box = [0.1, 0.1, 0.9, 0.9]
+        out, alpha = EE.compose(self.img, doc, box)
+        self.assertIsNone(alpha)
+        self.assertEqual(out.shape[:2], EE.apply_crop(self.img, box).shape[:2])  # el texto va sobre la recortada
+        txt = EE.text_rgba(out.shape, doc["layers"][-1])
+        self.assertIsNotNone(txt)
+        x0, y0, x1, y1 = txt[1]
+        self.assertLess(abs((x0 + x1) / 2 - out.shape[1] / 2), 3)  # anclado al centro
+        r["visible"] = False
+        doc["layers"][-1]["opacity"] = 0
+        plain, _ = EE.compose(self.img, doc, [0.0, 0.0, 1.0, 1.0])
+        self.assertTrue(np.allclose(plain, self.img, atol=1e-6))  # ocultas u opacidad 0: no hacen nada
+        r["visible"], r["opacity"] = True, 50
+        half, _ = EE.compose(self.img, doc, [0.0, 0.0, 1.0, 1.0])
+        self.assertAlmostEqual(float(self.spot(half)[..., 0].mean()),
+                               (float(self.spot(self.img)[..., 0].mean()) + float(self.spot(EE.apply_retouch(
+                                   self.img, r))[..., 0].mean())) / 2, delta=0.01)
+        c = EE.Compositor()  # la caché por prefijo da lo mismo que componer desde cero
+        self.assertTrue(np.allclose(c.render(self.img, doc, box)[0], EE.compose(self.img, doc, box)[0]))
+        self.assertTrue(np.allclose(c.render(self.img, doc, box)[0], EE.compose(self.img, doc, box)[0]))
+
+    def test_liquify_skin_and_light(self):
+        EE = self.EE
+        a = np.full((300, 300, 3), 0.2, np.float32)
+        a[:, 140:160] = 0.9  # barra vertical
+        lay = EE.new_layer("liquify", strokes=[{"mode": "push", "r": 0.15, "s": 0.8,
+                                                 "pts": [[0.5, 0.5], [0.62, 0.5]]}])
+        out = EE.apply_liquify(a, lay)
+        cols = np.nonzero(out[150, :, 0] > 0.55)[0]
+        self.assertGreater(cols.mean(), 155)  # la barra se ha desplazado hacia la derecha
+        self.assertTrue(np.allclose(out[:20], a[:20], atol=1e-4))  # lejos del pincel no se mueve
+        dot = np.full((300, 300, 3), 0.2, np.float32)
+        cv2.circle(dot, (150, 150), 20, (0.9, 0.9, 0.9), -1)
+        big = EE.apply_liquify(dot, EE.new_layer("liquify", strokes=[{"mode": "bloat", "r": 0.2, "s": 1.0,
+                                                                        "pts": [[0.5, 0.5]] * 4}]))
+        self.assertGreater((big[..., 0] > 0.55).sum(), (dot[..., 0] > 0.55).sum())  # inflar agranda
+        # piel: alisa dentro de la zona pintada y no fuera (sin IA: solo los trazos)
+        skin = EE.new_layer("skin", auto=False, amount=100, texture=0, strokes=[[0.25, 0.5, 0.12, 1]])
+        sm = EE.apply_skin(self.clean, skin)
+        self.assertLess(float(sm[260:340, 180:260].std()), 0.6 * float(self.clean[260:340, 180:260].std()))
+        self.assertTrue(np.allclose(sm[:, 600:], self.clean[:, 600:], atol=1e-4))
+        # blanquear: los dientes amarillos pierden amarillo
+        teeth = np.full((100, 100, 3), (0.85, 0.75, 0.45), np.float32)
+        w = EE.apply_light(teeth, {"strokes": [{"mode": "whiten", "r": 0.3, "s": 1.0, "pts": [[0.5, 0.5]]}]})
+        self.assertGreater(float(w[50, 50, 2]) - float(w[50, 50, 0]), float(teeth[50, 50, 2] - teeth[50, 50, 0]))
+        dodge = EE.apply_light(teeth * 0.4, {"strokes": [{"mode": "dodge", "r": 0.3, "s": 1.0, "pts": [[0.5, 0.5]]}]})
+        self.assertGreater(float(dodge[50, 50].mean()), float((teeth * 0.4)[50, 50].mean()))
+
+    def test_remove_background_of_logos_and_objects(self):
+        EE = self.EE
+        u = np.full((300, 500, 3), 255, np.uint8)
+        cv2.putText(u, "PO", (40, 230), cv2.FONT_HERSHEY_SIMPLEX, 7, (245, 13, 138), 25, cv2.LINE_AA)
+        logo = u.astype(np.float32) / 255
+        lay = EE.new_layer("background", mode="transparent", detect="color")
+        out, a = EE.apply_background(logo, lay)
+        self.assertEqual(a[5, 5], 0.0)  # fondo fuera
+        self.assertEqual(a[150, 100], 1.0)  # letra dentro
+        self.assertEqual(a[150, 270], 0.0)  # el hueco de la O también se quita…
+        lay["contiguous"] = True
+        self.assertEqual(EE.apply_background(logo, lay)[1][150, 270], 1.0)  # …salvo con «solo el borde»
+        edge = (a > 0.05) & (a < 0.95)
+        self.assertGreater(edge.sum(), 100)  # borde suave (antialias), no dentado
+        self.assertLess(float(out[edge][:, 1].mean()), 0.15)  # y sin halo blanco: magenta puro
+        # objeto sobre fondo con textura: GrabCut
+        rng = np.random.default_rng(0)
+        img = np.clip(np.full((400, 600, 3), (0.3, 0.5, 0.8), np.float32) + rng.normal(0, 0.02, (400, 600, 3)),
+                      0, 1).astype(np.float32)
+        ref = np.zeros((400, 600), np.uint8)
+        cv2.ellipse(img, (300, 200), (140, 110), 0, 0, 360, (0.9, 0.6, 0.2), -1)
+        cv2.ellipse(ref, (300, 200), (140, 110), 0, 0, 360, 1, -1)
+        a = EE.apply_background(img, EE.new_layer("background", mode="transparent", detect="object"))[1]
+        iou = ((a > 0.5) & (ref > 0)).sum() / ((a > 0.5) | (ref > 0)).sum()
+        self.assertGreater(iou, 0.95)
+        # el logo de la capa Logo también puede perder su fondo
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "logo.jpg")
+        Image.fromarray(u).save(p, quality=95)
+        rgba, _ = EE.logo_rgba((600, 1000, 3), EE.new_layer("logo", path=p, knockout=True, width=50, x=0.5, y=0.5,
+                                                            anchor="mm"))
+        self.assertLess(float(rgba[300, 270, 3]), 0.1)  # el blanco del JPG es transparente
+
+    def test_original_files_are_used_as_is_and_transparency_is_exported(self):
+        EE = self.EE
+        d = tempfile.mkdtemp()
+        u = np.full((200, 300, 3), 255, np.uint8)
+        cv2.circle(u, (150, 100), 60, (20, 40, 200), -1)
+        src = os.path.join(d, "logo.png")
+        Image.fromarray(u).save(src)
+        base = EE.render_base(src, dict(EE.ORIGINAL), full=True)
+        self.assertLess(float(np.abs(base * 255 - u).max()), 1.0)  # sin revelar: idéntico al archivo
+        doc = EE.new_doc(dict(EE.ORIGINAL))
+        EE.add_layer(doc, "background", mode="transparent", detect="color")
+        out = EE.export(d, src, doc, os.path.join(d, "Edits", "logo.jpg"), "jpg")
+        self.assertTrue(out.endswith(".png"))  # un JPG no guarda transparencia: sale en PNG
+        im = cv2.imread(out, cv2.IMREAD_UNCHANGED)
+        self.assertEqual(im.shape[2], 4)
+        self.assertEqual(im[5, 5, 3], 0)
+        self.assertEqual(im[100, 150, 3], 255)
+
+    def test_dropped_image_becomes_an_editable_layer(self):
+        EE = self.EE
+        d = tempfile.mkdtemp()
+        u = np.full((100, 200, 3), 255, np.uint8)
+        cv2.rectangle(u, (40, 20), (160, 80), (20, 40, 200), -1)
+        src = os.path.join(d, "fuera", "sello.jpg")
+        os.makedirs(os.path.dirname(src))
+        Image.fromarray(u).save(src, quality=95)
+        dst = EE.import_image(d, src)
+        self.assertTrue(dst.startswith(os.path.join(d, ".phootflow", "edits", "capas")))
+        self.assertEqual(EE.import_image(d, src), dst)  # la misma imagen no se copia dos veces
+        doc = EE.new_doc()
+        lay = EE.add_layer(doc, "image", path=dst, width=50, x=0.5, y=0.5, anchor="mm")
+        self.assertEqual(doc["layers"][-1]["kind"], "image")
+        photo = np.zeros((400, 600, 3), np.float32)
+        out, _ = EE.compose(photo, doc, [0.0, 0.0, 1.0, 1.0])
+        self.assertGreater(float(out[200, 300].mean()), 0.2)  # la imagen está en el centro
+        self.assertGreater(float(out[200, 160].mean()), 0.9)  # con su fondo blanco
+        lay["cut"] = "color"  # quitar su fondo blanco: deja ver la foto
+        out, _ = EE.compose(photo, doc, [0.0, 0.0, 1.0, 1.0])
+        self.assertLess(float(out[200, 160].mean()), 0.05)
+        self.assertGreater(float(out[200, 300, 2]), 0.6)
+        x0, y0, x1, y1 = EE.image_rgba(photo.shape, lay)[1]
+        self.assertEqual(x1 - x0, 300)  # 50 % del ancho
+        lay["angle"] = 90
+        x0, y0, x1, y1 = EE.image_rgba(photo.shape, lay)[1]
+        self.assertGreater(y1 - y0, x1 - x0)  # girada en vertical
+        lay["path"] = os.path.join(d, "no_existe.png")
+        self.assertTrue(np.allclose(EE.compose(photo, doc, [0.0, 0.0, 1.0, 1.0])[0], photo))
+
+    def test_documents_base_events_and_export_are_non_destructive(self):
+        EE = self.EE
+        import studio_engine as SE
+        d = tempfile.mkdtemp()
+        src = os.path.join(d, "a.jpg")
+        scene().save(src, quality=93)
+        before = open(src, "rb").read()
+        doc = EE.new_doc(SE.new_settings(exposure=0.3))
+        self.assertFalse(EE.has_edits(doc))
+        EE.add_layer(doc, "text", text="Boda")
+        lay = EE.add_layer(doc, "retouch")
+        lay["ops"].append({"tool": "clone", "r": 0.02, "pts": [[0.5, 0.5]], "src": [0.1, 0.0]})
+        self.assertTrue(EE.has_edits(doc))
+        EE.save(d, src, doc)
+        self.assertTrue(os.path.exists(os.path.join(d, ".phootflow", "edits", "a.jpg.json")))
+        self.assertEqual(EE.load(d, src)["layers"][1]["text"], "Boda")
+        self.assertEqual(EE.base_settings(d, src, doc)["exposure"], 0.3)
+        SE.save(d, src, SE.new_settings(exposure=0.7))  # con revelado de Studio, se parte de él
+        self.assertEqual(EE.base_settings(d, src, doc)["exposure"], 0.7)
+        for fmt in ("jpg", "tif", "png"):
+            out = EE.export(d, src, doc, os.path.join(d, "Edits", "a." + fmt), fmt, 90, 300)
+            im = cv2.imread(out, cv2.IMREAD_UNCHANGED)
+            self.assertEqual(max(im.shape[:2]), 300, fmt)
+            if fmt == "tif":
+                self.assertEqual(im.dtype, np.uint16)
+        self.assertEqual(open(src, "rb").read(), before)  # el original no se toca
+        self.assertEqual(EE.pending_events(d), {})
+        doc["_events_override"] = True
+        EE.save(d, src, doc)
+        self.assertEqual(list(EE.pending_events(d)), [os.path.normcase(src)])
+        ph = E.Photo(path=src, name="a")
+        ph.keep = True
+        out_dir = os.path.join(d, "Editadas")
+        self.assertEqual(EE.export_for_events([ph], d, out_dir, ["1080"], 90), 1)
+        self.assertTrue(os.path.exists(os.path.join(out_dir, "Sugeridas", "a_edits_1080.jpg")))
 
 
 class Updater(unittest.TestCase):

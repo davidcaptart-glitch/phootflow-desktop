@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 26 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 34 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -38,6 +38,12 @@ python -m unittest discover -s tests   # 26 pruebas, sin fotos reales ni red
   antes/después, histograma, paneles de sliders, historial, presets, exportar) y el revelado no destructivo
   `render(lin, ajustes)`. Ajustes por foto en `<carpeta>/.phootflow/studio/<foto>.json`. Proxy de 2048 px y
   borrador de 1024 px mientras se arrastra. `Shell` (app.py) aloja Events (`Main`) y Studio con el interruptor.
+- `edits.py` / `edits_engine.py` — entorno **Edits** (tipo Photoshop): `EditsView` (herramientas, lienzo con zoom,
+  capas, propiedades, historial, exportar) y el motor de capas paramétricas (`compose`, `Compositor` con caché
+  por prefijo): corrector/tampón/relleno, piel, ojos y luz, licuar, fondo (persona IA, objeto GrabCut o color),
+  texto, logo e imagen (arrastrada desde el Explorador; copia en `edits/capas/`). Trabajo en
+  `<carpeta>/.phootflow/edits/<foto>.json`. `attach_studio_button` añade «Editar en Edits» a Studio sin tocar
+  studio.py.
 - `luts.py` — LUT .cube por tipo de sesión; `eyes.py` (MediaPipe) y `scene_ai.py` (CLIP, onnxruntime): IA local.
 - `drive.py` — OAuth de escritorio con PKCE y Drive v3 por REST.
 - `license.py` — licencias: `ensure()` en `main()` (pide clave, valida en la Edge Function `licencias` de

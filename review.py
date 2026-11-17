@@ -146,8 +146,8 @@ class Big(QWidget):
 
 
 class ReviewDialog(QDialog):
-    """Ventana de revisión. Resultado: `action` = "export" (exportar aprobadas), "studio" (retocar
-    `studio_photo` en Studio) o "" (cerrar sin exportar). Los cambios (aprobar/rechazar, recorte) se
+    """Ventana de revisión. Resultado: `action` = "export" (exportar aprobadas), "studio" / "edits" (retocar
+    `studio_photo` en Studio o en Edits) o "" (cerrar sin exportar). Los cambios (aprobar/rechazar, recorte) se
     aplican directamente a las fotos."""
     studio_requested = Signal(object)
 
@@ -223,6 +223,9 @@ class ReviewDialog(QDialog):
         row.addWidget(self.b_no)
         self.b_studio = _btn("Editar en Studio", "ghost", "Retocar esta foto foto a foto en Studio (E)")
         self.b_studio.clicked.connect(self._studio)
+        self.b_edits = _btn("Editar en Edits", "ghost", "Retocar esta foto en Edits: corrector, piel, licuar, "
+                                                        "texto… (Mayús+E)")
+        self.b_edits.clicked.connect(self._edits)
         self.bw_t = QLabel("ESTILO B/N DE ESTA FOTO")
         self.bw_t.setObjectName("cardTitle")
         self.bw_list = QListWidget()
@@ -250,6 +253,7 @@ class ReviewDialog(QDialog):
             sv.addWidget(w)
         sv.addLayout(row)
         sv.addWidget(self.b_studio)
+        sv.addWidget(self.b_edits)
         sv.addSpacing(6)
         sv.addWidget(self.bw_t)
         sv.addWidget(self.bw_list)
@@ -279,7 +283,7 @@ class ReviewDialog(QDialog):
                       ("Y", lambda: (self.big.cmp.next_split(), self.set_compare(self.big.cmp.mode))),
                       ("Z", lambda: self.big.zoom.toggle(None, self.big._area(), self.big.pm.size())
                        if self.big.pm is not None else None),
-                      ("E", self._studio), (Qt.Key_Right, lambda: self.step(1)), (Qt.Key_Left, lambda: self.step(-1))):
+                      ("E", self._studio), ("Shift+E", self._edits), (Qt.Key_Right, lambda: self.step(1)), (Qt.Key_Left, lambda: self.step(-1))):
             QShortcut(QKeySequence(k), self, fn)
         self.b_bw.setEnabled(True)
         self.refresh_counts()
@@ -465,6 +469,12 @@ class ReviewDialog(QDialog):
         ph = self.cur()
         if ph:
             self.action, self.studio_photo = "studio", ph
+            self.accept()
+
+    def _edits(self):
+        ph = self.cur()
+        if ph:
+            self.action, self.studio_photo = "edits", ph
             self.accept()
 
     def _export(self):

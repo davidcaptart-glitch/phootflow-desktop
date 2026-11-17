@@ -63,9 +63,9 @@ Sesión/
 - **Blanco y negro editorial** (opción): mezcla de canales pensada para la piel, contraste local, negros densos
   sin empastar, blancos limpios y grano fino.
 
-## Dos entornos: Events y Studio
+## Tres entornos: Events, Studio y Edits
 
-El interruptor **Events | Studio** de la cabecera cambia de entorno conservando la carpeta. Al **abrir una
+El interruptor **Events | Studio | Edits** de la cabecera (Ctrl+Tab) cambia de entorno conservando la carpeta. Al **abrir una
 carpeta** se elige en cuál trabajarla.
 
 - **Events**: edición automática de sesiones completas (lo de abajo).
@@ -74,6 +74,39 @@ carpeta** se elige en cuál trabajarla.
   LUT, B/N), antes/después (`\`), historial (Ctrl+Z / Ctrl+Y), copiar/pegar/sincronizar ajustes, presets propios
   y los 18 de LightCraft, y exportación. No destructivo: los ajustes se guardan en `.phootflow/studio/`.
   Fórmulas de revelado portadas de [LightCraft](https://github.com/storytold/lightcraft) (Apache-2.0).
+- **Edits**: retoque foto a foto como Photoshop, por capas (ver abajo). Se llega desde la cabecera, desde
+  **Editar en Edits** en Studio o desde la revisión de Events (Mayús+E).
+
+### Edits (retoque tipo Photoshop)
+
+Parte de la foto ya revelada: el revelado de Studio si lo tiene y, si no, la edición de Events o un revelado
+automático del RAW; un JPG, PNG o TIFF se retoca tal cual. Encima se apilan **capas** con casilla de
+visibilidad, opacidad y orden:
+
+- **Herramientas** (barra de la izquierda): **Mover (V)**, **Pincel corrector (J)** para granos, brillos y
+  manchas (busca solo el mejor parche y funde tono y textura), **Tampón de clonar (S)** con Alt+clic para el
+  origen, **Relleno según contenido (G)** para borrar cables, carteles o gente, **Pincel de máscara (B)**,
+  **Ojos y luz (O)** (aclarar ojeras, blanquear dientes y ojos, oscurecer) y **Licuar (W)** (empujar, inflar,
+  encoger). Tamaño con `[` `]`.
+- **Piel**: suavizado por separación de frecuencias sobre la piel que encuentra la IA (MediaPipe), con
+  Suavizado y Textura; con el pincel de máscara se añaden o quitan zonas.
+- **Fondo / Quitar fondo**: el sujeto se detecta como **persona (IA)**, **objeto o producto** (GrabCut) o
+  **logo o fondo liso** por color (cuentagotas, tolerancia, suavidad y bordes sin halo). El fondo se desenfoca,
+  pasa a B/N, a un color o a **transparente** (se exporta en PNG o TIFF con transparencia). El pincel de
+  máscara corrige lo que el detector no ve. «＋ Capa → Quitar fondo» lo prepara en un clic: así se limpian
+  también logos en JPG.
+- **Texto** (fuente, tamaño, color, sombra, posición) y **Logo** (PNG o JPG, con «quitar el fondo del logo»):
+  se arrastran con Mover y van siempre encima, sobre la foto ya recortada.
+- **Imagen**: **arrastra una imagen desde el Explorador** sobre la foto (o «＋ Capa → Imagen…») y se crea una
+  capa donde la sueltas. Se mueve con Mover, cambia de tamaño con Ctrl+rueda o el slider, se gira, se voltea,
+  tiene opacidad y se le puede **quitar el fondo** (logo o fondo liso, objeto o persona). La imagen se copia a
+  `.phootflow/edits/capas/`, así la edición no depende del archivo original.
+
+Lienzo con zoom (rueda, doble clic 100 %, Ctrl+0 encajar; mano con el botón central o la barra espaciadora),
+antes/después (`\` y Y), historial con deshacer y rehacer (Ctrl+Z / Ctrl+Y). Nada toca el original: el trabajo
+se guarda en `.phootflow/edits/<foto>.json` y se exporta a la carpeta **Edits** en JPG, TIFF de 16 bits o PNG.
+Desde la revisión de Events, «Aprobar y volver a Events» hace que la exportación de Events añada la foto
+retocada en «Sugeridas» (`<foto>_edits_<tamaño>.jpg`).
 
 ### Máscaras (Studio)
 
@@ -86,7 +119,7 @@ sombras, temperatura, matiz, saturación, claridad, nitidez), cantidad e inverti
 
 Antes de exportar se abre la revisión: cada foto con su edición final, **Aprobar (A) / Rechazar (R)**, flechas
 para moverse, filtros (aprobadas, rechazadas, pendientes), **Ver B/N (B)** y **recortes alternativos** para
-elegir otro formato. **Editar en Studio (E)** abre la foto en Studio partiendo de la edición de Events; con
+elegir otro formato. **Editar en Studio (E)** o **Editar en Edits (Mayús+E)** abre la foto en Studio partiendo de la edición de Events; con
 «Usar en Events y volver» esa foto se exportará con la edición de Studio. Se puede desactivar con la casilla
 «Revisar antes de exportar».
 
