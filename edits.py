@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColo
                                QVBoxLayout, QWidget)
 
 import compare as CMP
+import zoomview as Z
 import edits_engine as EE
 import engine as E
 import studio_engine as SE
@@ -162,8 +163,7 @@ class EditCanvas(QWidget):
         self.pm = self.before = None
         self.cmp = CMP.CompareState()
         self.msg = "Abre una carpeta y elige una foto"
-        self.zoom = None              # None = encajar; si no, píxeles de pantalla por píxel de la vista
-        self.center = QPointF(0.5, 0.5)
+        self.zoom = Z.Zoom(self)      # zoom común a todos los visores (zoomview)
         self.img_rect = QRectF()
         self.brush_px = 0.0           # radio del pincel en píxeles de la vista (0 = sin pincel)
         self.cursor = None            # QPointF del ratón
@@ -171,28 +171,18 @@ class EditCanvas(QWidget):
         self.marker = None            # origen del tampón (0..1)
         self.box = None               # caja de la capa de texto/logo seleccionada (0..1)
         self.handler = None           # callback(tipo, x, y, evento) -> ¿consumido?
-        self._pan = None
         self.space = False
         self.zoom_changed = None
 
-    # ---- geometría
-    def fit_scale(self) -> float:
-        if self.pm is None:
-            return 1.0
-        area = self.rect().adjusted(12, 12, -12, -12)
-        return min(area.width() / self.pm.width(), area.height() / self.pm.height())
+    # ---- geometría (zoomview: 100 % = un píxel de la vista de trabajo de 2048 px)
+    def zoom_pixmap(self):
+        return self.pm
 
-    def scale(self) -> float:
-        return self.zoom if self.zoom is not None else self.fit_scale()
+    def _area(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(12, 12, -12, -12)
 
     def _rect(self) -> QRectF:
-        if self.pm is None:
-            return QRectF()
-        s = self.scale()
-        w, h = self.pm.width() * s, self.pm.height() * s
-        if self.zoom is None:
-            return QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
-        return QRectF(self.width() / 2 - self.center.x() * w, self.height() / 2 - self.center.y() * h, w, h)
+        return self.zoom.rect(self._area(), self.pm.size()) if self.pm is not None else QRectF()
 
     def norm(self, pt) -> tuple[float, float]:
         r = self.img_rect
@@ -200,41 +190,53 @@ class EditCanvas(QWidget):
             return 0.0, 0.0
         return (pt.x() - r.x()) / r.width(), (pt.y() - r.y()) / r.height()
 
-    def set_zoom(self, z, anchor=None):
-        if self.pm is None:
-            return
-        fit = self.fit_scale()
-        if z is not None:
-            z = max(fit * 0.999, min(8.0, z))
-            if z <= fit * 1.001:
-                z = None
-        if anchor is not None and z is not None:
-            nx, ny = self.norm(anchor)
-            w, h = self.pm.width() * z, self.pm.height() * z
-            self.center = QPointF(nx - (anchor.x() - self.width() / 2) / w, ny - (anchor.y() - self.height() / 2) / h)
-        elif z is not None and self.zoom is None:
-            self.center = QPointF(0.5, 0.5)
-        self.zoom = z
+    def _zoomed(self):
         self.img_rect = self._rect()
         if self.zoom_changed:
             self.zoom_changed()
         self.update()
 
-    def zoom_label(self) -> str:
-        return "Encajar" if self.zoom is None else f"{self.zoom * 100:.0f} %"
+    def set_zoom(self, pct, anchor=None):
+        """None = encajar; 1.0 = 100 %."""
+        if self.pm is not None:
+            self.zoom._set_level(pct, self._area(), self.pm.size(), anchor)
+            self._zoomed()
 
-    # ---- ratón
+    def toggle_zoom(self, anchor=None):
+        if self.pm is not None:
+            self.zoom.toggle(anchor, self._area(), self.pm.size())
+            self._zoomed()
+
+    def zoom_label(self) -> str:
+        return self.zoom.label(self._area(), self.pm.size()) if self.pm is not None else "Encajar"
+
+    # ---- ratón y teclado
     def wheelEvent(self, e):
         steps = e.angleDelta().y() / 120.0
         if steps and e.modifiers() & Qt.ControlModifier and self.handler and self.handler("wheel", steps, 0, e):
             return
-        if steps:
-            self.set_zoom(self.scale() * (1.25 ** steps), e.position())
+        if steps and self.pm is not None:
+            self.zoom.wheel(e.angleDelta().y(), e.position(), self._area(), self.pm.size())
+            self._zoomed()
 
     def mouseDoubleClickEvent(self, e):
         if self.handler and self.handler("dbl", *self.norm(e.position()), e):
             return
-        self.set_zoom(None if self.zoom is not None else 1.0, e.position())
+        self.toggle_zoom(e.position())
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Space and not e.isAutoRepeat():
+            self.space = True
+            self.setCursor(Qt.OpenHandCursor)
+            return
+        super().keyPressEvent(e)
+
+    def keyReleaseEvent(self, e):
+        if e.key() == Qt.Key_Space and not e.isAutoRepeat():
+            self.space = False
+            self.unsetCursor()
+            return
+        super().keyReleaseEvent(e)
 
     def _near_line(self, pt) -> bool:
         st, r = self.cmp, self.img_rect
@@ -244,29 +246,29 @@ class EditCanvas(QWidget):
             return abs(pt.x() - (r.x() + r.width() * st.pos)) < 14
         return abs(pt.y() - (r.y() + r.height() * st.pos)) < 14
 
+    def _start_pan(self, pt):
+        self.zoom.start_pan(pt)
+        self.setCursor(Qt.ClosedHandCursor)
+
     def mousePressEvent(self, e):
         self.setFocus()
         pt = e.position()
         if e.button() == Qt.MiddleButton or (self.space and e.button() == Qt.LeftButton):
-            self._pan = (pt, QPointF(self.center))
-            return
+            return self._start_pan(pt)
         if e.button() == Qt.LeftButton and self._near_line(pt):
             self.cmp.dragging = True
             CMP.drag(self.cmp, self.img_rect, pt.x(), pt.y())
             return self.update()
         if self.handler and self.handler("press", *self.norm(pt), e):
             return
-        if e.button() == Qt.LeftButton and self.zoom is not None:
-            self._pan = (pt, QPointF(self.center))
+        if e.button() == Qt.LeftButton and self.zoom.active:
+            self._start_pan(pt)  # herramienta Mover sin capa que mover: mano
 
     def mouseMoveEvent(self, e):
         pt = e.position()
         self.cursor = pt
-        if self._pan:
-            p0, c0 = self._pan
-            r = self.img_rect
-            self.center = QPointF(c0.x() - (pt.x() - p0.x()) / max(1, r.width()),
-                                  c0.y() - (pt.y() - p0.y()) / max(1, r.height()))
+        if self.zoom.panning and self.pm is not None:
+            self.zoom.pan(pt, self._area(), self.pm.size())
             self.img_rect = self._rect()
             return self.update()
         if self.cmp.dragging:
@@ -279,8 +281,11 @@ class EditCanvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, e):
-        if self._pan:
-            self._pan = None
+        if self.zoom.panning:
+            self.zoom.end_pan()
+            self.setCursor(Qt.OpenHandCursor if self.space else Qt.ArrowCursor)
+            if not self.space and self.handler:
+                self.handler("cursor", 0, 0, e)  # que la vista vuelva a poner el cursor de su herramienta
             return
         if self.cmp.dragging:
             self.cmp.dragging = False
@@ -303,8 +308,11 @@ class EditCanvas(QWidget):
             self.pm = pm
         if before is not None:
             self.before = before
-        if new_size:
-            self.zoom = None
+        if new_size:  # otra foto (u otro recorte): vuelve a encajar
+            self.zoom.reset(key=(pm.width(), pm.height()), full_size=(pm.width(), pm.height()))
+            self.zoom.pct, self.zoom.cx, self.zoom.cy = None, 0.5, 0.5
+            if self.zoom_changed:
+                self.zoom_changed()
         self.msg = msg
         self.img_rect = self._rect()
         self.update()
@@ -325,7 +333,10 @@ class EditCanvas(QWidget):
             p.setPen(QColor(T.MUTED))
             p.drawText(self.rect(), Qt.AlignCenter, self.msg)
             return
+        area = self._area()
         self.img_rect = r = self._rect()
+        p.setClipRect(area)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, self.zoom.pct is None or self.zoom.pct < 1.5)
         CMP.paint(p, r, self.pm, self.before, self.cmp)
         p.setRenderHint(QPainter.Antialiasing)
         sc = r.width() / max(1, self.pm.width())
@@ -357,6 +368,8 @@ class EditCanvas(QWidget):
             p.drawEllipse(self.cursor, rad, rad)
             p.setPen(QPen(QColor(255, 255, 255, 230), 1.2))
             p.drawEllipse(self.cursor, rad, rad)
+        p.setClipping(False)
+        self.zoom.draw_badge(p, area, self.pm.size())
         if self.msg:
             p.setPen(QColor(T.MUTED))
             p.drawText(self.rect().adjusted(0, 0, -16, -8), Qt.AlignRight | Qt.AlignBottom, self.msg)
@@ -435,6 +448,9 @@ class EditsView(QWidget):
                       ("\\", self.toggle_before), ("Y", self.next_split), ("Ctrl+E", self.export_current),
                       ("[", lambda: self._nudge_size(1 / 1.2)), ("]", lambda: self._nudge_size(1.2)),
                       ("Ctrl+0", lambda: self.canvas.set_zoom(None)), ("Ctrl+1", lambda: self.canvas.set_zoom(1.0)),
+                      ("Z", lambda: self.canvas.toggle_zoom(
+                          self.canvas.cursor if self.canvas.cursor is not None
+                          and self.canvas.img_rect.contains(self.canvas.cursor) else None)),
                       ("T", lambda: self.add_layer("text")), (Qt.Key_Delete, self.delete_layer)):
             QShortcut(QKeySequence(k), self, fn)
         for key, _, _, sc, _ in TOOLS:
@@ -582,8 +598,8 @@ class EditsView(QWidget):
         hb.addWidget(self.opt_hint, 1)
         self.zoom_lbl = QLabel("Encajar")
         self.zoom_lbl.setObjectName("meta")
-        self.zoom_lbl.setToolTip("Rueda del ratón: zoom · doble clic: 100 % / encajar · Ctrl+0 encajar · "
-                                 "botón central o barra espaciadora: mano")
+        self.zoom_lbl.setToolTip("Rueda del ratón: zoom hacia el cursor (25 · 50 · 100 · 200 · 400 %) · Z: 100 % / "
+                                 "encajar · Ctrl+0 encajar · botón central o barra espaciadora: mano")
         hb.addWidget(self.zoom_lbl)
         self.cmp_bar = CMP.CompareBar()
         self.cmp_bar.changed.connect(self.set_compare)
@@ -1033,6 +1049,9 @@ class EditsView(QWidget):
 
     # ---------------------------------------------------------- ratón sobre el lienzo
     def _mouse(self, kind, x, y, e) -> bool:
+        if kind == "cursor":
+            self.canvas.setCursor(Qt.OpenHandCursor if self.tool == "move" else Qt.CrossCursor)
+            return True
         if self.base is None or self.doc is None:
             return False
         if kind == "wheel":

@@ -255,6 +255,9 @@ def find_source(img: np.ndarray, op: dict) -> list[float] | None:
     ring_full = cv2.dilate((hm > 0.05).astype(np.uint8), np.ones((5, 5), np.uint8), iterations=max(1, int(r * f * 0.6)))
     sx0, sy0 = int(x0 * f), int(y0 * f)
     sx1, sy1 = max(sx0 + 2, int(np.ceil(x1 * f))), max(sy0 + 2, int(np.ceil(y1 * f)))
+    # en pequeño el redondeo puede salirse un píxel de la imagen: la caja se ajusta a lo que hay
+    sx1, sy1 = min(sx1, sm.shape[1]), min(sy1, sm.shape[0])
+    sx0, sy0 = min(sx0, sx1 - 1), min(sy0, sy1 - 1)
     hole = hm[sy0:sy1, sx0:sx1] > 0.05
     ring = (ring_full[sy0:sy1, sx0:sx1] > 0) & ~hole
     if ring.sum() < 4:
