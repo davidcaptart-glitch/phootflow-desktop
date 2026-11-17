@@ -2009,6 +2009,9 @@ def selftest() -> int:
         EDE.add_layer(doc, "liquify")["strokes"].append({"mode": "push", "r": 0.1, "s": 0.5,
                                                           "pts": [[0.3, 0.3], [0.4, 0.3]]})
         EDE.add_layer(doc, "text", text="PhootFlow")
+        adj = EDE.add_layer(doc, "adjust", adj="curves")  # capa de ajuste con máscara de una selección
+        adj["mask"] = {"shapes": [{"type": "ellipse", "box": [0.2, 0.2, 0.8, 0.8], "op": "add"}], "feather": 0.02}
+        adj["p"]["curves"]["rgb"] = [[0, 0], [0.5, 0.6], [1, 1]]
         out, _ = EDE.compose(base, doc, [0.0, 0.0, 1.0, 1.0])
         assert out.shape == base.shape and out.std() > 0
         sh.switch(ENV_EVENTS)

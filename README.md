@@ -79,6 +79,21 @@ carpeta** se elige en cuál trabajarla.
 
 ### Edits (retoque tipo Photoshop)
 
+La interfaz sigue a [PhotoCraft](https://github.com/storytold/photocraft), el Photoshop de ArtCraft: barra de
+menús (Archivo, Edición, Imagen, Capa, Texto, Selección, Filtro, Vista, Ventana, Ayuda), barra de opciones de
+la herramienta, pestaña del documento («foto @ zoom (capa, RGB/8)»), herramientas en dos columnas con los
+colores frontal y de fondo, paneles Propiedades | Ajustes y Capas | Historial | Exportar, y barra de estado.
+
+- **Selecciones**: marco rectangular o elíptico (M), lazo (L) y selección de sujeto con IA (W); nueva, añadir
+  (Mayús), restar (Alt) o intersecar; calar (Mayús+F6), todo (Ctrl+A), deseleccionar (Ctrl+D), invertir
+  (Mayús+Ctrl+I). **Mayús+Supr** rellena la selección según contenido con IA.
+- **Capas de ajuste** (panel Ajustes o Imagen › Ajustes): Brillo/Contraste, Niveles, Curvas, Exposición,
+  Intensidad, Tono/Saturación, Equilibrio de color, Blanco y negro, Filtro de fotografía, Invertir, Posterizar
+  y Umbral, con fórmulas portadas de PhotoCraft (medidas contra Photoshop). Con una selección activa, el ajuste
+  la toma como **máscara**; la máscara se pinta con el pincel de máscara (B).
+- **Panel Capas**: modo de fusión (Normal, Multiplicar, Trama, Superponer, Luz suave…), opacidad, ojo,
+  miniatura y máscara, la capa «Fondo» bloqueada abajo, duplicar (Ctrl+J), ordenar (Ctrl+] / Ctrl+[).
+
 Parte de la foto ya revelada: el revelado de Studio si lo tiene y, si no, la edición de Events o un revelado
 automático del RAW; un JPG, PNG o TIFF se retoca tal cual. Encima se apilan **capas** con casilla de
 visibilidad, opacidad y orden:

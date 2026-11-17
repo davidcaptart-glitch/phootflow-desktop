@@ -625,6 +625,66 @@ class Edits(unittest.TestCase):
             EE.lama_ready, EE.lama_inpaint = ready, inpaint
         self.assertTrue(EE.LAMA_URL.startswith("https://huggingface.co/") and len(EE.LAMA_SHA256) == 64)
 
+    def test_adjustment_layers_selections_masks_and_blend_modes(self):
+        EE = self.EE
+        import edits_adjust as A
+        rng = np.random.default_rng(7)
+        img = np.clip(rng.random((300, 400, 3)), 0, 1).astype(np.float32)
+        for k in A.ORDER:  # cada ajuste con sus valores por defecto: no rompe la imagen
+            out = A.apply(img, k, A.defaults(k))
+            self.assertEqual(out.shape, img.shape, k)
+            self.assertTrue(np.isfinite(out).all(), k)
+        for k in ("brightness", "levels", "curves", "exposure", "vibrance", "hue_sat", "color_balance"):
+            self.assertLess(float(np.abs(A.apply(img, k, A.defaults(k)) - img).max()), 1e-3, k)  # neutros
+        # Curvas: spline natural por los puntos (y pasa por ellos)
+        lut = A.curve_lut([[0, 0], [0.5, 0.7], [1, 1]])
+        self.assertAlmostEqual(float(lut[len(lut) // 2]), 0.7, delta=0.01)
+        # Niveles: el punto blanco de entrada a 200 lleva 200/255 a blanco
+        p = A.defaults("levels")
+        p["levels"]["rgb"] = [0.0, 1.0, 200 / 255, 0.0, 1.0]
+        self.assertGreater(float(A.apply(np.full((2, 2, 3), 200 / 255, np.float32), "levels", p).min()), 0.99)
+        # Tono/Saturación -100: gris; Blanco y negro: gris
+        p = A.defaults("hue_sat")
+        p["saturation"] = -100
+        self.assertLess(float(np.ptp(A.apply(img, "hue_sat", p), axis=-1).max()), 1e-4)
+        self.assertLess(float(np.ptp(A.apply(img, "black_white", A.defaults("black_white")), axis=-1).max()), 1e-6)
+        # modos de fusión (W3C): multiplicar con blanco no cambia; trama con negro no cambia
+        self.assertTrue(np.allclose(A.blend(img, np.ones_like(img), "multiply"), img))
+        self.assertTrue(np.allclose(A.blend(img, np.zeros_like(img), "screen"), img))
+        # selecciones: rectángulo, elipse, lazo, restar, invertir y calar
+        sel = {"shapes": [{"type": "rect", "box": [0.25, 0.25, 0.75, 0.75], "op": "add"},
+                          {"type": "ellipse", "box": [0.4, 0.4, 0.6, 0.6], "op": "sub"}]}
+        a = EE.selection_mask((300, 400), sel)
+        self.assertEqual(a[100, 120], 1.0)
+        self.assertEqual(a[150, 200], 0.0)  # el agujero restado
+        self.assertEqual(a[10, 10], 0.0)
+        self.assertEqual(EE.selection_mask((300, 400), dict(sel, invert=True))[10, 10], 1.0)
+        lasso = EE.selection_mask((300, 400), {"shapes": [{"type": "lasso", "op": "add",
+                                                           "pts": [[0.1, 0.1], [0.5, 0.1], [0.3, 0.6]]}]})
+        self.assertGreater(lasso[60, 120], 0.9)
+        soft = EE.selection_mask((300, 400), dict(sel, feather=0.03))
+        self.assertTrue(0.05 < soft[75, 200] < 0.95)  # borde calado
+        # capa de ajuste con la selección como máscara: solo cambia dentro
+        doc = EE.new_doc()
+        lay = EE.add_layer(doc, "adjust", adj="invert")
+        self.assertEqual(lay["name"], "Invertir")
+        lay["mask"] = {"shapes": [{"type": "rect", "box": [0.0, 0.0, 0.5, 1.0], "op": "add"}]}
+        out, _ = EE.compose(img, doc, [0.0, 0.0, 1.0, 1.0])
+        self.assertTrue(np.allclose(out[:, 210:], img[:, 210:], atol=1e-5))
+        self.assertTrue(np.allclose(out[:, :190], 1 - img[:, :190], atol=1e-5))
+        lay.pop("mask")
+        lay["blend"] = "luminosity"  # el modo de fusión se aplica a la capa
+        out2, _ = EE.compose(img, doc, [0.0, 0.0, 1.0, 1.0])
+        self.assertFalse(np.allclose(out2, 1 - img, atol=1e-3))
+        # «Rellenar según contenido» de una selección (sin IA aquí: relleno clásico)
+        flat = np.full((300, 400, 3), 0.5, np.float32) + rng.normal(0, 0.01, (300, 400, 3)).astype(np.float32)
+        cv2.rectangle(flat, (180, 120), (220, 180), (0.9, 0.1, 0.1), -1)
+        op = {"tool": "fill", "r": 0.02, "pts": [], "ai": False,
+              "sel": {"shapes": [{"type": "rect", "box": [0.43, 0.38, 0.57, 0.62], "op": "add"}]}}
+        op["src"] = EE.find_source(flat, op)
+        filled = EE.apply_retouch(flat, {"ops": [op]})
+        self.assertLess(float(np.abs(filled[130:170, 190:210, 0] - 0.5).mean()), 0.05)
+
     def test_documents_base_events_and_export_are_non_destructive(self):
         EE = self.EE
         import studio_engine as SE

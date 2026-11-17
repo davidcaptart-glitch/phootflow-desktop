@@ -19,32 +19,46 @@ import numpy as np
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QFileDialog,
-                               QFrame, QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem, QMenu,
-                               QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-                               QVBoxLayout, QWidget)
+                               QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListView, QListWidget,
+                               QListWidgetItem, QMenu, QMenuBar, QPlainTextEdit, QProgressBar, QPushButton,
+                               QScrollArea, QSizePolicy, QSpinBox, QSplitter, QToolButton, QVBoxLayout, QWidget)
 
 import compare as CMP
 import zoomview as Z
+import edits_adjust as A
 import edits_engine as EE
+import edits_ui as UI
 import engine as E
 import studio_engine as SE
 import theme as T
-from studio import ROLE, FilmDelegate, Item, Section, SliderRow, _btn, _pixmap, quick_thumb
+from studio import ROLE, FilmDelegate, Item, SliderRow, _btn, _pixmap, quick_thumb
 
 PROXY_PX = 2048
 # clave, icono, consejo, atajo, tipo de capa sobre la que trabaja
-TOOLS = [("move", "✥", "Mover y mano: arrastra el texto o el logo seleccionado; si no, desplaza la vista", "V", None),
-         ("heal", "✚", "Pincel corrector: pinta encima de granos, brillos o manchas (busca solo el parche)", "J",
-          "retouch"),
+TOOLS = [("move", "✥", "Mover: arrastra el texto, el logo o la imagen elegida; si no, desplaza la vista", "V", None),
+         ("marquee", "▭", "Marco rectangular o elíptico: arrastra para seleccionar (Mayús añade, Alt resta)", "M",
+          None),
+         ("lasso", "ʘ", "Lazo: rodea a mano alzada la zona a seleccionar", "L", None),
+         ("subject", "✦", "Selección de sujeto: clic para seleccionar a las personas (o el objeto principal)", "W",
+          None),
+         ("eyedrop", "⌖", "Cuentagotas: toma el color frontal de la foto", "I", None),
+         ("heal", "✚", "Pincel corrector puntual: pinta encima de granos, brillos o manchas (busca solo el parche)",
+          "J", "retouch"),
+         ("skin", "◐", "Pincel de máscara: pinta la máscara de la capa elegida, la Piel o la persona del Fondo (clic "
+                       "derecho o Alt: quita)", "B", "skin"),
          ("clone", "◎", "Tampón de clonar: Alt+clic para elegir el origen y pinta donde quieras copiarlo", "S",
           "retouch"),
          ("fill", "▨", "Relleno según contenido con IA: pinta lo que quieras borrar (personas, objetos, cables, "
-                       "carteles)", "G",
-          "retouch"),
-         ("skin", "◐", "Pincel de máscara: añade zonas a la capa Piel o a la persona de la capa Fondo (clic "
-                       "derecho o Alt: quita)", "B", "skin"),
-         ("light", "☀", "Ojos y luz: aclarar ojeras, blanquear dientes y ojos, oscurecer", "O", "light"),
-         ("liquify", "〰", "Licuar: empujar, inflar o encoger", "W", "liquify")]
+                       "carteles)", "G", "retouch"),
+         ("light", "☀", "Sobreexponer / subexponer: aclarar ojeras, blanquear dientes y ojos, oscurecer", "O", "light"),
+         ("liquify", "〰", "Licuar: empujar, inflar o encoger", "Shift+Ctrl+X", "liquify"),
+         ("type", "T", "Texto horizontal: clic en la foto para escribir", "T", None),
+         ("hand", "✋", "Mano: arrastra para desplazar la vista ampliada", "H", None),
+         ("zoom", "⌕", "Zoom: clic acerca, Alt+clic aleja", "", None)]
+# disposición de la barra en dos columnas (como PhotoCraft / Photoshop)
+TOOL_GRID = [("move", None), ("marquee", "lasso"), ("subject", "eyedrop"), ("heal", "skin"), ("clone", "fill"),
+             ("light", "liquify"), ("type", None), ("hand", "zoom")]
+SELECT_TOOLS = ("marquee", "lasso", "subject")
 TOOL_LAYER = {k: lay for k, _, _, _, lay in TOOLS}
 LIGHT_MODES = [("dodge", "Aclarar (ojeras)"), ("whiten", "Blanquear (dientes, ojos)"), ("burn", "Oscurecer")]
 LIQ_MODES = [("push", "Empujar"), ("bloat", "Inflar"), ("pucker", "Encoger")]
@@ -61,7 +75,7 @@ def _count(n: int, word: str) -> str:
 
 def tool_icon(key: str):
     """Iconos de línea de la barra de herramientas (gris normal, blanco la activa)."""
-    from PySide6.QtGui import QIcon, QPainterPath, QPixmap
+    from PySide6.QtGui import QFont, QIcon, QPainterPath, QPixmap
 
     def draw(color):
         pm = QPixmap(44, 44)
@@ -122,6 +136,59 @@ def tool_icon(key: str):
             p.drawEllipse(QPointF(12, 12), 3.2, 3.2)
             p.setBrush(QColor(color))
             p.drawEllipse(QPointF(13.2, 10.8), 0.9, 0.9)
+        elif key == "marquee":  # rectángulo discontinuo
+            pen.setDashPattern([2, 1.5])
+            p.setPen(pen)
+            p.drawRect(QRectF(4, 6, 16, 12))
+        elif key == "lasso":
+            path = QPainterPath()
+            path.moveTo(7, 17)
+            path.cubicTo(1, 12, 6, 4, 13, 5)
+            path.cubicTo(21, 6, 22, 14, 14, 16)
+            path.cubicTo(10, 17, 8, 15, 9, 13)
+            p.drawPath(path)
+            p.drawLine(QPointF(7, 17), QPointF(6, 21))
+        elif key == "subject":  # silueta con destello
+            p.drawEllipse(QPointF(10, 8), 3, 3)
+            path = QPainterPath()
+            path.moveTo(4, 21)
+            path.cubicTo(4, 14, 16, 14, 16, 21)
+            p.drawPath(path)
+            for a, b in (((19, 3), (19, 9)), ((16, 6), (22, 6))):
+                p.drawLine(QPointF(*a), QPointF(*b))
+        elif key == "eyedrop":
+            p.drawLine(QPointF(5, 19), QPointF(14, 10))
+            p.drawLine(QPointF(4, 20), QPointF(5, 19))
+            p.drawRoundedRect(QRectF(13, 4, 6, 9), 2, 2)
+        elif key == "type":
+            f = QFont("Georgia")
+            f.setPixelSize(17)
+            p.setFont(f)
+            p.drawText(QRectF(0, 0, 24, 24), Qt.AlignCenter, "T")
+        elif key == "hand":
+            path = QPainterPath()
+            path.moveTo(7, 21)
+            path.lineTo(5, 13)
+            path.lineTo(7, 12)
+            path.lineTo(9, 15)
+            path.lineTo(9, 5)
+            path.lineTo(11, 5)
+            path.lineTo(11, 12)
+            path.lineTo(11, 4)
+            path.lineTo(13, 4)
+            path.lineTo(13, 12)
+            path.lineTo(13, 5)
+            path.lineTo(15, 5)
+            path.lineTo(15, 13)
+            path.lineTo(15, 7)
+            path.lineTo(17, 7)
+            path.lineTo(17, 16)
+            path.lineTo(15, 21)
+            path.closeSubpath()
+            p.drawPath(path)
+        elif key == "zoom":
+            p.drawEllipse(QPointF(10, 10), 6, 6)
+            p.drawLine(QPointF(14.5, 14.5), QPointF(20, 20))
         elif key == "liquify":  # ondas
             for y in (8, 12.5, 17):
                 path = QPainterPath()
@@ -174,6 +241,17 @@ class EditCanvas(QWidget):
         self.handler = None           # callback(tipo, x, y, evento) -> ¿consumido?
         self.space = False
         self.zoom_changed = None
+        self.sel_paths: list = []     # contornos de la selección (0..1 de la foto mostrada)
+        self.shape = None             # forma en curso: ("rect"|"ellipse", x0, y0, x1, y1) o ("lasso", [puntos])
+        self._ants = 0
+        self._ant_timer = QTimer(self)
+        self._ant_timer.timeout.connect(self._march)
+        self._ant_timer.start(140)
+
+    def _march(self):
+        if self.sel_paths and self.isVisible():
+            self._ants = (self._ants + 1) % 8
+            self.update()
 
     # ---- geometría (zoomview: 100 % = un píxel de la vista de trabajo de 2048 px)
     def zoom_pixmap(self):
@@ -351,6 +429,35 @@ class EditCanvas(QWidget):
                 p.drawPoint(pts[0])
             for a, b in zip(pts, pts[1:]):
                 p.drawLine(a, b)
+        if self.sel_paths or self.shape:
+            from PySide6.QtGui import QPainterPath
+            path = QPainterPath()
+            for poly in self.sel_paths:
+                path.moveTo(self.to_view(*poly[0]))
+                for q in poly[1:]:
+                    path.lineTo(self.to_view(*q))
+                path.closeSubpath()
+            if self.shape:
+                if self.shape[0] == "lasso":
+                    pts = self.shape[1]
+                    if pts:
+                        path.moveTo(self.to_view(*pts[0]))
+                        for q in pts[1:]:
+                            path.lineTo(self.to_view(*q))
+                else:
+                    rr = QRectF(self.to_view(*self.shape[1:3]), self.to_view(*self.shape[3:5])).normalized()
+                    if self.shape[0] == "rect":
+                        path.addRect(rr)
+                    else:
+                        path.addEllipse(rr)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255), 1))
+            p.drawPath(path)
+            ants = QPen(QColor(0, 0, 0), 1, Qt.CustomDashLine)
+            ants.setDashPattern([4, 4])
+            ants.setDashOffset(self._ants)
+            p.setPen(ants)
+            p.drawPath(path)
         if self.box:
             x0, y0, x1, y1 = self.box
             p.setPen(QPen(QColor(T.ACCENT), 1, Qt.DashLine))
@@ -374,6 +481,15 @@ class EditCanvas(QWidget):
         if self.msg:
             p.setPen(QColor(T.MUTED))
             p.drawText(self.rect().adjusted(0, 0, -16, -8), Qt.AlignRight | Qt.AlignBottom, self.msg)
+
+
+class _Spin(QSpinBox):
+    """QSpinBox con set_value sin emitir (misma interfaz que SliderRow para la opacidad)."""
+
+    def set_value(self, v, emit=False):
+        self.blockSignals(not emit)
+        self.setValue(int(round(float(v))))
+        self.blockSignals(False)
 
 
 # ------------------------------------------------------------------ vista Edits
@@ -425,22 +541,41 @@ class EditsView(QWidget):
         self._prop_timer.setSingleShot(True)
         self._prop_timer.timeout.connect(lambda: self._commit("Propiedades"))
 
-        h = QHBoxLayout(self)
+        self.sel = None              # selección activa (especificación de edits_engine.selection_mask) o None
+        self.sel_mode = "new"        # nueva · añadir · restar · intersecar
+        self.sel_shape = "rect"      # forma del marco
+        self.sel_feather = 0         # calado en px de la vista
+        self._sel_alpha = None
+        self._last_img = None        # última composición mostrada (para el cuentagotas y los histogramas)
+        self._thumbs: dict = {}
+        self._adj_key = None
+        self._adj_force = False
+        self.swatches = UI.Swatches()
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._build_menubar())
+        self.canvas = EditCanvas()
+        self.canvas.handler = self._mouse
+        self.canvas.zoom_changed = self._update_chrome
+        root.addWidget(self._build_options())
+        h = QHBoxLayout()
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(0)
         h.addWidget(self._build_tools())
         mid = QVBoxLayout()
         mid.setContentsMargins(0, 0, 0, 0)
         mid.setSpacing(0)
-        mid.addWidget(self._build_options())
+        mid.addWidget(self._build_doc_tab())
         mid.addWidget(self._build_banner())
-        self.canvas = EditCanvas()
-        self.canvas.handler = self._mouse
-        self.canvas.zoom_changed = lambda: self.zoom_lbl.setText(self.canvas.zoom_label())
         mid.addWidget(self.canvas, 1)
-        mid.addWidget(self._build_filmstrip())
         h.addLayout(mid, 1)
+        h.addWidget(self._build_dock_strip())
         h.addWidget(self._build_panels())
+        root.addLayout(h, 1)
+        root.addWidget(self._build_filmstrip())
+        root.addWidget(self._build_statusbar())
 
         self.rendered.connect(self._on_rendered)
         self.loaded.connect(self._on_loaded)
@@ -452,13 +587,21 @@ class EditsView(QWidget):
                       ("\\", self.toggle_before), ("Y", self.next_split), ("Ctrl+E", self.export_current),
                       ("[", lambda: self._nudge_size(1 / 1.2)), ("]", lambda: self._nudge_size(1.2)),
                       ("Ctrl+0", lambda: self.canvas.set_zoom(None)), ("Ctrl+1", lambda: self.canvas.set_zoom(1.0)),
+                      ("Ctrl++", lambda: self._zoom_step(1)), ("Ctrl+=", lambda: self._zoom_step(1)),
+                      ("Ctrl+-", lambda: self._zoom_step(-1)),
                       ("Z", lambda: self.canvas.toggle_zoom(
                           self.canvas.cursor if self.canvas.cursor is not None
                           and self.canvas.img_rect.contains(self.canvas.cursor) else None)),
-                      ("T", lambda: self.add_layer("text")), (Qt.Key_Delete, self.delete_layer)):
+                      ("Ctrl+A", self.select_all), ("Ctrl+D", self.deselect), ("Ctrl+Shift+I", self.invert_selection),
+                      ("Shift+F6", self.feather_selection), ("Ctrl+J", self.duplicate_layer),
+                      ("Shift+Del", self.fill_selection), ("Shift+Backspace", self.fill_selection),
+                      (Qt.Key_Delete, self._delete_key), ("X", self.swatches.swap), ("D", self.swatches.reset),
+                      ("Ctrl+]", lambda: self.move_layer(1)), ("Ctrl+[", lambda: self.move_layer(-1)),
+                      ("Escape", self.deselect)):
             QShortcut(QKeySequence(k), self, fn)
         for key, _, _, sc, _ in TOOLS:
-            QShortcut(QKeySequence(sc), self, lambda k=key: self.set_tool(k))
+            if sc:
+                QShortcut(QKeySequence(sc), self, lambda k=key: self.set_tool(k))
         self.set_tool("heal")
         self._refresh_layers()
         self.setAcceptDrops(True)
@@ -545,25 +688,47 @@ class EditsView(QWidget):
     def _build_tools(self):
         w = QFrame()
         w.setObjectName("tooltabs")
-        w.setFixedWidth(46)
+        w.setFixedWidth(74)
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 8, 0, 8)
+        v.setContentsMargins(4, 8, 4, 8)
         v.setSpacing(2)
         self.tool_btn = {}
         g = QButtonGroup(self)
-        for key, icon, tip, sc, _ in TOOLS:
-            b = QPushButton()
-            b.setIcon(tool_icon(key))
-            b.setIconSize(QSize(22, 22))
-            b.setObjectName("tooltab")
-            b.setCheckable(True)
-            b.setCursor(Qt.PointingHandCursor)
-            b.setToolTip(f"{tip} ({sc})")
-            b.setStyleSheet("QPushButton#tooltab { padding: 9px 0; }")
-            b.clicked.connect(lambda _, k=key: self.set_tool(k))
-            g.addButton(b)
-            v.addWidget(b)
-            self.tool_btn[key] = b
+        tips = {k: (tip, sc) for k, _, tip, sc, _ in TOOLS}
+        grid = QGridLayout()
+        grid.setSpacing(2)
+        for row, pair in enumerate(TOOL_GRID):
+            for col, key in enumerate(pair):
+                if key is None:
+                    continue
+                b = QPushButton()
+                b.setIcon(tool_icon(key))
+                b.setIconSize(QSize(20, 20))
+                b.setObjectName("tool")
+                b.setCheckable(True)
+                b.setFixedSize(32, 32)
+                b.setCursor(Qt.PointingHandCursor)
+                tip, sc = tips[key]
+                b.setToolTip(f"{tip}" + (f" ({sc})" if sc else ""))
+                b.setStyleSheet(f"QPushButton#tool {{ background: transparent; border: none; border-radius: 4px; }}"
+                                f"QPushButton#tool:hover {{ background: {T.SURFACE_3}; }}"
+                                f"QPushButton#tool:checked {{ background: #3b3b3b; border: 1px solid #5a5a5a; }}")
+                b.clicked.connect(lambda _, k=key: self.set_tool(k))
+                g.addButton(b)
+                grid.addWidget(b, row + (row >= 1) + (row >= 5) + (row >= 7), col)
+                self.tool_btn[key] = b
+        for r in (1, 6, 9):  # separadores entre grupos (como en PhotoCraft)
+            sep = QFrame()
+            sep.setFixedHeight(9)
+            sep.setStyleSheet(f"border-bottom: 1px solid {T.LINE}; margin: 0 6px 4px 6px;")
+            grid.addWidget(sep, r, 0, 1, 2)
+        v.addLayout(grid)
+        v.addSpacing(10)
+        sw = QHBoxLayout()
+        sw.addStretch(1)
+        sw.addWidget(self.swatches)
+        sw.addStretch(1)
+        v.addLayout(sw)
         v.addStretch(1)
         return w
 
@@ -597,18 +762,218 @@ class EditsView(QWidget):
         self.opt_mode.currentIndexChanged.connect(lambda i: self._set_opt("mode", self.opt_mode.itemData(i)))
         self.opt_hint = QLabel("")
         self.opt_hint.setObjectName("meta")
-        for x in (self.opt_size, self.opt_hard, self.opt_str, self.opt_mode):
+        # opciones de las herramientas de selección: nueva · añadir · restar · intersecar, forma y calado
+        self.opt_sel = QWidget()
+        sl = QHBoxLayout(self.opt_sel)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(2)
+        self.sel_btns = {}
+        gsel = QButtonGroup(self)
+        for k, txt, tip in (("new", "▢", "Nueva selección"), ("add", "＋", "Añadir a la selección (Mayús)"),
+                            ("sub", "−", "Restar de la selección (Alt)"), ("inter", "⧉", "Intersecar")):
+            b = QPushButton(txt)
+            b.setObjectName("flat")
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.setFixedWidth(28)
+            b.clicked.connect(lambda _, k=k: setattr(self, "sel_mode", k))
+            gsel.addButton(b)
+            sl.addWidget(b)
+            self.sel_btns[k] = b
+        self.sel_btns["new"].setChecked(True)
+        self.opt_shape = QComboBox()
+        self.opt_shape.addItem("Rectángulo", "rect")
+        self.opt_shape.addItem("Elipse", "ellipse")
+        self.opt_shape.currentIndexChanged.connect(lambda i: setattr(self, "sel_shape", self.opt_shape.itemData(i)))
+        sl.addSpacing(8)
+        sl.addWidget(self.opt_shape)
+        sl.addSpacing(8)
+        fl = QLabel("Calar:")
+        fl.setObjectName("meta")
+        self.opt_feather = QSpinBox()
+        self.opt_feather.setRange(0, 250)
+        self.opt_feather.setSuffix(" px")
+        self.opt_feather.valueChanged.connect(lambda v: setattr(self, "sel_feather", int(v)))
+        sl.addWidget(fl)
+        sl.addWidget(self.opt_feather)
+        sl.addSpacing(8)
+        b_subj = _btn("Seleccionar sujeto", "ghost", "Selecciona a las personas de la foto con IA")
+        b_subj.clicked.connect(self.select_subject)
+        b_fill = _btn("Rellenar según contenido", "ghost", "Borra lo seleccionado con IA (Mayús+Supr)")
+        b_fill.clicked.connect(self.fill_selection)
+        b_mask = _btn("Máscara", "ghost", "Añade la selección como máscara de la capa elegida")
+        b_mask.clicked.connect(self.add_mask_from_selection)
+        for b in (b_subj, b_fill, b_mask):
+            sl.addWidget(b)
+        for x in (self.opt_size, self.opt_hard, self.opt_str, self.opt_mode, self.opt_sel):
             hb.addWidget(x)
         hb.addWidget(self.opt_hint, 1)
-        self.zoom_lbl = QLabel("Encajar")
-        self.zoom_lbl.setObjectName("meta")
-        self.zoom_lbl.setToolTip("Rueda del ratón: zoom hacia el cursor (25 · 50 · 100 · 200 · 400 %) · Z: 100 % / "
-                                 "encajar · Ctrl+0 encajar · botón central o barra espaciadora: mano")
-        hb.addWidget(self.zoom_lbl)
         self.cmp_bar = CMP.CompareBar()
         self.cmp_bar.changed.connect(self.set_compare)
         hb.addWidget(self.cmp_bar)
         return bar
+
+    def _act(self, menu, text, fn, sc=""):
+        """Entrada de menú; el atajo se muestra (lo atienden los QShortcut de la vista)."""
+        a = menu.addAction(text + (f"\t{sc}" if sc else ""))
+        a.triggered.connect(lambda *_: fn())
+        return a
+
+    def _build_menubar(self):
+        mb = QMenuBar()
+        mb.setNativeMenuBar(False)
+        mb.setStyleSheet(f"QMenuBar {{ background: #1b1b1b; border-bottom: 1px solid {T.BORDER}; padding: 1px 6px; }}"
+                         f"QMenuBar::item {{ padding: 4px 9px; background: transparent; color: {T.TEXT}; }}"
+                         f"QMenuBar::item:selected {{ background: {T.SURFACE_3}; border-radius: 3px; }}")
+        f = mb.addMenu("Archivo")
+        self._act(f, "Colocar imagen…", self._pick_image)
+        self._act(f, "Exportar esta foto", self.export_current, "Ctrl+E")
+        self._act(f, "Exportar las seleccionadas", self.export_selected)
+        f.addSeparator()
+        self._act(f, "Descartar el retoque de esta foto…", self.reset_photo)
+        e = mb.addMenu("Edición")
+        self._act(e, "Deshacer", self.undo, "Ctrl+Z")
+        self._act(e, "Rehacer", self.redo, "Mayús+Ctrl+Z")
+        e.addSeparator()
+        self._act(e, "Rellenar según contenido", self.fill_selection, "Mayús+Supr")
+        self._act(e, "Quitar fondo (recortar a PNG)", self.remove_background)
+        i = mb.addMenu("Imagen")
+        sub = i.addMenu("Ajustes")
+        for k in A.ORDER:
+            self._act(sub, A.ADJUSTMENTS[k][0] + "…", lambda k=k: self.add_adjust(k))
+        i.addSeparator()
+        self._act(i, "Quitar fondo (recortar a PNG)", self.remove_background)
+        c = mb.addMenu("Capa")
+        new = c.addMenu("Nueva")
+        for kind in ("retouch", "skin", "light", "liquify", "background", "text", "logo"):
+            self._act(new, EE.KINDS[kind], lambda k=kind: self.add_layer(k))
+        self._act(new, "Imagen…", self._pick_image)
+        adj = c.addMenu("Nueva capa de ajuste")
+        for k in A.ORDER:
+            self._act(adj, A.ADJUSTMENTS[k][0] + "…", lambda k=k: self.add_adjust(k))
+        c.addSeparator()
+        self._act(c, "Duplicar capa", self.duplicate_layer, "Ctrl+J")
+        self._act(c, "Eliminar capa", self.delete_layer)
+        c.addSeparator()
+        self._act(c, "Máscara de capa: de la selección", self.add_mask_from_selection)
+        self._act(c, "Máscara de capa: invertir", self.invert_mask)
+        self._act(c, "Máscara de capa: eliminar", self.delete_mask)
+        c.addSeparator()
+        self._act(c, "Traer adelante", lambda: self.move_layer(1), "Ctrl+]")
+        self._act(c, "Enviar atrás", lambda: self.move_layer(-1), "Ctrl+[")
+        t = mb.addMenu("Texto")
+        self._act(t, "Nueva capa de texto", lambda: self.add_layer("text"))
+        self._act(t, "Herramienta Texto", lambda: self.set_tool("type"), "T")
+        se = mb.addMenu("Selección")
+        self._act(se, "Todo", self.select_all, "Ctrl+A")
+        self._act(se, "Deseleccionar", self.deselect, "Ctrl+D")
+        self._act(se, "Invertir", self.invert_selection, "Mayús+Ctrl+I")
+        se.addSeparator()
+        self._act(se, "Sujeto", self.select_subject)
+        self._act(se, "Calar…", self.feather_selection, "Mayús+F6")
+        self._act(se, "Selección a máscara de capa", self.add_mask_from_selection)
+        fi = mb.addMenu("Filtro")
+        self._act(fi, "Licuar", lambda: self.set_tool("liquify"), "Mayús+Ctrl+X")
+        self._act(fi, "Suavizar piel", lambda: self.add_layer("skin"))
+        self._act(fi, "Desenfocar fondo", lambda: self.add_layer("background"))
+        vi = mb.addMenu("Vista")
+        self._act(vi, "Acercar", lambda: self._zoom_step(1), "Ctrl++")
+        self._act(vi, "Alejar", lambda: self._zoom_step(-1), "Ctrl+-")
+        self._act(vi, "Encajar en pantalla", lambda: self.canvas.set_zoom(None), "Ctrl+0")
+        self._act(vi, "100 %", lambda: self.canvas.set_zoom(1.0), "Ctrl+1")
+        vi.addSeparator()
+        self._act(vi, "Ver el antes", self.toggle_before, "\\")
+        self._act(vi, "Antes / después", self.next_split, "Y")
+        ve = mb.addMenu("Ventana")
+        self._act(ve, "Propiedades", lambda: self._show_tab(self.top_tabs, 0))
+        self._act(ve, "Ajustes", lambda: self._show_tab(self.top_tabs, 1))
+        self._act(ve, "Capas", lambda: self._show_tab(self.bottom_tabs, 0))
+        self._act(ve, "Historial", lambda: self._show_tab(self.bottom_tabs, 1))
+        self._act(ve, "Exportar", lambda: self._show_tab(self.bottom_tabs, 2))
+        self._act(ve, "Tira de fotos", lambda: self.film_box.setVisible(not self.film_box.isVisible()))
+        hp = mb.addMenu("Ayuda")
+        self._act(hp, "Atajos de teclado", self._show_shortcuts)
+        return mb
+
+    def _show_tab(self, tabs, i):
+        self.panels.show()
+        tabs.set_current(i)
+
+    def _show_shortcuts(self):
+        from PySide6.QtWidgets import QMessageBox
+        rows = [f"{sc or '—'}  ·  {tip.split(':')[0]}" for _, _, tip, sc, _ in TOOLS]
+        rows += ["Ctrl+A / Ctrl+D / Mayús+Ctrl+I  ·  todo / deseleccionar / invertir",
+                 "Mayús+Supr  ·  rellenar la selección según contenido", "Ctrl+J  ·  duplicar capa",
+                 "Ctrl+Z / Mayús+Ctrl+Z  ·  deshacer / rehacer", "[ ]  ·  tamaño del pincel",
+                 "Rueda · Z · Ctrl+0 · Ctrl+1  ·  zoom", "Espacio + arrastrar  ·  mano",
+                 "X / D  ·  intercambiar / restablecer colores", "\\ · Y  ·  antes / después"]
+        QMessageBox.information(self, "Atajos de Edits", "\n".join(rows))
+
+    def _build_doc_tab(self):
+        bar = QFrame()
+        bar.setStyleSheet(f"QFrame {{ background: #1a1a1a; border-bottom: 1px solid {T.BORDER}; }}")
+        bar.setFixedHeight(30)
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(8, 0, 8, 0)
+        self.doc_tab = QLabel("")
+        self.doc_tab.setStyleSheet(f"QLabel {{ background: {T.SURFACE}; color: {T.TEXT}; padding: 5px 12px; "
+                                   f"border: 1px solid {T.LINE}; border-bottom: none; border-top-left-radius: 4px;"
+                                   f" border-top-right-radius: 4px; }}")
+        h.addWidget(self.doc_tab)
+        h.addStretch(1)
+        return bar
+
+    def _build_statusbar(self):
+        bar = QFrame()
+        bar.setStyleSheet(f"QFrame {{ background: #1b1b1b; border-top: 1px solid {T.BORDER}; }}"
+                          f"QLabel {{ color: {T.MUTED}; padding: 0 10px; border-right: 1px solid {T.LINE}; }}")
+        bar.setFixedHeight(24)
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(4, 0, 8, 0)
+        h.setSpacing(0)
+        self.st_zoom = QLabel("—")
+        self.st_mode = QLabel("Color RGB · 8 bits")
+        self.st_size = QLabel("")
+        self.st_layers = QLabel("")
+        self.status = QLabel("")
+        self.status.setStyleSheet(f"color: {T.MUTED}; border: none;")
+        self.pb = QProgressBar()
+        self.pb.setTextVisible(False)
+        self.pb.setFixedWidth(160)
+        self.pb.setFixedHeight(10)
+        self.pb.hide()
+        for x in (self.st_zoom, self.st_mode, self.st_size, self.st_layers):
+            h.addWidget(x)
+        h.addWidget(self.status, 1)
+        h.addWidget(self.pb)
+        return bar
+
+    def _update_chrome(self):
+        """Pestaña del documento y barra de estado (zoom, tamaño, capas), como PhotoCraft."""
+        z = self.canvas.zoom
+        if self.canvas.pm is not None:
+            pct = (z.pct if z.pct is not None else z.fit_pct(self.canvas._area(), self.canvas.pm.size())) * 100
+        else:
+            pct = 0
+        name = self.cur.name + os.path.splitext(self.cur.path)[1] if self.cur else "Sin foto"
+        lay = self._layer()
+        self.doc_tab.setText(f"×   {name} @ {pct:.1f} % ({lay['name'] if lay else 'Fondo'}, RGB/8)"
+                             + ("*" if self.doc and len(self.hist) > 1 else ""))
+        self.st_zoom.setText(f"{pct:.1f} %" if pct else "—")
+        if self.cur:
+            try:
+                fw, fh = E.full_size(self.cur.path)
+            except Exception:
+                fw = fh = 0
+            self.st_size.setText(f"{fw} × {fh} px" if fw else "")
+        n = len(self.doc["layers"]) + 1 if self.doc else 0
+        self.st_layers.setText(f"{n} capa{'s' if n != 1 else ''}" if n else "")
+
+    def _zoom_step(self, d):
+        c = self.canvas
+        if c.pm is not None:
+            c.zoom.wheel(120 * d, c._area().center(), c._area(), c.pm.size())
+            c._zoomed()
 
     def _build_banner(self):
         bw = QWidget()
@@ -634,22 +999,15 @@ class EditsView(QWidget):
     def _build_filmstrip(self):
         w = QFrame()
         w.setObjectName("filmstrip")
-        w.setFixedHeight(142)
+        w.setFixedHeight(122)
+        self.film_box = w
         v = QVBoxLayout(w)
         v.setContentsMargins(10, 4, 10, 4)
         v.setSpacing(2)
         top = QHBoxLayout()
         self.lib_info = QLabel("Sin carpeta")
         self.lib_info.setObjectName("meta")
-        self.status = QLabel("")
-        self.status.setObjectName("meta")
-        self.pb = QProgressBar()
-        self.pb.setTextVisible(False)
-        self.pb.setFixedWidth(160)
-        self.pb.hide()
         top.addWidget(self.lib_info, 1)
-        top.addWidget(self.status)
-        top.addWidget(self.pb)
         v.addLayout(top)
         self.film = QListWidget()
         self.film.setObjectName("grid")
@@ -666,76 +1024,180 @@ class EditsView(QWidget):
         v.addWidget(self.film, 1)
         return w
 
+    def _build_dock_strip(self):
+        """Columna fina de iconos a la izquierda de los paneles (como PhotoCraft)."""
+        w = QFrame()
+        w.setFixedWidth(34)
+        w.setStyleSheet(f"QFrame {{ background: #1a1a1a; border-left: 1px solid {T.BORDER}; }}"
+                        f"QToolButton {{ border: none; color: {T.MUTED}; font-size: 13pt; padding: 6px 0; }}"
+                        f"QToolButton:hover {{ color: {T.TEXT_STRONG}; }}")
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 8, 0, 8)
+        v.setSpacing(4)
+        for icon, tip, fn in (("☰", "Propiedades", lambda: self._show_tab(self.top_tabs, 0)),
+                              ("◑", "Ajustes", lambda: self._show_tab(self.top_tabs, 1)),
+                              ("❏", "Capas", lambda: self._show_tab(self.bottom_tabs, 0)),
+                              ("⟲", "Historial", lambda: self._show_tab(self.bottom_tabs, 1)),
+                              ("⇩", "Exportar", lambda: self._show_tab(self.bottom_tabs, 2)),
+                              ("⇥", "Mostrar u ocultar los paneles", lambda: self.panels.setVisible(
+                                  not self.panels.isVisible()))):
+            b = QToolButton()
+            b.setText(icon)
+            b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(fn)
+            v.addWidget(b)
+        v.addStretch(1)
+        return w
+
     def _build_panels(self):
         outer = QFrame()
         outer.setObjectName("previewPane")
-        outer.setFixedWidth(320)
+        outer.setFixedWidth(330)
         ov = QVBoxLayout(outer)
         ov.setContentsMargins(0, 0, 0, 0)
         ov.setSpacing(0)
+        self.panels = outer
+        split = QSplitter(Qt.Vertical)
+        split.setHandleWidth(3)
+        ov.addWidget(split)
+
+        # arriba: Propiedades | Ajustes
+        self.top_tabs = UI.PanelTabs(["Propiedades", "Ajustes"])
         sc = QScrollArea()
         sc.setWidgetResizable(True)
         sc.setFrameShape(QFrame.NoFrame)
         sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         inner = QWidget()
-        v = QVBoxLayout(inner)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        sc.setWidget(inner)
-        ov.addWidget(sc)
-
-        # Capas
-        lay = Section("Capas")
-        self.layer_list = QListWidget()
-        self.layer_list.setObjectName("list")
-        self.layer_list.setFixedHeight(170)
-        self.layer_list.currentRowChanged.connect(self._layer_selected)
-        self.layer_list.itemChanged.connect(self._layer_checked)
-        lay.lay.addWidget(self.layer_list)
-        row = QHBoxLayout()
-        row.setSpacing(4)
-        b_add = _btn("＋ Capa", "small", "Añadir una capa")
-        menu = QMenu(b_add)
-        for kind in ("retouch", "skin", "light", "liquify", "background", "text", "logo"):
-            menu.addAction(EE.KINDS[kind], lambda k=kind: self.add_layer(k))
-        menu.addAction("Imagen… (o arrástrala desde el Explorador)", self._pick_image)
-        menu.addSeparator()
-        menu.addAction("Quitar fondo (recortar a PNG)", self.remove_background)
-        b_add.setMenu(menu)
-        b_up = _btn("▲", "small", "Subir la capa")
-        b_dn = _btn("▼", "small", "Bajar la capa")
-        b_del = _btn("Eliminar", "small", "Eliminar la capa (Supr)")
-        b_up.clicked.connect(lambda: self.move_layer(1))
-        b_dn.clicked.connect(lambda: self.move_layer(-1))
-        b_del.clicked.connect(self.delete_layer)
-        for b in (b_add, b_up, b_dn, b_del):
-            row.addWidget(b)
-        lay.lay.addLayout(row)
-        self.opacity = SliderRow("opacity", "Opacidad", 0, 100, 1, 100)
-        self.opacity.changed.connect(lambda k, val, final: self._set_prop("opacity", int(val), final))
-        lay.lay.addWidget(self.opacity)
-        v.addWidget(lay)
-
-        # Propiedades de la capa elegida
-        self.props = Section("Propiedades")
-        # páginas de propiedades: solo se ve (y solo ocupa sitio) la de la capa elegida
+        pv = QVBoxLayout(inner)
+        pv.setContentsMargins(12, 10, 12, 10)
+        pv.setSpacing(8)
+        self.props_title = QLabel("Propiedades")
+        self.props_title.setStyleSheet(f"color: {T.TEXT_STRONG}; font-weight: 600;")
+        pv.addWidget(self.props_title)
         self.prop_box = QWidget()
         self.prop_lay = QVBoxLayout(self.prop_box)
         self.prop_lay.setContentsMargins(0, 0, 0, 0)
-        self.props.lay.addWidget(self.prop_box)
+        pv.addWidget(self.prop_box)
         self._pages = {}
         self._build_prop_pages()
-        v.addWidget(self.props)
+        self.adj_panel = UI.AdjustPanel(SliderRow)
+        self.adj_panel.changed.connect(self._adj_changed)
+        self.adj_panel.reset.connect(self._adj_reset)
+        self.adj_panel.hide()
+        self.prop_lay.addWidget(self.adj_panel)
+        self._pages["adjust"] = self.adj_panel
+        self.mask_info = QWidget()
+        mi = QHBoxLayout(self.mask_info)
+        mi.setContentsMargins(0, 4, 0, 0)
+        self.mask_lbl = QLabel("Máscara de capa")
+        self.mask_lbl.setObjectName("meta")
+        b_inv = _btn("Invertir", "small", "Invertir la máscara de la capa")
+        b_inv.clicked.connect(self.invert_mask)
+        b_del = _btn("Quitar", "small", "Eliminar la máscara de la capa")
+        b_del.clicked.connect(self.delete_mask)
+        mi.addWidget(self.mask_lbl, 1)
+        mi.addWidget(b_inv)
+        mi.addWidget(b_del)
+        pv.addWidget(self.mask_info)
+        pv.addStretch(1)
+        sc.setWidget(inner)
+        self.top_tabs.add_page(sc)
+        self.top_tabs.add_page(UI.adjustments_grid(self.add_adjust))
+        split.addWidget(self.top_tabs)
 
-        his = Section("Historial", open_=False)
+        # abajo: Capas | Historial | Exportar
+        self.bottom_tabs = UI.PanelTabs(["Capas", "Historial", "Exportar"])
+        lw = QWidget()
+        lv = QVBoxLayout(lw)
+        lv.setContentsMargins(8, 8, 8, 6)
+        lv.setSpacing(6)
+        row = QHBoxLayout()
+        self.blend_cb = QComboBox()
+        for k, label in A.BLEND_MODES.items():
+            self.blend_cb.addItem(label, k)
+        self.blend_cb.setToolTip("Modo de fusión de la capa")
+        self.blend_cb.currentIndexChanged.connect(
+            lambda i: self._set_prop("blend", self.blend_cb.itemData(i), True))
+        ol = QLabel("Opacidad:")
+        ol.setObjectName("meta")
+        self.opacity = _Spin()
+        self.opacity.setRange(0, 100)
+        self.opacity.setSuffix(" %")
+        self.opacity.valueChanged.connect(lambda v: self._set_prop("opacity", int(v), True, delay=True))
+        row.addWidget(self.blend_cb, 1)
+        row.addWidget(ol)
+        row.addWidget(self.opacity)
+        lv.addLayout(row)
+        self.layer_list = QListWidget()
+        self.layer_list.setObjectName("list")
+        self.layer_list.setItemDelegate(UI.LayersDelegate(self))
+        self.layer_list.setStyleSheet(f"QListWidget#list {{ background: {T.SURFACE}; border: 1px solid {T.LINE}; }}")
+        self.layer_list.currentRowChanged.connect(self._layer_selected)
+        lv.addWidget(self.layer_list, 1)
+        icons = QHBoxLayout()
+        icons.setSpacing(2)
+        icons.addStretch(1)
+        b_mask = QToolButton()
+        b_mask.setText("◙")
+        b_mask.setToolTip("Añadir máscara de capa (de la selección, si hay)")
+        b_mask.clicked.connect(self.add_mask_from_selection)
+        b_adj = QToolButton()
+        b_adj.setText("◑")
+        b_adj.setToolTip("Nueva capa de ajuste")
+        madj = QMenu(b_adj)
+        for k in A.ORDER:
+            madj.addAction(A.ADJUSTMENTS[k][0], lambda k=k: self.add_adjust(k))
+        b_adj.setMenu(madj)
+        b_adj.setPopupMode(QToolButton.InstantPopup)
+        b_new = QToolButton()
+        b_new.setText("＋")
+        b_new.setToolTip("Nueva capa")
+        mnew = QMenu(b_new)
+        for kind in ("retouch", "skin", "light", "liquify", "background", "text", "logo"):
+            mnew.addAction(EE.KINDS[kind], lambda k=kind: self.add_layer(k))
+        mnew.addAction("Imagen… (o arrástrala desde el Explorador)", self._pick_image)
+        mnew.addSeparator()
+        mnew.addAction("Quitar fondo (recortar a PNG)", self.remove_background)
+        b_new.setMenu(mnew)
+        b_new.setPopupMode(QToolButton.InstantPopup)
+        b_up = QToolButton()
+        b_up.setText("▲")
+        b_up.setToolTip("Subir la capa (Ctrl+])")
+        b_up.clicked.connect(lambda: self.move_layer(1))
+        b_dn = QToolButton()
+        b_dn.setText("▼")
+        b_dn.setToolTip("Bajar la capa (Ctrl+[)")
+        b_dn.clicked.connect(lambda: self.move_layer(-1))
+        b_dup = QToolButton()
+        b_dup.setText("⧉")
+        b_dup.setToolTip("Duplicar la capa (Ctrl+J)")
+        b_dup.clicked.connect(self.duplicate_layer)
+        b_del = QToolButton()
+        b_del.setText("🗑")
+        b_del.setToolTip("Eliminar la capa")
+        b_del.clicked.connect(self.delete_layer)
+        for b in (b_mask, b_adj, b_new, b_up, b_dn, b_dup, b_del):
+            b.setStyleSheet(f"QToolButton {{ border: none; color: {T.MUTED}; font-size: 12pt; padding: 2px 5px; }}"
+                            f"QToolButton:hover {{ color: {T.TEXT_STRONG}; }}"
+                            f"QToolButton::menu-indicator {{ image: none; }}")
+            icons.addWidget(b)
+        lv.addLayout(icons)
+        self.bottom_tabs.add_page(lw)
+
+        hw = QWidget()
+        hv = QVBoxLayout(hw)
+        hv.setContentsMargins(8, 8, 8, 8)
         self.hist_list = QListWidget()
         self.hist_list.setObjectName("list")
-        self.hist_list.setFixedHeight(150)
         self.hist_list.itemClicked.connect(lambda it: self._history_jump(self.hist_list.row(it)))
-        his.lay.addWidget(self.hist_list)
-        v.addWidget(his)
+        hv.addWidget(self.hist_list)
+        self.bottom_tabs.add_page(hw)
 
-        exp = Section("Exportar")
+        ew = QWidget()
+        ev = QVBoxLayout(ew)
+        ev.setContentsMargins(10, 10, 10, 10)
+        ev.setSpacing(6)
         self.fmt = QComboBox()
         for k, label in EE.FORMATS.items():
             self.fmt.addItem(label, k)
@@ -755,12 +1217,14 @@ class EditsView(QWidget):
                                  "Exporta las fotos seleccionadas en la tira que tengan retoque")
         self.b_export_sel.clicked.connect(self.export_selected)
         for x in (self.fmt, self.size):
-            exp.lay.addWidget(x)
-        exp.lay.addLayout(qrow)
-        exp.lay.addWidget(self.b_export)
-        exp.lay.addWidget(self.b_export_sel)
-        v.addWidget(exp)
-        v.addStretch(1)
+            ev.addWidget(x)
+        ev.addLayout(qrow)
+        ev.addWidget(self.b_export)
+        ev.addWidget(self.b_export_sel)
+        ev.addStretch(1)
+        self.bottom_tabs.add_page(ew)
+        split.addWidget(self.bottom_tabs)
+        split.setSizes([520, 360])
         return outer
 
     def _label(self, text):
@@ -973,6 +1437,8 @@ class EditsView(QWidget):
         name = {k: tip.split(":")[0] for k, _, tip, _, _ in TOOLS}[key]
         self.tool_lbl.setText(name)
         brush = key in self.radius
+        self.opt_sel.setVisible(key in SELECT_TOOLS)
+        self.opt_shape.setVisible(key == "marquee")
         self.opt_size.setVisible(brush)
         if brush:
             self.opt_size.set_value(self.radius[key])
@@ -992,21 +1458,28 @@ class EditsView(QWidget):
             self.opt_mode.setCurrentIndex([k for k, _ in modes].index(self.mode[key]))
             self.opt_mode.blockSignals(False)
         self.opt_hint.setText({"clone": "Alt+clic: origen", "skin": "Clic derecho o Alt: quitar",
-                               "move": "Rueda: zoom · arrastrar: mano"}.get(key, "[ ] tamaño"))
+                               "move": "Rueda: zoom · arrastrar: mano", "eyedrop": "Clic: color frontal",
+                               "type": "Clic en la foto para escribir", "hand": "Arrastra para desplazar",
+                               "zoom": "Clic acerca · Alt+clic aleja", "marquee": "", "lasso": "",
+                               "subject": "Clic en la foto"}.get(key, "[ ] tamaño"))
         self.canvas.brush_px = self.radius.get(key, 0) if brush else 0
         if key == "fill":
             self._preload_lama()
         self.canvas.marker = None
-        self.canvas.setCursor(Qt.OpenHandCursor if key == "move" else Qt.CrossCursor)
+        self.canvas.setCursor(Qt.OpenHandCursor if key in ("move", "hand") else
+                              (Qt.PointingHandCursor if key in ("subject", "eyedrop") else
+                               (Qt.IBeamCursor if key == "type" else Qt.CrossCursor)))
         # al elegir la herramienta se selecciona su capa (si existe)
         kind = TOOL_LAYER.get(key)
-        if key == "skin" and self._layer() and self._layer()["kind"] == "background":
-            kind = None  # el pincel de máscara sigue en la capa Fondo
+        if key == "skin" and self._layer() and (self._layer()["kind"] == "background" or self._layer().get("mask")
+                                                 or self._layer()["kind"] == "adjust"):
+            kind = None  # el pincel de máscara sigue en la capa elegida (su máscara)
         if kind and self.doc:
             lay = self._layer() if self._layer() and self._layer()["kind"] == kind else \
                 next((l for l in reversed(self.doc["layers"]) if l["kind"] == kind), None)
             if lay:
                 self._select_layer(lay["id"])
+        self._update_chrome()
         self.canvas.update()
 
     def _preload_lama(self):
@@ -1099,9 +1572,31 @@ class EditsView(QWidget):
                     if self.clone_off else (self._from_u(*self.clone_pick) if self.clone_pick else None)
             return False
         if kind == "dbl":
-            return t != "move"
+            return t not in ("move", "hand")
         if t == "move":
             return self._move_overlay(kind, x, y)
+        if t == "hand":
+            return False  # el lienzo desplaza la vista
+        if t == "zoom":
+            if kind == "press":
+                c = self.canvas
+                c.zoom.wheel(-120 if alt else 120, e.position(), c._area(), c.pm.size())
+                c._zoomed()
+            return True
+        if t == "eyedrop":
+            if kind in ("press", "move") and self._last_img is not None:
+                h, w = self._last_img.shape[:2]
+                px, py = int(min(max(x, 0), 1) * (w - 1)), int(min(max(y, 0), 1) * (h - 1))
+                c = self._last_img[max(0, py - 1):py + 2, max(0, px - 1):px + 2].reshape(-1, 3).mean(0)
+                self.swatches.fg = QColor(*[int(v * 255 + 0.5) for v in c])
+                self.swatches.update()
+            return True
+        if t == "type":
+            if kind == "press":
+                self._new_text_at(x, y)
+            return True
+        if t in SELECT_TOOLS:
+            return self._select_mouse(kind, x, y, xu, yu, e)
         if kind == "press":
             if t == "clone" and alt:
                 self.clone_pick, self.clone_off = (xu, yu), None
@@ -1141,6 +1636,13 @@ class EditsView(QWidget):
         self.canvas.stroke = []
         self.status.setText("")
         sel = self._layer()
+        if t == "skin" and sel and (sel.get("mask") or sel["kind"] == "adjust"):
+            # máscara de capa: blanco = se ve el efecto; clic derecho / Alt pinta negro (lo oculta)
+            sel.setdefault("mask", {"shapes": [{"type": "all", "op": "add"}]})
+            sign = -1 if getattr(self, "_erase", False) else 1
+            sel["mask"].setdefault("strokes", [])
+            sel["mask"]["strokes"] += [[p[0], p[1], round(r, 5), sign] for p in self._decimate(pts, max(1.0, rp / 2))]
+            return self._commit(f"{sel['name']}: máscara")
         lay = sel if t == "skin" and sel and sel["kind"] == "background" else self._tool_layer(TOOL_LAYER[t])
         if t in ("heal", "clone", "fill"):
             op = {"id": uuid.uuid4().hex[:6], "tool": t, "r": round(r, 5), "pts": pts,
@@ -1240,26 +1742,64 @@ class EditsView(QWidget):
         L[i], L[j] = L[j], L[i]
         self._commit("Ordenar capas")
 
+    def _layer_info(self, l) -> dict:
+        n = {"retouch": len(l.get("ops", [])), "light": len(l.get("strokes", [])),
+             "liquify": len(l.get("strokes", []))}.get(l["kind"])
+        if l["kind"] == "adjust":
+            sub = A.ADJUSTMENTS[l.get("adj", "curves")][0]
+        else:
+            sub = {"retouch": "Retoque", "skin": "Piel", "light": "Ojos y luz", "liquify": "Licuar",
+                   "background": "Fondo (IA)", "text": "Texto", "logo": "Logo", "image": "Imagen"}.get(l["kind"], "")
+        if n:
+            sub += " · " + _count(n, "trazo")
+        if l.get("blend", "normal") != "normal":
+            sub += " · " + A.BLEND_MODES.get(l["blend"], "")
+        if l.get("opacity", 100) < 100:
+            sub += f" · {l['opacity']} %"
+        thumb = None
+        if l["kind"] in ("image", "logo"):
+            key = ("img", l.get("path"))
+            thumb = self._thumbs.get(key)
+            if thumb is None:
+                thumb = self._thumbs[key] = UI.image_thumb(l.get("path", ""))
+        if thumb is None:
+            thumb = self._thumbs.get(("glyph", l["kind"]))
+            if thumb is None:
+                thumb = self._thumbs[("glyph", l["kind"])] = UI._glyph_icon(l["kind"])
+        return {"id": l["id"], "name": l["name"], "subtitle": sub, "visible": l.get("visible", True),
+                "thumb": thumb, "mask": bool(l.get("mask"))}
+
     def _refresh_layers(self):
         self.layer_list.blockSignals(True)
         self.layer_list.clear()
         layers = list(reversed(self.doc["layers"])) if self.doc else []
         for l in layers:
-            n = {"retouch": len(l.get("ops", [])), "light": len(l.get("strokes", [])),
-                 "liquify": len(l.get("strokes", []))}.get(l["kind"])
-            extra = "  ·  " + _count(n, "trazo") if n else ""
-            if l.get("opacity", 100) < 100:
-                extra += f"  ·  {l['opacity']} %"
-            it = QListWidgetItem(l["name"] + extra)
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            it.setCheckState(Qt.Checked if l.get("visible", True) else Qt.Unchecked)
+            it = QListWidgetItem()
+            it.setData(UI.ROLE_LAYER, self._layer_info(l))
             it.setData(ROLE, l["id"])
-            it.setToolTip("Casilla: mostrar u ocultar la capa")
+            it.setSizeHint(QSize(200, 40))
             self.layer_list.addItem(it)
-        row = next((i for i, l in enumerate(layers) if l["id"] == self.layer_id), -1)
+        if self.doc is not None:  # «Fondo»: la foto revelada, bloqueada (como en PhotoCraft)
+            bthumb = self._thumbs.get(("base", id(self.base)))
+            if bthumb is None and self.base is not None:
+                bthumb = self._thumbs[("base", id(self.base))] = UI.np_thumb(EE.apply_crop(self.base, self.box))
+            it = QListWidgetItem()
+            it.setData(UI.ROLE_LAYER, {"id": None, "name": "Fondo", "subtitle": "Foto revelada", "visible": True,
+                                       "thumb": bthumb, "background_row": True, "locked": True})
+            it.setData(ROLE, None)
+            it.setSizeHint(QSize(200, 40))
+            self.layer_list.addItem(it)
+        row = next((i for i, l in enumerate(layers) if l["id"] == self.layer_id), len(layers) if self.doc else -1)
         self.layer_list.setCurrentRow(row)
         self.layer_list.blockSignals(False)
         self._show_props()
+        self._update_chrome()
+
+    def toggle_visible(self, lid):
+        lay = next((l for l in self.doc["layers"] if l["id"] == lid), None) if self.doc else None
+        if lay is not None:
+            lay["visible"] = not lay.get("visible", True)
+            self._commit(("Mostrar " if lay["visible"] else "Ocultar ") + lay["name"].lower())
 
     def _select_layer(self, lid):
         self.layer_id = lid
@@ -1273,29 +1813,37 @@ class EditsView(QWidget):
         if lay:  # al elegir una capa de herramienta se activa su herramienta
             tool = {"retouch": None, "skin": "skin", "light": "light", "liquify": "liquify",
                     "background": "skin"}.get(lay["kind"])
+            if lay["kind"] == "adjust" and self.tool not in ("skin",) + SELECT_TOOLS:
+                tool = None
             if lay["kind"] in EE.OVERLAY:
                 tool = "move"
             if tool and tool != self.tool:
                 self.set_tool(tool)
 
-    def _layer_checked(self, it):
-        lay = next((l for l in self.doc["layers"] if l["id"] == it.data(ROLE)), None) if self.doc else None
-        if lay is not None:
-            lay["visible"] = it.checkState() == Qt.Checked
-            self._commit(("Mostrar " if lay["visible"] else "Ocultar ") + lay["name"].lower())
-
     def _show_props(self):
         lay = self._layer()
         kind = lay["kind"] if lay else "none"
-        self.props.head.setText(("▾   " if self.props.head.isChecked() else "▸   ") +
-                                ("Propiedades: " + lay["name"] if lay else "Propiedades"))
-        self.props.title = "Propiedades: " + lay["name"] if lay else "Propiedades"
+        self.props_title.setText(lay["name"] if lay else "Fondo")
         for name, w in self._pages.items():
             w.setVisible(name == kind)
+        self.mask_info.setVisible(bool(lay and lay.get("mask")))
+        self.blend_cb.setEnabled(lay is not None)
+        if lay:
+            self.blend_cb.blockSignals(True)
+            self.blend_cb.setCurrentIndex(max(0, list(A.BLEND_MODES).index(lay.get("blend", "normal"))))
+            self.blend_cb.blockSignals(False)
+        if kind == "adjust":
+            key = (lay["id"], self.hpos if self._adj_key is None else self._adj_key[1])
+            if self._adj_key is None or self._adj_key[0] != lay["id"] or self._adj_force:
+                img = self._last_img if self._last_img is not None else self.base
+                self.adj_panel.load(lay.get("adj", "curves"), lay.get("p") or {}, img)
+                self._adj_key = key
+                self._adj_force = False
         self.canvas.box = self.boxes.get(self.layer_id) if lay and kind in EE.OVERLAY else None
         self.canvas.update()
         self.opacity.setEnabled(lay is not None)
         if not lay:
+            self.opacity.set_value(100)
             return
         self.opacity.set_value(lay.get("opacity", 100))
         if kind == "retouch":
@@ -1435,6 +1983,225 @@ class EditsView(QWidget):
         self.fmt.setCurrentIndex(list(EE.FORMATS).index("png"))
         self._commit("Quitar fondo")
 
+    # ---------------------------------------------------------- selecciones (como PhotoCraft / Photoshop)
+    def _select_mouse(self, kind, x, y, xu, yu, e) -> bool:
+        mods = e.modifiers() if e is not None else Qt.NoModifier
+        op = "add" if mods & Qt.ShiftModifier else ("sub" if mods & Qt.AltModifier else self.sel_mode)
+        t = self.tool
+        if t == "subject":
+            if kind == "press":
+                self.select_subject(op)
+            return True
+        if kind == "press":
+            self._sel_op = op
+            self._sel_start = (x, y, xu, yu)
+            self.canvas.shape = ("lasso", [(x, y)]) if t == "lasso" else (self.sel_shape, x, y, x, y)
+            self._lasso_u = [(xu, yu)]
+            self.canvas.update()
+            return True
+        if kind == "move" and self.canvas.shape:
+            if t == "lasso":
+                self.canvas.shape[1].append((x, y))
+                self._lasso_u.append((xu, yu))
+            else:
+                x0, y0 = self._sel_start[:2]
+                if mods & Qt.ShiftModifier and not getattr(self, "_sel_op", "") == "add":
+                    d = max(abs(x - x0), abs(y - y0))
+                    x, y = x0 + d * np.sign(x - x0), y0 + d * np.sign(y - y0)
+                self.canvas.shape = (self.sel_shape, x0, y0, x, y)
+            self.canvas.update()
+            return True
+        if kind == "release" and self.canvas.shape:
+            shape = self.canvas.shape
+            self.canvas.shape = None
+            if t == "lasso":
+                pts = self._lasso_u
+                if len(pts) >= 3:
+                    self._apply_selection({"type": "lasso", "pts": [[round(a, 5), round(b, 5)] for a, b in pts]},
+                                          self._sel_op)
+            else:
+                _, x0, y0, x1, y1 = shape
+                if abs(x1 - x0) < 0.003 or abs(y1 - y0) < 0.003:
+                    if self._sel_op == "new":
+                        self.deselect()  # clic sin arrastrar: deselecciona, como Photoshop
+                    return True
+                u0, u1 = self._to_u(x0, y0), self._to_u(x1, y1)
+                self._apply_selection({"type": self.sel_shape, "box": [round(u0[0], 5), round(u0[1], 5),
+                                                                        round(u1[0], 5), round(u1[1], 5)]},
+                                      self._sel_op)
+            return True
+        return False
+
+    def _apply_selection(self, shape: dict, op: str):
+        shape = dict(shape, op="add" if op == "new" else op)
+        if op == "new" or not self.sel:
+            if op == "sub":
+                return
+            spec = {"shapes": [shape], "feather": 0.0}
+        else:
+            spec = copy.deepcopy(self.sel)
+            spec["shapes"].append(shape)
+        if self.sel_feather and op == "new":
+            spec["feather"] = round(self.sel_feather / max(self.base.shape[:2]), 5)
+        self.set_selection(spec)
+
+    def set_selection(self, spec):
+        self.sel = spec
+        self._sel_alpha = None
+        if spec and self.base is not None:
+            self._sel_alpha = EE.selection_mask(self.base.shape, spec, self.base, (self.cur.path + "#edits")
+                                                if self.cur else "")
+            self.canvas.sel_paths = UI.selection_outline(self._sel_alpha, self.box)
+            if not self.canvas.sel_paths:
+                self.sel = None
+        else:
+            self.canvas.sel_paths = []
+        self.canvas.update()
+        self.status.setText("Selección activa: Mayús+Supr la rellena según contenido; un ajuste la usa como "
+                            "máscara." if self.sel else "")
+
+    def select_all(self):
+        if self.base is not None:
+            self.set_selection({"shapes": [{"type": "all", "op": "add"}], "feather": 0.0})
+
+    def deselect(self):
+        if self.sel:
+            self.set_selection(None)
+        self.canvas.shape = None
+
+    def invert_selection(self):
+        if self.sel:
+            spec = copy.deepcopy(self.sel)
+            spec["invert"] = not spec.get("invert", False)
+            self.set_selection(spec)
+
+    def select_subject(self, op="new"):
+        if self.base is None:
+            return
+        self.status.setText("Buscando el sujeto con IA…")
+        self.status.repaint()
+        self._apply_selection({"type": "subject"}, op if isinstance(op, str) else "new")
+
+    def feather_selection(self):
+        if not self.sel:
+            return
+        cur = int(round(float(self.sel.get("feather", 0)) * max(self.base.shape[:2])))
+        v, ok = QInputDialog.getInt(self, "Calar selección", "Radio de calado (px):", cur, 0, 250)
+        if ok:
+            spec = copy.deepcopy(self.sel)
+            spec["feather"] = round(v / max(self.base.shape[:2]), 5)
+            self.set_selection(spec)
+
+    def fill_selection(self):
+        """Edición › Rellenar según contenido: borra lo seleccionado con IA (LaMa) o con el relleno clásico."""
+        if not self.sel or not self.doc:
+            self.status.setText("Primero selecciona lo que quieres borrar (marco, lazo o sujeto).")
+            return
+        lay = self._tool_layer("retouch")
+        a = self._sel_alpha if self._sel_alpha is not None else EE.selection_mask(self.base.shape, self.sel, self.base)
+        r = float(np.sqrt(max((a > 0.5).sum(), 1)) / max(a.shape) * 0.15)
+        lay["ops"].append({"id": uuid.uuid4().hex[:6], "tool": "fill", "r": round(max(r, 0.004), 5), "pts": [],
+                           "sel": copy.deepcopy(self.sel), "src": None, "ai": True})
+        self._ensure_lama()
+        self.deselect()
+        self._commit("Rellenar según contenido")
+
+    def _delete_key(self):
+        if self.sel:
+            self.fill_selection()
+        else:
+            self.delete_layer()
+
+    # ---------------------------------------------------------- capas de ajuste y máscaras
+    def add_adjust(self, kind):
+        if not self.doc:
+            return
+        n = 1 + sum(1 for l in self.doc["layers"] if l["kind"] == "adjust" and l.get("adj") == kind)
+        lay = EE.add_layer(self.doc, "adjust", adj=kind)
+        lay["name"] = f"{A.ADJUSTMENTS[kind][0]} {n}"
+        if self.sel:  # la selección se convierte en la máscara del ajuste (y se deselecciona)
+            lay["mask"] = copy.deepcopy(self.sel)
+            self.deselect()
+        self.layer_id = lay["id"]
+        self._adj_key = None
+        self._commit("Nueva capa de ajuste: " + lay["name"])
+        self.top_tabs.set_current(0)
+
+    def _adj_changed(self, p, final):
+        lay = self._layer()
+        if not lay or lay["kind"] != "adjust":
+            return
+        lay["p"] = p
+        self.request()
+        if final:
+            self._prop_timer.start(250)
+
+    def _adj_reset(self):
+        lay = self._layer()
+        if lay and lay["kind"] == "adjust":
+            lay["p"] = A.defaults(lay["adj"])
+            self._adj_force = True
+            self._commit("Restablecer " + lay["name"])
+
+    def add_mask_from_selection(self):
+        lay = self._layer()
+        if not lay:
+            self.status.setText("Elige primero una capa en el panel Capas.")
+            return
+        if lay["kind"] in EE.OVERLAY:
+            self.status.setText("Las capas de texto, logo e imagen no llevan máscara.")
+            return
+        lay["mask"] = copy.deepcopy(self.sel) if self.sel else {"shapes": [{"type": "all", "op": "add"}]}
+        self.deselect()
+        self._commit("Añadir máscara de capa")
+
+    def invert_mask(self):
+        lay = self._layer()
+        if lay and lay.get("mask"):
+            lay["mask"]["invert"] = not lay["mask"].get("invert", False)
+            self._commit("Invertir máscara")
+
+    def delete_mask(self):
+        lay = self._layer()
+        if lay and lay.get("mask"):
+            lay.pop("mask")
+            self._commit("Eliminar máscara")
+
+    def duplicate_layer(self):
+        lay = self._layer()
+        if not lay:
+            return
+        dup = copy.deepcopy(lay)
+        dup["id"] = uuid.uuid4().hex[:8]
+        dup["name"] = lay["name"] + " copia"
+        L = self.doc["layers"]
+        L.insert(L.index(lay) + 1, dup)
+        self.layer_id = dup["id"]
+        self._adj_key = None
+        self._commit("Duplicar capa")
+
+    def reset_photo(self):
+        from PySide6.QtWidgets import QMessageBox
+        if not self.doc or not self.doc["layers"]:
+            return
+        if QMessageBox.question(self, "Edits", "¿Quitar todas las capas de esta foto? (Se puede deshacer)") \
+                == QMessageBox.Yes:
+            self.doc["layers"] = []
+            self.layer_id = None
+            self._commit("Descartar retoque")
+
+    def _new_text_at(self, x, y):
+        if not self.doc:
+            return
+        kw = {k: self.prefs[k] for k in ("font",) if self.prefs.get(k)}
+        lay = EE.add_layer(self.doc, "text", text="Texto", color=self.swatches.fg.name(), x=round(x, 4),
+                           y=round(y, 4), anchor="lm", shadow=False, **kw)
+        self.layer_id = lay["id"]
+        self._commit("Nueva capa de texto")
+        self.top_tabs.set_current(0)
+        self.txt.setFocus()
+        self.txt.selectAll()
+
     def _start_eyedrop(self):
         self._eyedrop = True
         self.canvas.setCursor(Qt.PointingHandCursor)
@@ -1507,6 +2274,7 @@ class EditsView(QWidget):
 
     def _history_jump(self, i):
         if 0 <= i < len(self.hist):
+            self._adj_force = True
             self.hpos = i
             self.doc = EE.snapshot(self.hist[i][1])
             if not self._layer():
@@ -1606,6 +2374,9 @@ class EditsView(QWidget):
         self.layer_id = self.doc["layers"][-1]["id"] if self.doc["layers"] else None
         self.hist, self.hpos = [("Abrir", EE.snapshot(self.doc))], 0
         self.clone_off = self.clone_pick = None
+        self.sel, self._sel_alpha = None, None
+        self.canvas.sel_paths = []
+        self._adj_key = None
         self.boxes = {}
         self.base = None
         self._refresh_layers()
@@ -1653,6 +2424,7 @@ class EditsView(QWidget):
             self.hist[0] = ("Abrir", EE.snapshot(self.doc))
         self.canvas.before = _pixmap(EE.apply_crop(base, self.box))
         self.canvas.pm = None
+        self._refresh_layers()  # miniatura de la capa Fondo
         self.request()
 
     # ---------------------------------------------------------- render en segundo plano
@@ -1732,7 +2504,9 @@ class EditsView(QWidget):
         self.boxes = boxes
         lay = self._layer()
         self.canvas.box = boxes.get(self.layer_id) if lay and lay["kind"] in EE.OVERLAY else None
+        self._last_img = img
         self.canvas.set(_pixmap(img))
+        self._update_chrome()
         if self.cur:
             self.cur.settings = {"_edits": 1} if EE.has_edits(self.doc) else None
             self.film.viewport().update()

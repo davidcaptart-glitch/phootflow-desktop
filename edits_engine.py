@@ -36,12 +36,12 @@ import studio_engine as SE
 
 DOC_VERSION = 1
 KINDS = {"liquify": "Licuar", "retouch": "Retoque", "skin": "Piel", "light": "Ojos y luz",
-         "background": "Fondo", "text": "Texto", "logo": "Logo", "image": "Imagen"}
+         "background": "Fondo", "text": "Texto", "logo": "Logo", "image": "Imagen", "adjust": "Ajuste"}
 OVERLAY = ("text", "logo", "image")
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp")
 CUTS = {"none": "No quitar el fondo", "color": "Logo o fondo liso (por color)",
         "object": "Objeto o producto (automático)", "person": "Persona (IA)"}
-PIXEL_ORDER = ("liquify", "retouch", "skin", "light", "background")  # orden por defecto al crear capas
+PIXEL_ORDER = ("liquify", "retouch", "skin", "light", "background", "adjust")  # orden por defecto al crear capas
 ANCHORS = {"lt": (0, 0), "mt": (0.5, 0), "rt": (1, 0), "lm": (0, 0.5), "mm": (0.5, 0.5), "rm": (1, 0.5),
            "lb": (0, 1), "mb": (0.5, 1), "rb": (1, 1)}
 FORMATS = {"jpg": "JPG", "tif": "TIFF 16 bits", "png": "PNG (con transparencia)"}
@@ -64,9 +64,16 @@ def new_layer(kind: str, **kw) -> dict:
                       shadow=True),
          "logo": dict(path="", width=16.0, x=0.97, y=0.965, anchor="rb", knockout=False, tol=12),
          "image": dict(path="", width=40.0, x=0.5, y=0.5, anchor="mm", cut="none", tol=12, angle=0.0,
-                       flip=False)}[kind]
+                       flip=False),
+         "adjust": dict(adj="curves", p={})}[kind]
     p.update(kw)
-    return {"id": uuid.uuid4().hex[:8], "kind": kind, "name": KINDS[kind], "visible": True, "opacity": 100, **p}
+    lay = {"id": uuid.uuid4().hex[:8], "kind": kind, "name": KINDS[kind], "visible": True, "opacity": 100,
+           "blend": "normal", **p}
+    if kind == "adjust":
+        import edits_adjust as A
+        lay["p"] = dict(A.defaults(lay["adj"]), **(lay.get("p") or {}))
+        lay["name"] = A.ADJUSTMENTS[lay["adj"]][0]
+    return lay
 
 
 def add_layer(doc: dict, kind: str, **kw) -> dict:
@@ -196,6 +203,52 @@ def stroke_mask(shape, pts, r_px: float) -> np.ndarray:
     return m.astype(np.float32)
 
 
+def selection_mask(shape, spec: dict | None, img: np.ndarray | None = None, key: str = "") -> np.ndarray:
+    """Alfa 0..1 de una selección (o de la máscara de una capa), en coordenadas 0..1 de la foto sin recortar.
+
+    spec = {"shapes": [{"op": add|sub|inter, "type": rect|ellipse|lasso|subject|all, "box": [x0, y0, x1, y1],
+            "pts": [[x, y], ...]}], "feather": radio del calado (fracción del lado largo), "invert": bool,
+            "strokes": [[x, y, r, ±1], ...] (pincel de máscara)}
+    """
+    h, w = shape[:2]
+    a = np.zeros((h, w), np.float32)
+    if not spec:
+        return np.ones((h, w), np.float32)
+    for sh in spec.get("shapes", []):
+        m = np.zeros((h, w), np.uint8)
+        t = sh.get("type")
+        if t == "all":
+            m[:] = 1
+        elif t in ("rect", "ellipse"):
+            x0, y0, x1, y1 = sh["box"]
+            p0 = (int(round(min(x0, x1) * (w - 1))), int(round(min(y0, y1) * (h - 1))))
+            p1 = (int(round(max(x0, x1) * (w - 1))), int(round(max(y0, y1) * (h - 1))))
+            if t == "rect":
+                cv2.rectangle(m, p0, p1, 1, -1)
+            else:
+                c = ((p0[0] + p1[0]) // 2, (p0[1] + p1[1]) // 2)
+                cv2.ellipse(m, c, (max(1, (p1[0] - p0[0]) // 2), max(1, (p1[1] - p0[1]) // 2)), 0, 0, 360, 1, -1,
+                            cv2.LINE_AA)
+        elif t == "lasso" and len(sh.get("pts", [])) >= 3:
+            cv2.fillPoly(m, [np.round(_px(sh["pts"], w, h)).astype(np.int32)], 1, cv2.LINE_AA)
+        elif t == "subject" and img is not None:
+            pr = person_probs(img, key)
+            sub = (1 - pr[..., 0]) if pr is not None else object_alpha(img)
+            m = None
+            sa = np.clip(_refine(np.clip(sub, 0, 1).astype(np.float32), img), 0, 1)
+        if m is not None:
+            sa = m.astype(np.float32)
+        op = sh.get("op", "add")
+        a = np.maximum(a, sa) if op == "add" else (a * (1 - sa) if op == "sub" else np.minimum(a, sa))
+    a = paint_mask(a, spec.get("strokes", [])) if spec.get("strokes") else a
+    f = float(spec.get("feather", 0)) * max(h, w)
+    if f > 0.5:
+        a = cv2.GaussianBlur(a, (0, 0), f / 2)
+    if spec.get("invert"):
+        a = 1 - a
+    return np.clip(a, 0, 1).astype(np.float32)
+
+
 def _soft(m: np.ndarray, sigma: float) -> np.ndarray:
     return cv2.GaussianBlur(m, (0, 0), max(0.6, sigma)) if sigma > 0 else m
 
@@ -233,6 +286,14 @@ def _inpaint_low(img: np.ndarray, hole: np.ndarray, sigma: float) -> np.ndarray:
 
 # ------------------------------------------------------------------ retoque: corrector, tampón y relleno
 
+def _op_mask(img: np.ndarray, op: dict, r: float) -> np.ndarray:
+    """Zona de un retoque: el trazo de pincel o, en «Rellenar según contenido», la selección."""
+    if op.get("sel"):
+        return (selection_mask(img.shape, op["sel"], img) > 0.5).astype(np.float32)
+    h, w = img.shape[:2]
+    return stroke_mask(img.shape, _px(op["pts"], w, h), r)
+
+
 def find_source(img: np.ndarray, op: dict) -> list[float] | None:
     """Busca el mejor origen para un trazo del corrector / relleno (como el «quitar» de Lightroom).
 
@@ -243,8 +304,7 @@ def find_source(img: np.ndarray, op: dict) -> list[float] | None:
     h, w = img.shape[:2]
     side = max(h, w)
     r = max(1.5, float(op["r"]) * side)
-    pts = _px(op["pts"], w, h)
-    hard = stroke_mask(img.shape, pts, r)
+    hard = _op_mask(img, op, r)
     bb = _bbox(hard, int(r * 1.2) + 2)
     if bb is None:
         return None
@@ -420,7 +480,7 @@ def _apply_op(img: np.ndarray, op: dict) -> np.ndarray:
     side = max(h, w)
     r = max(1.0, float(op["r"]) * side)
     tool = op.get("tool", "heal")
-    hard = stroke_mask(img.shape, _px(op["pts"], w, h), r)
+    hard = _op_mask(img, op, r)
     if tool == "fill" and op.get("ai", True) and lama_ready():
         try:
             return _apply_lama(img, op, hard, r)
@@ -928,7 +988,7 @@ def _layer_active(l: dict) -> bool:
             "skin": l.get("amount", 0) > 0 and (l.get("auto", True) or bool(l.get("strokes"))),
             "light": bool(l.get("strokes")), "background": True,
             "text": bool(str(l.get("text", "")).strip()), "logo": bool(l.get("path")),
-            "image": bool(l.get("path"))}.get(k, False)
+            "image": bool(l.get("path")), "adjust": True}.get(k, False)
 
 
 def apply_pixel_layer(img: np.ndarray, lay: dict, key: str = ""):
@@ -945,13 +1005,21 @@ def apply_pixel_layer(img: np.ndarray, lay: dict, key: str = ""):
         out = apply_light(img, lay)
     elif k == "background":
         out, alpha = apply_background(img, lay, key)
+    elif k == "adjust":
+        import edits_adjust as A
+        out = A.apply(img, lay.get("adj", "curves"), lay.get("p") or {})
     else:
         return img, None
+    if lay.get("blend", "normal") != "normal":
+        import edits_adjust as A
+        out = np.clip(A.blend(img, out, lay["blend"]), 0, 1)
     o = float(lay.get("opacity", 100)) / 100.0
-    if o < 1:
-        out = img * (1 - o) + out * o
+    m = selection_mask(img.shape, lay["mask"], img, key)[..., None] * o if lay.get("mask") else o
+    if lay.get("mask") or o < 1:
+        out = img * (1 - m) + out * m
         if alpha is not None:
-            alpha = 1 - o * (1 - alpha)
+            mm = m[..., 0] if isinstance(m, np.ndarray) else m
+            alpha = 1 - mm * (1 - alpha)
     return out.astype(np.float32), alpha
 
 
@@ -1023,7 +1091,11 @@ def finish(img, alpha, doc: dict, box):
             continue
         rgba = r[0]
         a = rgba[..., 3:4] * float(lay.get("opacity", 100)) / 100.0
-        img = img * (1 - a) + rgba[..., :3] * a
+        top = rgba[..., :3]
+        if lay.get("blend", "normal") != "normal":
+            import edits_adjust as A
+            top = np.clip(A.blend(img, top, lay["blend"]), 0, 1)
+        img = img * (1 - a) + top * a
         if alpha is not None:
             alpha = np.maximum(alpha, a[..., 0])
     return np.clip(img, 0, 1).astype(np.float32), alpha
