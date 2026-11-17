@@ -595,6 +595,36 @@ class Edits(unittest.TestCase):
         lay["path"] = os.path.join(d, "no_existe.png")
         self.assertTrue(np.allclose(EE.compose(photo, doc, [0.0, 0.0, 1.0, 1.0])[0], photo))
 
+    def test_ai_fill_uses_lama_restores_grain_and_falls_back(self):
+        EE = self.EE
+        rng = np.random.default_rng(3)
+        img = np.clip(0.4 + 0.04 * rng.standard_normal((1600, 1600, 3)), 0, 1).astype(np.float32)
+        cv2.rectangle(img, (700, 500), (900, 1100), (0.9, 0.2, 0.2), -1)  # «una persona» que borrar
+        op = {"tool": "fill", "r": 0.08, "pts": [[0.5, 0.35], [0.5, 0.65]], "ai": True, "src": None}
+        calls = []
+
+        def fake(crop, hole):  # LaMa simulado: devuelve el tono medio del entorno, liso
+            calls.append(crop.shape)
+            return np.broadcast_to(crop[hole < 0.5].mean(0), crop.shape).astype(np.float32).copy()
+
+        ready, inpaint = EE.lama_ready, EE.lama_inpaint
+        try:
+            EE.lama_ready = lambda: True
+            EE.lama_inpaint = fake
+            out = EE.apply_retouch(img, {"ops": [op]})
+            self.assertTrue(calls)  # con el modelo, el relleno lo hace la IA
+            reg = out[600:1000, 760:840]
+            self.assertLess(abs(float(reg[..., 0].mean()) - 0.4), 0.03)  # el rojo ha desaparecido
+            ref = float((img - cv2.GaussianBlur(img, (0, 0), 1.2))[100:400, 100:400].std())
+            got = float((out - cv2.GaussianBlur(out, (0, 0), 1.2))[600:1000, 760:840].std())
+            self.assertGreater(got, 0.6 * ref)  # y conserva el grano de la foto, no queda liso
+            EE.lama_inpaint = lambda *a: (_ for _ in ()).throw(RuntimeError("sin memoria"))
+            out2 = EE.apply_retouch(img, {"ops": [op]})  # si la IA falla, relleno clásico
+            self.assertLess(float(out2[600:1000, 760:840, 0].mean()), 0.75)
+        finally:
+            EE.lama_ready, EE.lama_inpaint = ready, inpaint
+        self.assertTrue(EE.LAMA_URL.startswith("https://huggingface.co/") and len(EE.LAMA_SHA256) == 64)
+
     def test_documents_base_events_and_export_are_non_destructive(self):
         EE = self.EE
         import studio_engine as SE

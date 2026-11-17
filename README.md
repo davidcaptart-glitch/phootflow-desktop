@@ -85,7 +85,8 @@ visibilidad, opacidad y orden:
 
 - **Herramientas** (barra de la izquierda): **Mover (V)**, **Pincel corrector (J)** para granos, brillos y
   manchas (busca solo el mejor parche y funde tono y textura), **Tampón de clonar (S)** con Alt+clic para el
-  origen, **Relleno según contenido (G)** para borrar cables, carteles o gente, **Pincel de máscara (B)**,
+  origen, **Relleno según contenido con IA (G)** para borrar personas, objetos, animales, cables o carteles (modelo
+  LaMa, local; se descarga la primera vez, 208 MB, ~2 s por borrado; sin él, relleno clásico), **Pincel de máscara (B)**,
   **Ojos y luz (O)** (aclarar ojeras, blanquear dientes y ojos, oscurecer) y **Licuar (W)** (empujar, inflar,
   encoger). Tamaño con `[` `]`.
 - **Piel**: suavizado por separación de frecuencias sobre la piel que encuentra la IA (MediaPipe), con

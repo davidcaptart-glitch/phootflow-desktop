@@ -159,7 +159,9 @@ def render_base(path: str, s: dict, full: bool, max_px: int | None = None, key: 
 def auto_base(lin: np.ndarray) -> dict:
     """Revelado automático para una foto sin Studio ni Events: exposición medida y luces recogidas."""
     ev, _, clip = E.estimate_ev(lin)
-    return SE.new_settings(exposure=round(float(ev), 2), highlights=-25 if clip > 0.01 else -10, shadows=15)
+    # con reducción de ruido como el automático de Studio (a tamaño completo el ruido se nota mucho más)
+    return SE.new_settings(exposure=round(float(ev), 2), highlights=-25 if clip > 0.01 else -10, shadows=15,
+                           nr_luma=25, nr_color=35)
 
 
 # ------------------------------------------------------------------ utilidades
@@ -294,12 +296,136 @@ def find_source(img: np.ndarray, op: dict) -> list[float] | None:
     return [round(best[0] / w, 5), round(best[1] / h, 5)]
 
 
+# ------------------------------------------------------------------ borrado con IA (LaMa)
+# LaMa (Suvorov et al., Samsung AI; Apache-2.0), exportado a ONNX por Carve (Apache-2.0). Entrada fija 512×512.
+LAMA_URL = "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx"
+LAMA_SHA256 = "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6"
+LAMA_FILE = "lama_fp32.onnx"
+LAMA_MB = 208
+_LAMA = {"session": None, "lock": None, "dir": ""}
+
+
+def lama_path() -> str:
+    d = _LAMA["dir"]
+    if not d:
+        try:
+            import masks as M
+            d = M._CFG.get("model_dir") or ""
+        except Exception:
+            d = ""
+    if not d:
+        d = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "PhootFlow", "modelos")
+    return os.path.join(d, LAMA_FILE)
+
+
+def lama_ready() -> bool:
+    p = lama_path()
+    return os.path.exists(p) and os.path.getsize(p) > 200_000_000
+
+
+def ensure_lama(progress=None) -> str:
+    """Descarga el modelo de borrado la primera vez (208 MB), comprobando su SHA-256."""
+    p = lama_path()
+    if lama_ready():
+        return p
+    import urllib.request
+    import net
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    resp = net.urlopen(urllib.request.Request(LAMA_URL, headers={"User-Agent": "PhootFlow"}), 60)
+    total = int(resp.headers.get("Content-Length") or LAMA_MB * 1_000_000)
+    h = hashlib.sha256()
+    done = 0
+    with open(p + ".part", "wb") as f:
+        while True:
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            f.write(chunk)
+            h.update(chunk)
+            done += len(chunk)
+            if progress:
+                progress(done, total)
+    if h.hexdigest() != LAMA_SHA256:
+        os.remove(p + ".part")
+        raise RuntimeError("El modelo de borrado no supera la verificación SHA-256")
+    os.replace(p + ".part", p)
+    return p
+
+
+def _lama_session():
+    import threading
+    if _LAMA["lock"] is None:
+        _LAMA["lock"] = threading.Lock()
+    with _LAMA["lock"]:
+        if _LAMA["session"] is None:
+            import onnxruntime as ort
+            _LAMA["session"] = ort.InferenceSession(lama_path(), providers=["CPUExecutionProvider"])
+    return _LAMA["session"]
+
+
+def lama_inpaint(crop: np.ndarray, hole: np.ndarray) -> np.ndarray:
+    """Rellena `hole` (0/1) en `crop` (sRGB 0..1) con LaMa a 512 px y lo devuelve al tamaño de `crop`."""
+    h, w = hole.shape
+    a = cv2.resize(crop, (512, 512), interpolation=cv2.INTER_AREA).transpose(2, 0, 1)[None].astype(np.float32)
+    m = (cv2.resize(hole.astype(np.float32), (512, 512), interpolation=cv2.INTER_LINEAR) > 0.3)
+    m = cv2.dilate(m.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(np.float32)[None, None]
+    out = _lama_session().run(None, {"image": np.clip(a, 0, 1), "mask": m})[0][0].transpose(1, 2, 0)
+    if out.max() > 2.0:  # el modelo devuelve 0..255
+        out = out / 255.0
+    return cv2.resize(np.clip(out, 0, 1).astype(np.float32), (w, h), interpolation=cv2.INTER_CUBIC)
+
+
+def _apply_lama(img: np.ndarray, op: dict, hard: np.ndarray, r: float) -> np.ndarray:
+    """Relleno según contenido con IA: LaMa pone la estructura y el tono (a 512 px) y, a resolución mayor,
+    la textura fina sale del mejor parche de la propia foto, para que no quede blando."""
+    h, w = img.shape[:2]
+    bb = _bbox(hard, 0)
+    if bb is None:
+        return img
+    x0, y0, x1, y1 = bb
+    # contexto alrededor: un cuadrado ~2 veces la zona (LaMa necesita ver lo que rodea al agujero)
+    side = int(min(max(w, h), max(256, max(x1 - x0, y1 - y0) * 2.0 + 4 * r)))
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    X0 = int(min(max(0, cx - side / 2), max(0, w - side)))
+    Y0 = int(min(max(0, cy - side / 2), max(0, h - side)))
+    X1, Y1 = min(w, X0 + side), min(h, Y0 + side)
+    crop, hole = img[Y0:Y1, X0:X1], hard[Y0:Y1, X0:X1]
+    res = lama_inpaint(crop, hole)
+    scale = max(X1 - X0, Y1 - Y0) / 512.0
+    if scale > 1.3:
+        # LaMa trabaja a 512 px: al ampliar queda liso. Se le devuelve el grano de la foto midiendo el ruido
+        # del entorno del agujero (por canal) y poniendo el mismo dentro, con el mismo tamaño de grano.
+        ring = (cv2.dilate(hole, np.ones((3, 3), np.uint8), iterations=max(2, int(r * 0.5))) > 0) & (hole < 0.5)
+        hp = crop - cv2.GaussianBlur(crop, (0, 0), 1.2)
+        if ring.sum() > 50:
+            want = hp[ring].std(0)
+            have = (res - cv2.GaussianBlur(res, (0, 0), 1.2))[hole > 0.5].std(0) if (hole > 0.5).any() else 0
+            add = np.sqrt(np.maximum(want ** 2 - np.asarray(have) ** 2, 0)).astype(np.float32)
+            if float(add.max()) > 1e-4:
+                seed = int(abs(hash((round(float(op["r"]), 5), str(op["pts"][:2])))) % (2 ** 31))
+                g = np.random.default_rng(seed).standard_normal(res.shape).astype(np.float32)
+                g = g - cv2.GaussianBlur(g, (0, 0), 1.2)
+                g /= g.std() + 1e-6
+                res = np.clip(res + g * add, 0, 1)
+    feather = max(1.0, r * 0.25)
+    grow = cv2.dilate(hole, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), iterations=max(1, int(feather)))
+    a = np.maximum(hole, _soft(grow, feather))[..., None]
+    out = img.copy()
+    out[Y0:Y1, X0:X1] = crop * (1 - a) + res * a
+    return out
+
+
 def _apply_op(img: np.ndarray, op: dict) -> np.ndarray:
     h, w = img.shape[:2]
     side = max(h, w)
     r = max(1.0, float(op["r"]) * side)
     tool = op.get("tool", "heal")
     hard = stroke_mask(img.shape, _px(op["pts"], w, h), r)
+    if tool == "fill" and op.get("ai", True) and lama_ready():
+        try:
+            return _apply_lama(img, op, hard, r)
+        except Exception:
+            pass  # sin IA (modelo dañado, poca memoria): relleno clásico
     pad = int(r * 2.5) + 4
     bb = _bbox(hard, pad)
     src_off = op.get("src")
@@ -855,7 +981,7 @@ class Compositor:
 
     def pixel_stage(self, base: np.ndarray, layers: list, key: str = "", upto: int | None = None):
         """Imagen sin recortar tras las capas de imagen visibles (hasta `upto`, excluida). (img, alfa)."""
-        bsig = _sig(key, base.shape, float(base[::97, ::97].sum()))
+        bsig = _sig(key, base.shape, float(base[::97, ::97].sum()), lama_ready())
         if bsig != self.base_sig:
             self.base_sig, self.stack = bsig, []
         img, alpha = base, None

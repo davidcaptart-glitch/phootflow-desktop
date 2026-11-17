@@ -38,7 +38,8 @@ TOOLS = [("move", "✥", "Mover y mano: arrastra el texto o el logo seleccionado
           "retouch"),
          ("clone", "◎", "Tampón de clonar: Alt+clic para elegir el origen y pinta donde quieras copiarlo", "S",
           "retouch"),
-         ("fill", "▨", "Relleno según contenido: pinta lo que quieras borrar (cables, carteles, gente)", "G",
+         ("fill", "▨", "Relleno según contenido con IA: pinta lo que quieras borrar (personas, objetos, cables, "
+                       "carteles)", "G",
           "retouch"),
          ("skin", "◐", "Pincel de máscara: añade zonas a la capa Piel o a la persona de la capa Fondo (clic "
                        "derecho o Alt: quita)", "B", "skin"),
@@ -382,6 +383,7 @@ class EditsView(QWidget):
     loaded = Signal(str, object, object)             # ruta, base (sin recortar), ajustes de revelado
     thumbs_ready = Signal(int)
     export_progress = Signal(int, int, str)
+    lama_done = Signal(str)                          # "" si el modelo de borrado ya está; si no, el error
 
     def __init__(self, cfg_dir: str, events_lookup=None):
         super().__init__()
@@ -444,6 +446,8 @@ class EditsView(QWidget):
         self.loaded.connect(self._on_loaded)
         self.thumbs_ready.connect(lambda i: self.film.viewport().update())
         self.export_progress.connect(self._on_export_progress)
+        self.lama_done.connect(self._on_lama_done)
+        self._lama_dl = False
         for k, fn in (("Ctrl+Z", self.undo), ("Ctrl+Y", self.redo), ("Ctrl+Shift+Z", self.redo),
                       ("\\", self.toggle_before), ("Y", self.next_split), ("Ctrl+E", self.export_current),
                       ("[", lambda: self._nudge_size(1 / 1.2)), ("]", lambda: self._nudge_size(1.2)),
@@ -783,7 +787,8 @@ class EditsView(QWidget):
         lay = page("retouch")
         lay.addWidget(self._label("Corrector (J): pinta sobre granos, brillos o manchas; busca solo el mejor "
                                   "parche. Tampón (S): Alt+clic para elegir el origen. Relleno (G): pinta lo "
-                                  "que quieras borrar."))
+                                  "que quieras borrar (una persona, un objeto); lo rellena la IA LaMa en tu PC "
+                                  "(la primera vez se descargan 208 MB)."))
         self.retouch_info = self._label("")
         lay.addWidget(self.retouch_info)
         b = _btn("Quitar el último trazo", "ghost")
@@ -989,6 +994,8 @@ class EditsView(QWidget):
         self.opt_hint.setText({"clone": "Alt+clic: origen", "skin": "Clic derecho o Alt: quitar",
                                "move": "Rueda: zoom · arrastrar: mano"}.get(key, "[ ] tamaño"))
         self.canvas.brush_px = self.radius.get(key, 0) if brush else 0
+        if key == "fill":
+            self._preload_lama()
         self.canvas.marker = None
         self.canvas.setCursor(Qt.OpenHandCursor if key == "move" else Qt.CrossCursor)
         # al elegir la herramienta se selecciona su capa (si existe)
@@ -1001,6 +1008,13 @@ class EditsView(QWidget):
             if lay:
                 self._select_layer(lay["id"])
         self.canvas.update()
+
+    def _preload_lama(self):
+        """Carga el modelo de borrado en segundo plano al elegir Relleno (la primera carga tarda ~15 s)."""
+        if EE.lama_ready() and EE._LAMA["session"] is None and not getattr(self, "_lama_loading", False):
+            self._lama_loading = True
+            threading.Thread(target=lambda: (EE._lama_session(), setattr(self, "_lama_loading", False)),
+                             daemon=True).start()
 
     def _set_opt(self, what, v):
         t = self.tool
@@ -1135,6 +1149,9 @@ class EditsView(QWidget):
                 op["hard"] = self.hardness["clone"] / 100.0
             lay["ops"].append(op)
             label = {"heal": "Corrector", "clone": "Tampón", "fill": "Relleno"}[t]
+            if t == "fill":
+                op["ai"] = True  # con el modelo LaMa si está (si no, relleno clásico)
+                self._ensure_lama()
         elif t == "skin":
             sign = -1 if getattr(self, "_erase", False) else 1
             lay.setdefault("strokes", [])
@@ -1422,6 +1439,34 @@ class EditsView(QWidget):
         self._eyedrop = True
         self.canvas.setCursor(Qt.PointingHandCursor)
         self.status.setText("Cuentagotas: haz clic en el fondo que quieres quitar.")
+
+    def _ensure_lama(self):
+        """La primera vez que se usa el relleno se descarga el modelo de borrado con IA (en segundo plano)."""
+        if self._lama_dl or EE.lama_ready():
+            return
+        self._lama_dl = True
+
+        def job():
+            try:
+                EE.ensure_lama(lambda d, t: self.export_progress.emit(
+                    d // 1_000_000, max(1, t // 1_000_000),
+                    f"Descargando el modelo de borrado con IA ({d // 1_000_000} de {t // 1_000_000} MB, solo "
+                    "esta vez)…"))
+                self.lama_done.emit("")
+            except Exception as e:
+                self.lama_done.emit(f"{type(e).__name__}: {e}")
+
+        self.pb.show()
+        threading.Thread(target=job, daemon=True).start()
+
+    def _on_lama_done(self, err):
+        self._lama_dl = False
+        self.pb.hide()
+        if err:
+            self.status.setText("No se pudo descargar el modelo de borrado (se usa el relleno clásico): " + err)
+        else:
+            self.status.setText("Borrado con IA listo.")
+            self.request()
 
     def _pop_last(self, field, label):
         lay = self._layer()
