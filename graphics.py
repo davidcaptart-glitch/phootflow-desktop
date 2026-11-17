@@ -24,7 +24,8 @@ from PySide6.QtGui import (QColor, QIcon, QImage, QKeySequence, QPainter, QPaint
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QFrame,
                                QGraphicsItem, QGraphicsScene, QGraphicsView, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox, QPlainTextEdit,
+                               QLineEdit, QListWidget, QListWidgetItem, QMenu, QMenuBar, QMessageBox,
+                               QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QTabWidget, QToolButton, QVBoxLayout,
                                QWidget)
 
@@ -32,7 +33,197 @@ import engine as E
 import graphics_engine as G
 import theme as T
 
-ACCENT = QColor(T.ACCENT)
+# Entorno VectorCraft (github.com/storytold/vectorcraft, MIT o Apache-2.0): gris azulado, herramienta activa en
+# terracota, selección azul y guías inteligentes en magenta, como en Illustrator.
+VC = dict(app="#1B1E24", panel="#23262E", panel2="#2B2F38", field="#1A1C22", canvas="#1E2026", border="#343842",
+          text="#D9DCE3", muted="#9AA0AB", faint="#6B717C", tool="#6A2E22", tool_line="#A9452E",
+          accent="#C2502F", accent_hi="#D8623F", select="#4C82F7", guide="#E8489A")
+ACCENT = QColor(VC["select"])
+GUIDE = QColor(VC["guide"])
+
+VC_QSS = f"""
+QWidget {{ color: {VC['text']}; font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif; font-size: 9pt; }}
+QWidget#vcRoot, QDialog {{ background: {VC['app']}; }}
+QFrame#vcPanel, QWidget#vcPanel {{ background: {VC['panel']}; }}
+QFrame#vcTools {{ background: {VC['panel']}; border-right: 1px solid {VC['border']}; }}
+QFrame#vcRight {{ background: {VC['panel']}; border-left: 1px solid {VC['border']}; }}
+QFrame#vcDocTab {{ background: {VC['app']}; border-bottom: 1px solid {VC['border']}; }}
+QFrame#vcHint, QFrame#vcStatus {{ background: {VC['app']}; border-top: 1px solid {VC['border']}; }}
+QLabel {{ background: transparent; }}
+QLabel#vcDocName {{ font-weight: 600; color: #F2F3F6; }}
+QLabel#vcSection {{ font-size: 10pt; color: #EEF0F4; padding-top: 8px; }}
+QLabel#vcKind {{ color: {VC['muted']}; }}
+QLabel#muted, QLabel#meta {{ color: {VC['muted']}; }}
+QLabel#faint {{ color: {VC['faint']}; }}
+QLabel#cardTitle {{ color: {VC['muted']}; font-size: 8pt; font-weight: 600; letter-spacing: 1px; }}
+QMenuBar {{ background: {VC['app']}; color: {VC['text']}; padding: 2px 4px; font-size: 9.5pt; }}
+QMenuBar::item {{ padding: 5px 9px; background: transparent; border-radius: 3px; }}
+QMenuBar::item:selected {{ background: {VC['panel2']}; }}
+QMenu {{ background: {VC['panel']}; border: 1px solid {VC['border']}; padding: 4px; }}
+QMenu::item {{ padding: 5px 24px 5px 14px; border-radius: 3px; }}
+QMenu::item:selected {{ background: {VC['panel2']}; color: white; }}
+QMenu::item:disabled {{ color: {VC['faint']}; }}
+QMenu::separator {{ height: 1px; background: {VC['border']}; margin: 4px 6px; }}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QFontComboBox {{
+    background: {VC['field']}; border: 1px solid {VC['border']}; border-radius: 4px; padding: 4px 6px;
+    selection-background-color: {VC['select']}; color: {VC['text']}; }}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{
+    border-color: {VC['select']}; }}
+QComboBox::drop-down {{ border: none; width: 18px; }}
+QComboBox QAbstractItemView {{ background: {VC['panel']}; border: 1px solid {VC['border']};
+    selection-background-color: {VC['panel2']}; }}
+QPushButton {{ background: {VC['panel2']}; border: 1px solid {VC['border']}; border-radius: 4px; padding: 5px 10px;
+    color: {VC['text']}; }}
+QPushButton:hover {{ background: #343945; }}
+QPushButton:checked {{ background: {VC['tool']}; border-color: {VC['tool_line']}; color: white; }}
+QPushButton:disabled {{ color: {VC['faint']}; }}
+QPushButton#primary {{ background: {VC['accent']}; border-color: {VC['accent']}; color: white; font-weight: 600; }}
+QPushButton#primary:hover {{ background: {VC['accent_hi']}; }}
+QPushButton#ghost, QPushButton#flat {{ background: transparent; }}
+QPushButton#ghost:hover, QPushButton#flat:hover {{ background: {VC['panel2']}; }}
+QPushButton#vcTool {{ background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 0; }}
+QPushButton#vcTool:hover {{ background: {VC['panel2']}; }}
+QPushButton#vcTool:checked {{ background: {VC['tool']}; border-color: {VC['tool_line']}; }}
+QPushButton#vcIcon {{ background: transparent; border: none; border-radius: 4px; padding: 3px; }}
+QPushButton#vcIcon:hover {{ background: {VC['panel2']}; }}
+QPushButton#vcIcon:checked {{ background: {VC['tool']}; }}
+QPushButton#vcQuick {{ background: {VC['panel2']}; border: none; border-radius: 4px; padding: 7px 6px; }}
+QPushButton#vcQuick:hover {{ background: #383D49; }}
+QPushButton#seg {{ background: transparent; border: none; border-radius: 4px; padding: 4px 8px; }}
+QPushButton#seg:checked {{ background: {VC['tool']}; }}
+QPushButton#small {{ padding: 3px 8px; }}
+QFrame#vcTask {{ background: {VC['panel']}; border: 1px solid {VC['border']}; border-radius: 7px; }}
+QFrame#vcTask QPushButton {{ background: transparent; border: 1px solid {VC['border']}; border-radius: 5px;
+    padding: 5px 10px; }}
+QFrame#vcTask QPushButton:hover {{ background: {VC['panel2']}; }}
+QTabWidget::pane {{ border: none; }}
+QTabBar::tab {{ background: transparent; color: {VC['muted']}; padding: 6px 12px; border-radius: 5px;
+    margin: 4px 2px; }}
+QTabBar::tab:selected {{ background: {VC['panel2']}; color: #F2F3F6; font-weight: 600; }}
+QTabBar::tab:hover {{ color: {VC['text']}; }}
+QTabWidget#libTabs QTabBar::tab {{ padding: 4px 7px; margin: 2px 1px; font-weight: 400; }}
+QListWidget {{ background: transparent; border: none; outline: none; }}
+QListWidget::item {{ color: {VC['text']}; padding: 2px; border-radius: 4px; }}
+QListWidget::item:selected {{ background: {VC['panel2']}; color: white; }}
+QListWidget::item:hover {{ background: #2A2E37; }}
+QScrollArea {{ background: transparent; border: none; }}
+QScrollBar:vertical {{ background: transparent; width: 9px; }}
+QScrollBar::handle:vertical {{ background: #3A3F4B; border-radius: 4px; min-height: 30px; }}
+QScrollBar:horizontal {{ background: transparent; height: 9px; }}
+QScrollBar::handle:horizontal {{ background: #3A3F4B; border-radius: 4px; min-width: 30px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+QSlider::groove:horizontal {{ height: 3px; background: #3A3F4B; border-radius: 1px; }}
+QSlider::handle:horizontal {{ background: #E3E6EC; width: 11px; height: 11px; margin: -4px 0; border-radius: 5px; }}
+QCheckBox {{ spacing: 7px; background: transparent; }}
+QCheckBox::indicator {{ width: 13px; height: 13px; border-radius: 3px; border: 1px solid #4A505D;
+    background: {VC['field']}; }}
+QCheckBox::indicator:checked {{ background: {VC['select']}; border-color: {VC['select']}; }}
+QToolTip {{ background: {VC['panel2']}; color: white; border: 1px solid {VC['border']}; padding: 4px 6px; }}
+"""
+
+
+def vc_icon(name: str, size: int = 22, color: str = "#D9DCE3") -> QIcon:
+    """Iconos de línea dibujados (estilo VectorCraft), sin archivos ni fuentes de iconos."""
+    pm = QPixmap(size * 2, size * 2)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.scale(size * 2 / 24, size * 2 / 24)
+    col = QColor(color)
+    pen = QPen(col, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    path = QPainterPath()
+    if name in ("select", "direct"):
+        path.moveTo(6, 3)
+        path.lineTo(6, 19)
+        path.lineTo(10, 15)
+        path.lineTo(13, 21)
+        path.lineTo(15.5, 20)
+        path.lineTo(12.5, 14)
+        path.lineTo(18, 14)
+        path.closeSubpath()
+        if name == "select":
+            p.setBrush(col)
+        p.drawPath(path)
+    elif name == "pen":
+        path.moveTo(12, 3)
+        path.lineTo(18, 13)
+        path.lineTo(14, 20)
+        path.lineTo(10, 20)
+        path.lineTo(6, 13)
+        path.closeSubpath()
+        p.drawPath(path)
+        p.drawLine(QPointF(12, 3), QPointF(12, 12))
+        p.drawEllipse(QPointF(12, 13.5), 1.4, 1.4)
+    elif name == "text":
+        p.drawLine(QPointF(5, 5), QPointF(19, 5))
+        p.drawLine(QPointF(12, 5), QPointF(12, 20))
+        p.drawLine(QPointF(9, 20), QPointF(15, 20))
+    elif name == "rect":
+        p.drawRoundedRect(QRectF(4, 5, 16, 14), 1.5, 1.5)
+    elif name == "ellipse":
+        p.drawEllipse(QRectF(4, 5, 16, 14))
+    elif name == "hand":
+        path.moveTo(8, 20)
+        path.cubicTo(5, 16, 4, 13, 6, 12)
+        path.lineTo(8, 14)
+        path.lineTo(8, 5)
+        path.cubicTo(8, 3.5, 10.5, 3.5, 10.5, 5)
+        path.lineTo(10.5, 11)
+        path.lineTo(10.5, 4)
+        path.cubicTo(10.5, 2.5, 13, 2.5, 13, 4)
+        path.lineTo(13, 11)
+        path.lineTo(13, 5)
+        path.cubicTo(13, 3.5, 15.5, 3.5, 15.5, 5)
+        path.lineTo(15.5, 11.5)
+        path.lineTo(15.5, 7.5)
+        path.cubicTo(15.5, 6, 18, 6, 18, 7.5)
+        path.lineTo(18, 15)
+        path.cubicTo(18, 18, 16, 20, 14, 20)
+        path.closeSubpath()
+        p.drawPath(path)
+    elif name == "zoom":
+        p.drawEllipse(QPointF(10, 10), 6, 6)
+        p.drawLine(QPointF(14.5, 14.5), QPointF(20, 20))
+    elif name.startswith("al_"):
+        k = name[3:]
+        p.setBrush(col)
+        p.setPen(Qt.NoPen)
+        if k in ("left", "hcenter", "right"):
+            x = {"left": 5.0, "hcenter": 12.0, "right": 19.0}[k]
+            for y, w in ((7, 10), (14, 6)):
+                x0 = x if k == "left" else (x - w if k == "right" else x - w / 2)
+                p.drawRoundedRect(QRectF(x0, y - 2, w, 4), 1, 1)
+            p.setPen(pen)
+            p.drawLine(QPointF(x, 3), QPointF(x, 21))
+        else:
+            y = {"top": 5.0, "vcenter": 12.0, "bottom": 19.0}[k]
+            for x, h in ((7, 10), (14, 6)):
+                y0 = y if k == "top" else (y - h if k == "bottom" else y - h / 2)
+                p.drawRoundedRect(QRectF(x - 2, y0, 4, h), 1, 1)
+            p.setPen(pen)
+            p.drawLine(QPointF(3, y), QPointF(21, y))
+    p.end()
+    pm.setDevicePixelRatio(2.0)
+    return QIcon(pm)
+
+
+TOOL_HINTS = {
+    "select": "<b>Clic</b> en un objeto para seleccionarlo  |  <b>Mayús+clic</b> para añadir a la selección  |  "
+              "<b>Arrastrar</b> para mover · asas para escalar y girar",
+    "direct": "<b>Clic</b> en un nodo o manecilla para moverlo  |  <b>Doble clic</b> en un nodo: esquina ↔ curva  |  "
+              "<b>Alt</b> al mover una manecilla: romperla",
+    "pen": "<b>Clic</b> para una esquina  |  <b>Arrastrar</b> para una curva  |  <b>Clic en el primer punto</b> cierra  |"
+           "  <b>Intro</b> o <b>Esc</b> termina",
+    "text": "<b>Clic</b> en el lienzo para escribir un texto nuevo",
+    "rect": "<b>Arrastrar</b> para dibujar un rectángulo  |  <b>Mayús</b>: cuadrado",
+    "ellipse": "<b>Arrastrar</b> para dibujar una elipse  |  <b>Mayús</b>: círculo",
+    "hand": "<b>Arrastrar</b> para desplazar la vista  |  también <b>espacio + arrastrar</b> o botón central",
+    "zoom": "<b>Clic</b> para acercar  |  <b>Alt+clic</b> para alejar  |  <b>Rueda</b> en cualquier herramienta",
+}
+TOOL_NAMES = {"select": "Selección", "direct": "Selección directa", "pen": "Pluma", "text": "Texto",
+              "rect": "Rectángulo", "ellipse": "Elipse", "hand": "Mano", "zoom": "Zoom"}
 TOOLS = [("select", "➤", "Selección (V): mover, escalar y girar"),
          ("direct", "◇", "Selección directa (A): editar nodos y manecillas de un trazado. Doble clic en un nodo: "
                          "esquina ↔ curva"),
@@ -41,7 +232,8 @@ TOOLS = [("select", "➤", "Selección (V): mover, escalar y girar"),
          ("text", "T", "Texto (T): clic en el lienzo"),
          ("rect", "▭", "Rectángulo (M): arrastrar"),
          ("ellipse", "◯", "Elipse (L): arrastrar"),
-         ("hand", "✋", "Mano (H o espacio): desplazar")]
+         ("hand", "✋", "Mano (H o espacio): desplazar"),
+         ("zoom", "⌕", "Zoom (Z): clic acerca, Alt+clic aleja")]
 
 
 def _btn(text, kind="", tip="", cb=None):
@@ -321,6 +513,8 @@ class ElementItem(QGraphicsItem):
             self.start_el = copy.deepcopy(self.el)
             return
         self.cv.begin_move(self)
+        if self.cv.owner.right_tabs.currentIndex() != 0:  # como VectorCraft: al pinchar un objeto, sus propiedades
+            self.cv.owner.right_tabs.setCurrentIndex(0)
         super().mousePressEvent(e)
 
     def mouseMoveEvent(self, e):
@@ -547,7 +741,7 @@ class Canvas(QGraphicsView):
 
     # ---------------------------------------------------------- dibujo de fondo y guías
     def drawBackground(self, p, rect):
-        p.fillRect(rect, QColor("#2a2a2a"))
+        p.fillRect(rect, QColor(VC["canvas"]))
         pg = self.page()
         s = self.transform().m11()
         p.fillRect(pg.translated(4 / s, 5 / s), QColor(0, 0, 0, 110))
@@ -560,7 +754,21 @@ class Canvas(QGraphicsView):
         outside.addRect(rect.united(pg.adjusted(-10, -10, 10, 10)))
         inner = QPainterPath()
         inner.addRect(pg)
-        p.fillPath(outside.subtracted(inner), QColor(42, 42, 42, 215))
+        bgc = QColor(VC["canvas"])
+        bgc.setAlpha(215)
+        p.fillPath(outside.subtracted(inner), bgc)
+        # nombre de la mesa de trabajo encima, como en VectorCraft («01 - Página»)
+        p.save()
+        p.resetTransform()
+        tl = self.mapFromScene(pg.topLeft())
+        p.setPen(QColor(VC["muted"]))
+        f = p.font()
+        f.setPixelSize(12)
+        p.setFont(f)
+        n = len(self.d.get("pages", [])) or 1
+        p.drawText(QPointF(tl.x(), tl.y() - 8),
+                   f"{self.d.get('page', 0) + 1:02d} - {self.d.get('name', '')}" + (f"  ({n} páginas)" if n > 1 else ""))
+        p.restore()
         if self.d.get("unit") == "mm":
             b = G.mm_to_px(3.0, self.d.get("dpi", G.PRINT_DPI))
             pen = QPen(QColor(229, 72, 77, 170), 1 / s, Qt.DashLine)
@@ -570,7 +778,7 @@ class Canvas(QGraphicsView):
             p.setPen(QPen(QColor(46, 134, 171, 140), 1 / s, Qt.DotLine))
             p.drawRect(pg.adjusted(b, b, -b, -b))  # margen de seguridad
         gx, gy = self.guides
-        p.setPen(QPen(ACCENT, 1 / s))
+        p.setPen(QPen(GUIDE, 1 / s))
         for x in gx:
             p.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
         for y in gy:
@@ -605,6 +813,14 @@ class Canvas(QGraphicsView):
         self.snap_cache = G.snap_lines(self.d, [e for e in self.d["elements"] if e["id"] not in sel])
 
     # ---------------------------------------------------------- ratón
+    def scrollContentsBy(self, dx, dy):
+        super().scrollContentsBy(dx, dy)
+        self.owner.place_taskbar()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.owner.place_taskbar()
+
     def wheelEvent(self, e):
         f = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
         z = self.transform().m11() * f
@@ -635,6 +851,7 @@ class Canvas(QGraphicsView):
             self._pan = e.position()
             self.viewport().setCursor(Qt.ClosedHandCursor)
             return
+        self.owner.taskbar.hide()
         if e.button() == Qt.LeftButton and self.tool == "pen":
             if len(self.pen_nodes) > 2 and (QPointF(*self.pen_nodes[0]["p"]) - sp).manhattanLength() < \
                     10 / self.transform().m11():
@@ -644,6 +861,12 @@ class Canvas(QGraphicsView):
             self.pen_nodes.append({"p": pt, "i": list(pt), "o": list(pt)})
             self.pen_drag = True
             self.viewport().update()
+            return
+        if e.button() == Qt.LeftButton and self.tool == "zoom":
+            f = 0.8 if e.modifiers() & Qt.AltModifier else 1.25
+            self.scale(f, f)
+            self.centerOn(sp)
+            self.owner.zoom_changed()
             return
         if e.button() == Qt.LeftButton and self.tool == "text":
             self.owner.add_text("body", at=sp)
@@ -745,6 +968,90 @@ class Canvas(QGraphicsView):
         for i, p in enumerate(paths):
             self.owner.place_photo(p, QPointF(sp.x() + i * 30, sp.y() + i * 30))
         e.acceptProposedAction()
+
+
+class TaskBar(QFrame):
+    """Barra contextual flotante bajo la selección (como la «contextual task bar» de VectorCraft)."""
+
+    def __init__(self, owner: "GraphicsView"):
+        super().__init__(owner.canvas.viewport())
+        self.owner = owner
+        self.setObjectName("vcTask")
+        self.h = QHBoxLayout(self)
+        self.h.setContentsMargins(8, 6, 8, 6)
+        self.h.setSpacing(6)
+        self.hide()
+
+    def update_for(self, sel):
+        while self.h.count():
+            it = self.h.takeAt(0)
+            w_ = it.widget()
+            if w_:  # fuera ya (no esperar al borrado diferido: se verían encima de los nuevos)
+                w_.hide()
+                w_.setParent(None)
+                w_.deleteLater()
+        if not sel:
+            self.hide()
+            return
+        o = self.owner
+        acts = []
+        if len(sel) > 1:
+            acts += [("Unir", lambda: o.pathfinder("union")), ("Restar", lambda: o.pathfinder("subtract")),
+                     ("Agrupar", o.group)]
+        else:
+            t = sel[0]["type"]
+            if t == "text":
+                acts += [("T  Crear contornos", o.outline_text)]
+            elif t == "image" and sel[0].get("path"):
+                acts += [("Quitar fondo", o.remove_bg), ("Vectorizar", o.vectorize)]
+            elif t == "vector":
+                acts += [("Editar nodos", lambda: o.set_tool("direct"))]
+        acts += [("Duplicar", o.duplicate)]
+        for txt, fn in acts:
+            b = QPushButton(txt)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(fn)
+            self.h.addWidget(b)
+        lock = QPushButton("🔒" if not all(e.get("locked") for e in sel) else "🔓")
+        lock.setToolTip("Bloquear / desbloquear")
+        lock.clicked.connect(o.toggle_lock)
+        self.h.addWidget(lock)
+        more = QToolButton()
+        more.setText("···")
+        more.setPopupMode(QToolButton.InstantPopup)
+        more.setStyleSheet("QToolButton { background: transparent; border: none; padding: 4px 8px; } "
+                           "QToolButton::menu-indicator { image: none; }")
+        m = QMenu(more)
+        for t2, f2 in (("Traer al frente", lambda: o.order("front")), ("Enviar al fondo", lambda: o.order("back")),
+                       ("Agrupar", o.group), ("Desagrupar", o.ungroup), ("Eliminar", o.delete)):
+            m.addAction(t2).triggered.connect(f2)
+        more.setMenu(m)
+        self.h.addWidget(more)
+        self.adjustSize()
+        self.place()
+
+    def place(self):
+        sel = self.owner.canvas.sc.selectedItems() if self.owner.canvas.sc else []
+        if not sel or self.owner.canvas.tool not in ("select", "direct") or not self.h.count():
+            self.hide()
+            return
+        r = QRectF()
+        for it in sel:
+            r = r.united(it.mapRectToScene(QRectF(0, 0, it.el["w"], it.el["h"])))
+        cv = self.owner.canvas
+        bottom = cv.mapFromScene(QPointF(r.center().x(), r.bottom()))
+        top = cv.mapFromScene(QPointF(r.center().x(), r.top()))
+        vp = cv.viewport().rect()
+        self.adjustSize()
+        x = int(bottom.x() - self.width() / 2)
+        y = int(bottom.y() + 22)
+        if y + self.height() > vp.bottom() - 6:  # sin sitio debajo: encima
+            y = int(top.y() - self.height() - 40)
+        x = max(6, min(x, vp.right() - self.width() - 6))
+        y = max(6, min(y, vp.bottom() - self.height() - 6))
+        self.move(x, y)
+        self.show()
+        self.raise_()
 
 
 class PhotoList(QListWidget):
@@ -1056,19 +1363,30 @@ class GraphicsView(QWidget):
         self.save_timer.setSingleShot(True)
         self.save_timer.timeout.connect(self.save_now)
 
-        h = QHBoxLayout(self)
+        # entorno VectorCraft: menús arriba, herramientas a la izquierda, Propiedades | Capas | Bibliotecas a la
+        # derecha, línea de ayuda y barra de estado abajo
+        self.setObjectName("vcRoot")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(VC_QSS)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        h = QHBoxLayout()
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(0)
-        h.addWidget(self._build_left())
         h.addWidget(self._build_tools())
         mid = QVBoxLayout()
         mid.setContentsMargins(0, 0, 0, 0)
         mid.setSpacing(0)
-        mid.addWidget(self._build_top())
+        mid.addWidget(self._build_doctab())
         mid.addWidget(self.canvas, 1)
-        mid.addWidget(self._build_pages())
         h.addLayout(mid, 1)
         h.addWidget(self._build_right())
+        outer.addWidget(self._build_menubar())
+        outer.addLayout(h, 1)
+        outer.addWidget(self._build_hint())
+        outer.addWidget(self._build_status())
+        self.taskbar = TaskBar(self)
         self.canvas.sc.selectionChanged.connect(self.on_selection)
         self.thumbs_ready.connect(self._on_thumb)
         self._shortcuts()
@@ -1078,16 +1396,11 @@ class GraphicsView(QWidget):
         self.load_design(self._initial_design())
 
     # ---------------------------------------------------------- construcción
-    def _build_left(self):
-        w = QFrame()
-        w.setObjectName("sidebar")
-        w.setFixedWidth(270)
-        v = QVBoxLayout(w)
-        v.setContentsMargins(6, 8, 6, 6)
+    def _build_libraries(self):
+        """Bibliotecas (como en VectorCraft): lo de Canva — tamaños y plantillas, fotos, elementos, diseños y marca."""
         tabs = self.tabs = QTabWidget()
+        tabs.setObjectName("libTabs")
         tabs.tabBar().setExpanding(False)
-        tabs.setStyleSheet("QTabBar::tab { padding: 4px 7px; }")
-        v.addWidget(tabs)
 
         # Diseño: tamaños y plantillas
         pg = QWidget()
@@ -1222,7 +1535,7 @@ class GraphicsView(QWidget):
         tabs.addTab(md, "Míos")
         tabs.addTab(self._build_brand(), "Marca")
         tabs.currentChanged.connect(lambda i: i == 3 and self.refresh_mine())
-        return w
+        return tabs
 
     def _template_icon(self, name):
         d = G.design_from_preset(G.TEMPLATE_SIZE[name])
@@ -1242,149 +1555,272 @@ class GraphicsView(QWidget):
 
     def _build_tools(self):
         w = QFrame()
-        w.setObjectName("tooltabs")
-        w.setFixedWidth(46)
+        w.setObjectName("vcTools")
+        w.setFixedWidth(52)
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 8, 0, 8)
-        v.setSpacing(2)
+        v.setContentsMargins(5, 10, 5, 10)
+        v.setSpacing(4)
         self.tool_btn = {}
         grp = QButtonGroup(self)
-        for k, icon, tip in TOOLS:
-            b = QPushButton(icon)
-            b.setObjectName("tooltab")
+        for k, _, tip in TOOLS:
+            b = QPushButton()
+            b.setObjectName("vcTool")
+            b.setIcon(vc_icon(k))
+            b.setIconSize(QSize(22, 22))
+            b.setFixedSize(40, 38)
             b.setCheckable(True)
             b.setToolTip(tip)
             b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _, k=k: self.set_tool(k))
             grp.addButton(b)
-            v.addWidget(b)
+            v.addWidget(b, 0, Qt.AlignHCenter)
             self.tool_btn[k] = b
         self.tool_btn["select"].setChecked(True)
-        v.addSpacing(10)
-        self.fill_btn = ColorButton(self.pen_fill, True, self.design_colors)
-        self.fill_btn.setText("")
-        self.fill_btn.setToolTip("Relleno para la pluma y las formas nuevas")
-        self.fill_btn.changed.connect(lambda c: (setattr(self, "pen_fill", c), self.fill_btn.setText("")))
-        v.addWidget(self.fill_btn)
         v.addStretch(1)
+        # relleno y contorno para lo que se dibuje (pluma, formas), como los cuadros de Illustrator/VectorCraft
+        self.fill_btn = ColorButton(self.pen_fill, True, self.design_colors)
+        self.stroke_btn = ColorButton(self.pen_stroke, False, self.design_colors)
+        for b, tip in ((self.fill_btn, "Relleno de lo que dibujes (pluma, formas)"),
+                       (self.stroke_btn, "Contorno de lo que dibujes con la pluma")):
+            b.setText("")
+            b.setFixedSize(30, 30)
+            b.setIconSize(QSize(22, 22))
+            b.setToolTip(tip)
+            v.addWidget(b, 0, Qt.AlignHCenter)
+        self.fill_btn.changed.connect(lambda c: (setattr(self, "pen_fill", c), self.fill_btn.setText("")))
+        self.stroke_btn.changed.connect(lambda c: (setattr(self, "pen_stroke", c), self.stroke_btn.setText("")))
         return w
 
-    def _build_top(self):
+    def _build_doctab(self):
+        """Pestaña del documento: «nombre @ zoom (RGB/Vista previa)», con el nombre editable."""
         w = QFrame()
-        w.setObjectName("toolbar")
-        w.setFixedHeight(42)
+        w.setObjectName("vcDocTab")
+        w.setFixedHeight(38)
         h = QHBoxLayout(w)
-        h.setContentsMargins(10, 4, 10, 4)
-        h.setSpacing(6)
+        h.setContentsMargins(12, 4, 12, 4)
+        h.setSpacing(4)
         self.name = QLineEdit()
-        self.name.setFixedWidth(200)
-        self.name.setToolTip("Nombre del diseño")
+        self.name.setObjectName("vcDocName")
+        self.name.setFixedWidth(220)
+        self.name.setToolTip("Nombre del diseño (clic para cambiarlo)")
+        self.name.setStyleSheet("QLineEdit { background: transparent; border: 1px solid transparent; "
+                                "font-weight: 600; color: #F2F3F6; } QLineEdit:focus { border-color: #4C82F7; "
+                                f"background: {VC['field']}; }}")
         self.name.editingFinished.connect(self._rename)
         h.addWidget(self.name)
-        self.size_lbl = QLabel("")
-        self.size_lbl.setObjectName("meta")
-        h.addWidget(self.size_lbl)
-        h.addSpacing(8)
-        self.b_undo = _btn("↶", "flat", "Deshacer (Ctrl+Z)", self.undo)
-        self.b_redo = _btn("↷", "flat", "Rehacer (Ctrl+Y)", self.redo)
-        for b in (self.b_undo, self.b_redo):
-            b.setStyleSheet("font-size: 14pt;")
-            h.addWidget(b)
-        h.addSpacing(8)
-
-        def menu_btn(text, tip, entries):
-            b = QToolButton()
-            b.setText(text + " ▾")
-            b.setToolTip(tip)
-            b.setPopupMode(QToolButton.InstantPopup)
-            b.setStyleSheet("QToolButton { background: #2c2c2c; border: 1px solid #3a3a3a; border-radius: 3px; "
-                            "padding: 4px 10px; } QToolButton::menu-indicator { image: none; }")
-            m = QMenu(b)
-            for e_ in entries:
-                if e_ is None:
-                    m.addSeparator()
-                else:
-                    m.addAction(e_[0]).triggered.connect(e_[1])
-            b.setMenu(m)
-            return b
-
-        h.addWidget(menu_btn("Alinear", "Alinear a la página (uno) o entre sí (varios)", [
-            ("Izquierda", lambda: self.align("left")), ("Centro horizontal", lambda: self.align("hcenter")),
-            ("Derecha", lambda: self.align("right")), None, ("Arriba", lambda: self.align("top")),
-            ("Centro vertical", lambda: self.align("vcenter")), ("Abajo", lambda: self.align("bottom")), None,
-            ("Repartir en horizontal", lambda: self.distribute("h")),
-            ("Repartir en vertical", lambda: self.distribute("v"))]))
-        h.addWidget(menu_btn("Organizar", "Orden de las capas", [
-            ("Traer al frente (Ctrl+Mayús+])", lambda: self.order("front")),
-            ("Traer adelante (Ctrl+])", lambda: self.order("up")),
-            ("Enviar atrás (Ctrl+[)", lambda: self.order("down")),
-            ("Enviar al fondo (Ctrl+Mayús+[)", lambda: self.order("back")), None,
-            ("Agrupar (Ctrl+G)", self.group), ("Desagrupar (Ctrl+Mayús+G)", self.ungroup), None,
-            ("Duplicar (Ctrl+D)", self.duplicate), ("Bloquear / desbloquear", self.toggle_lock),
-            ("Eliminar (Supr)", self.delete)]))
-        h.addWidget(menu_btn("Buscatrazos", "Combinar formas como en Illustrator (selecciona 2 o más)",
-                             [(t, lambda _=False, k=k: self.pathfinder(k)) for k, t in G.PATHFINDER.items()] +
-                             [None, ("Texto a contornos (Ctrl+Mayús+O)", self.outline_text)]))
-        h.addSpacing(8)
-        self.b_bg = _btn("Quitar fondo", "", "Recorta la foto seleccionada (personas, fondo liso u objeto)",
-                         self.remove_bg)
-        self.b_vec = _btn("Vectorizar", "", "Convierte la foto o logo seleccionado en trazados vectoriales",
-                          self.vectorize)
-        h.addWidget(self.b_bg)
-        h.addWidget(self.b_vec)
-        h.addStretch(1)
         self.zoom_lbl = QLabel("")
-        self.zoom_lbl.setObjectName("meta")
+        self.zoom_lbl.setObjectName("vcDocName")
         h.addWidget(self.zoom_lbl)
-        h.addWidget(_btn("Encajar", "flat", "Ver la página entera (Ctrl+0)", self.canvas.fit))
-        h.addWidget(_btn("100 %", "flat", "Tamaño real (Ctrl+1)", lambda: self.canvas.set_zoom(1.0)))
-        self.snap_cb = QCheckBox("Imán")
-        self.snap_cb.setChecked(True)
-        self.snap_cb.setToolTip("Pegar a bordes y centros de la página y de los demás elementos")
-        self.snap_cb.toggled.connect(lambda on: setattr(self.canvas, "snap_on", on))
-        h.addWidget(self.snap_cb)
+        h.addStretch(1)
         self.saved_lbl = QLabel("")
         self.saved_lbl.setObjectName("faint")
         h.addWidget(self.saved_lbl)
+        h.addSpacing(10)
         h.addWidget(_btn("Exportar", "primary", "PDF de imprenta, PNG, JPG o SVG (Ctrl+E)", self.export))
         return w
 
+    def _build_menubar(self):
+        mb = QMenuBar()
+        mb.setNativeMenuBar(False)
+
+        def menu(title, entries):
+            m = mb.addMenu(title)
+            out = {}
+            for e_ in entries:
+                if e_ is None:
+                    m.addSeparator()
+                    continue
+                if isinstance(e_[1], list):
+                    sub = m.addMenu(e_[0])
+                    for t2, f2 in e_[1]:
+                        sub.addAction(t2).triggered.connect(f2)
+                    continue
+                txt, fn = e_[0], e_[1]
+                a = m.addAction(txt)
+                if len(e_) > 2 and e_[2]:
+                    a.setShortcut(QKeySequence(e_[2]))
+                    a.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+                    self.addAction(a)
+                a.triggered.connect(fn)
+                out[txt] = a
+            return out
+
+        menu("Archivo", [
+            ("Nuevo diseño…", lambda: self.show_library(0)),
+            ("Abrir de «Míos»…", lambda: self.show_library(3)),
+            ("Duplicar diseño", self.duplicate_design), None,
+            ("Añadir imagen o logo…", self.add_file), None,
+            ("Guardar", self.save_now, "Ctrl+S"),
+            ("Exportar…", self.export, "Ctrl+E")])
+        ed = menu("Edición", [
+            ("Deshacer", self.undo, "Ctrl+Z"), ("Rehacer", self.redo, "Ctrl+Y"), None,
+            ("Copiar", self.copy), ("Pegar", self.paste), ("Duplicar", self.duplicate),
+            ("Eliminar", self.delete), None, ("Seleccionar todo", self.select_all)])
+        self.b_undo, self.b_redo = ed["Deshacer"], ed["Rehacer"]
+        ob = menu("Objeto", [
+            ("Organizar", [("Traer al frente", lambda: self.order("front")),
+                           ("Traer adelante", lambda: self.order("up")),
+                           ("Enviar atrás", lambda: self.order("down")),
+                           ("Enviar al fondo", lambda: self.order("back"))]),
+            ("Agrupar", self.group), ("Desagrupar", self.ungroup), ("Bloquear / desbloquear", self.toggle_lock),
+            None,
+            ("Buscatrazos", [(t, lambda _=False, k=k: self.pathfinder(k)) for k, t in G.PATHFINDER.items()]),
+            ("Alinear", [("Izquierda", lambda: self.align("left")), ("Centro horizontal", lambda: self.align("hcenter")),
+                         ("Derecha", lambda: self.align("right")), ("Arriba", lambda: self.align("top")),
+                         ("Centro vertical", lambda: self.align("vcenter")), ("Abajo", lambda: self.align("bottom")),
+                         ("Repartir en horizontal", lambda: self.distribute("h")),
+                         ("Repartir en vertical", lambda: self.distribute("v"))]),
+            None,
+            ("Quitar fondo…", self.remove_bg), ("Vectorizar imagen…", self.vectorize),
+            ("Código QR…", self.add_qr)])
+        self.b_bg, self.b_vec = ob["Quitar fondo…"], ob["Vectorizar imagen…"]
+        menu("Texto", [("Añadir título", lambda: self.add_text("title")),
+                       ("Añadir subtítulo", lambda: self.add_text("subtitle")),
+                       ("Añadir texto", lambda: self.add_text("body")), None,
+                       ("Crear contornos", self.outline_text, "Ctrl+Shift+O")])
+        menu("Seleccionar", [("Todo", self.select_all), ("Nada", lambda: self.canvas.sc.clearSelection())])
+        vw = menu("Ver", [("Encajar la página", self.canvas.fit, "Ctrl+0"),
+                          ("Tamaño real (100 %)", lambda: self.canvas.set_zoom(1.0), "Ctrl+1"), None,
+                          ("Imán (guías inteligentes)", lambda: None)])
+        self.snap_cb = vw["Imán (guías inteligentes)"]
+        self.snap_cb.setCheckable(True)
+        self.snap_cb.setChecked(True)
+        self.snap_cb.toggled.connect(lambda on: setattr(self.canvas, "snap_on", on))
+        menu("Ventana", [("Propiedades", lambda: self.right_tabs.setCurrentIndex(0)),
+                         ("Capas", lambda: self.right_tabs.setCurrentIndex(1)), None,
+                         ("Bibliotecas: diseño y plantillas", lambda: self.show_library(0)),
+                         ("Bibliotecas: fotos", lambda: self.show_library(1)),
+                         ("Bibliotecas: añadir", lambda: self.show_library(2)),
+                         ("Bibliotecas: mis diseños", lambda: self.show_library(3)),
+                         ("Bibliotecas: marca", lambda: self.show_library(4))])
+        menu("Ayuda", [("Atajos de teclado", self.show_shortcuts)])
+        return mb
+
+    def show_library(self, i):
+        self.right_tabs.setCurrentIndex(2)
+        self.tabs.setCurrentIndex(i)
+
+    def show_shortcuts(self):
+        QMessageBox.information(self, "Atajos", "V selección · A selección directa · P pluma · T texto · "
+                                "M rectángulo · L elipse · H mano · Z zoom\n"
+                                "Ctrl+Z / Ctrl+Y deshacer y rehacer · Ctrl+D duplicar · Ctrl+G agrupar · "
+                                "Supr eliminar\nCtrl+] / Ctrl+[ adelante y atrás · flechas: mover (Mayús ×10)\n"
+                                "Ctrl+Mayús+O crear contornos · Ctrl+E exportar · Ctrl+0 encajar · Ctrl+1 100 %\n"
+                                "Rueda: zoom · espacio + arrastrar: desplazar")
+
+    def _build_hint(self):
+        w = QFrame()
+        w.setObjectName("vcHint")
+        w.setFixedHeight(28)
+        h = QHBoxLayout(w)
+        h.setContentsMargins(12, 2, 12, 2)
+        q = QLabel("?")
+        q.setFixedSize(18, 18)
+        q.setAlignment(Qt.AlignCenter)
+        q.setStyleSheet(f"border: 1px solid {VC['muted']}; border-radius: 9px; color: {VC['muted']};")
+        h.addWidget(q)
+        self.hint_lbl = QLabel(TOOL_HINTS["select"])
+        h.addWidget(self.hint_lbl, 1)
+        return w
+
+    def _build_status(self):
+        w = QFrame()
+        w.setObjectName("vcStatus")
+        w.setFixedHeight(32)
+        h = QHBoxLayout(w)
+        h.setContentsMargins(8, 2, 12, 2)
+        h.setSpacing(6)
+        self.zoom_box = QComboBox()
+        self.zoom_box.setEditable(True)
+        self.zoom_box.addItems(["Encajar", "25 %", "50 %", "100 %", "200 %", "400 %"])
+        self.zoom_box.setFixedWidth(96)
+        self.zoom_box.activated.connect(self._zoom_from_box)
+        h.addWidget(self.zoom_box)
+        h.addSpacing(10)
+        for txt, tip, fn in (("«", "Primera página", lambda: self.goto_page(0)),
+                             ("‹", "Página anterior", lambda: self.goto_page(self.d.get("page", 0) - 1))):
+            h.addWidget(_btn(txt, "flat", tip, fn))
+        self.pages = QComboBox()
+        self.pages.setFixedWidth(190)
+        self.pages.setIconSize(QSize(28, 28))
+        self.pages.setToolTip("Mesas de trabajo (páginas) del diseño")
+        self.pages.currentIndexChanged.connect(self.goto_page)
+        h.addWidget(self.pages)
+        for txt, tip, fn in (("›", "Página siguiente", lambda: self.goto_page(self.d.get("page", 0) + 1)),
+                             ("»", "Última página", lambda: self.goto_page(len(self.d["pages"]) - 1))):
+            h.addWidget(_btn(txt, "flat", tip, fn))
+        pg = QToolButton()
+        pg.setText("+ Página ▾")
+        pg.setPopupMode(QToolButton.InstantPopup)
+        pg.setStyleSheet("QToolButton { background: transparent; border: none; padding: 3px 8px; } "
+                         "QToolButton::menu-indicator { image: none; }")
+        m = QMenu(pg)
+        for t, op in (("Página nueva", "add"), ("Duplicar esta página", "dup"), ("Mover antes", "left"),
+                      ("Mover después", "right"), ("Eliminar esta página", "del")):
+            m.addAction(t).triggered.connect(lambda _=False, op=op: self.page_op(op))
+        pg.setMenu(m)
+        h.addWidget(pg)
+        h.addSpacing(14)
+        self.tool_lbl = QLabel("Selección")
+        self.tool_lbl.setObjectName("muted")
+        h.addWidget(self.tool_lbl)
+        h.addStretch(1)
+        self.size_lbl = QLabel("")
+        self.size_lbl.setObjectName("faint")
+        h.addWidget(self.size_lbl)
+        return w
+
+    def _zoom_from_box(self, *_):
+        t = self.zoom_box.currentText().replace("%", "").strip().replace(",", ".")
+        if t.lower().startswith("encaj"):
+            self.canvas.fit()
+            return
+        try:
+            self.canvas.set_zoom(max(0.02, min(40.0, float(t) / 100)))
+        except ValueError:
+            pass
+
     def _build_right(self):
         w = QFrame()
-        w.setObjectName("sidebar")
-        w.setFixedWidth(300)
+        w.setObjectName("vcRight")
+        w.setFixedWidth(340)
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 0, 0)
+        v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(0)
+        self.right_tabs = QTabWidget()
+        self.right_tabs.tabBar().setExpanding(False)
+        # Propiedades
         sa = QScrollArea()
         sa.setWidgetResizable(True)
         sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.props_area = sa
         self.props_host = QWidget()
         self.props = QVBoxLayout(self.props_host)
-        self.props.setContentsMargins(12, 10, 12, 10)
-        self.props.setSpacing(6)
         sa.setWidget(self.props_host)
-        v.addWidget(sa, 3)
-        t = QLabel("  CAPAS")
-        t.setObjectName("cardTitle")
-        t.setFixedHeight(26)
-        v.addWidget(t)
+        self.right_tabs.addTab(sa, "Propiedades")
+        # Capas
         self.layers = QListWidget()
-        self.layers.setObjectName("list")
         self.layers.setSelectionMode(QListWidget.ExtendedSelection)
         self.layers.setDragDropMode(QListWidget.InternalMove)
         self.layers.itemSelectionChanged.connect(self._layers_to_scene)
         self.layers.itemChanged.connect(self._layer_checked)
         self.layers.model().rowsMoved.connect(self._layers_moved)
-        v.addWidget(self.layers, 2)
+        self.layers.setToolTip("Casilla: visible · arrastra para cambiar el orden")
+        self.right_tabs.addTab(self.layers, "Capas")
+        # Bibliotecas (Canva)
+        self.right_tabs.addTab(self._build_libraries(), "Bibliotecas")
+        v.addWidget(self.right_tabs)
         return w
+
+    # ---------------------------------------------------------- barra contextual
+    def place_taskbar(self):
+        if not hasattr(self, "taskbar"):
+            return
+        self.taskbar.place()
 
     def _shortcuts(self):
         ctx = Qt.WidgetWithChildrenShortcut
-        for k, fn in (("Ctrl+Z", self.undo), ("Ctrl+Y", self.redo), ("Ctrl+Shift+Z", self.redo),
-                      ("Ctrl+E", self.export), ("Ctrl+0", self.canvas.fit), ("Ctrl+1", lambda: self.canvas.set_zoom(1)),
-                      ("Ctrl+S", self.save_now), ("Ctrl+Shift+O", self.outline_text)):
+        for k, fn in (("Ctrl+Shift+Z", self.redo),):
             s = QShortcut(QKeySequence(k), self, fn)
             s.setContext(ctx)
         for k, fn in (("Delete", self.delete), ("Backspace", self.delete), ("Ctrl+D", self.duplicate),
@@ -1395,7 +1831,8 @@ class GraphicsView(QWidget):
                       ("V", lambda: self.set_tool("select")), ("A", lambda: self.set_tool("direct")),
                       ("P", lambda: self.set_tool("pen")), ("T", lambda: self.set_tool("text")),
                       ("M", lambda: self.set_tool("rect")), ("L", lambda: self.set_tool("ellipse")),
-                      ("H", lambda: self.set_tool("hand")), ("Escape", self.escape),
+                      ("H", lambda: self.set_tool("hand")), ("Z", lambda: self.set_tool("zoom")),
+                      ("Escape", self.escape),
                       ("Left", lambda: self.nudge(-1, 0)), ("Right", lambda: self.nudge(1, 0)),
                       ("Up", lambda: self.nudge(0, -1)), ("Down", lambda: self.nudge(0, 1)),
                       ("Shift+Left", lambda: self.nudge(-10, 0)), ("Shift+Right", lambda: self.nudge(10, 0)),
@@ -1585,12 +2022,15 @@ class GraphicsView(QWidget):
         img = len(sel) == 1 and sel[0]["type"] == "image" and bool(sel[0].get("path"))
         self.b_bg.setEnabled(img)
         self.b_vec.setEnabled(img)
+        self.taskbar.update_for(sel)
 
     def set_tool(self, k):
         if self.canvas.tool == "pen" and k != "pen":
             self.canvas.finish_pen(False)
         self.canvas.tool = k
         self.tool_btn[k].setChecked(True)
+        self.hint_lbl.setText(TOOL_HINTS.get(k, ""))
+        self.tool_lbl.setText(TOOL_NAMES.get(k, ""))
         self.canvas.setDragMode(QGraphicsView.RubberBandDrag if k in ("select", "direct") else
                                 QGraphicsView.NoDrag)
         self.apply_cursor()
@@ -1600,7 +2040,7 @@ class GraphicsView(QWidget):
 
     def apply_cursor(self):
         cur = {"pen": Qt.CrossCursor, "rect": Qt.CrossCursor, "ellipse": Qt.CrossCursor, "text": Qt.IBeamCursor,
-               "hand": Qt.OpenHandCursor}.get(self.canvas.tool, Qt.ArrowCursor)
+               "hand": Qt.OpenHandCursor, "zoom": Qt.PointingHandCursor}.get(self.canvas.tool, Qt.ArrowCursor)
         self.canvas.viewport().setCursor(cur)
 
     def escape(self):
@@ -1612,7 +2052,11 @@ class GraphicsView(QWidget):
             self.canvas.sc.clearSelection()
 
     def zoom_changed(self):
-        self.zoom_lbl.setText(f"{self.canvas.transform().m11() * 100:.0f} %")
+        z = self.canvas.transform().m11() * 100
+        mode = "CMYK/Imprenta" if self._mm() else "RGB"
+        self.zoom_lbl.setText(f"@ {z:.0f} % ({mode}/Vista previa)")
+        self.zoom_box.setEditText(f"{z:.0f} %")
+        self.place_taskbar()
 
     # ---------------------------------------------------------- historial
     def commit(self, coalesce: str | None = None):
@@ -1666,6 +2110,7 @@ class GraphicsView(QWidget):
                 it.el["x"], it.el["y"] = it.pos().x(), it.pos().y()
         self.commit()
         self.live_geometry()
+        self.place_taskbar()
 
     def live_geometry(self):
         sel = self.selected()
@@ -1712,13 +2157,19 @@ class GraphicsView(QWidget):
         """Panel nuevo cada vez (QScrollArea borra el anterior): nada de restos del panel previo."""
         self.props_host = QWidget()
         self.props = QVBoxLayout(self.props_host)
-        self.props.setContentsMargins(12, 10, 12, 10)
+        self.props.setContentsMargins(10, 6, 10, 10)
         self.props.setSpacing(6)
         self.props_area.setWidget(self.props_host)
 
     def _title(self, t):
-        lab = QLabel(t.upper())
-        lab.setObjectName("cardTitle")
+        """Sección del panel Propiedades (Transformar, Carácter, Apariencia, Alinear…), con una línea encima."""
+        if self.props.count():
+            line = QFrame()
+            line.setFixedHeight(1)
+            line.setStyleSheet(f"background: {VC['border']};")
+            self.props.addWidget(line)
+        lab = QLabel(t)
+        lab.setObjectName("vcSection")
         self.props.addWidget(lab)
 
     def _row(self, label, w_):
@@ -1727,7 +2178,6 @@ class GraphicsView(QWidget):
         r = QHBoxLayout()
         lab = QLabel(label)
         lab.setFixedWidth(84)
-        lab.setObjectName("muted")
         r.addWidget(lab)
         r.addWidget(w_, 1)
         self.props.addLayout(r)
@@ -1765,7 +2215,10 @@ class GraphicsView(QWidget):
         if not sel:
             return self._page_props()
         if len(sel) > 1:
-            self._title(f"{len(sel)} elementos")
+            kind = QLabel(f"{len(sel)} objetos")
+            kind.setObjectName("vcKind")
+            self.props.addWidget(kind)
+            self._title("Alinear")
             g = QGridLayout()
             for i, (t, k) in enumerate((("⇤", "left"), ("⇹", "hcenter"), ("⇥", "right"), ("⤒", "top"),
                                         ("⇕", "vcenter"), ("⤓", "bottom"))):
@@ -1780,7 +2233,11 @@ class GraphicsView(QWidget):
             return
         el = sel[0]
         t = el["type"]
-        self._title({"text": "Texto", "image": "Foto", "vector": "Vector", "shape": "Forma"}[t])
+        kind = QLabel({"text": "Texto", "image": "Imagen", "vector": "Trazado", "shape": "Forma"}[t])
+        kind.setObjectName("vcKind")
+        self.props.addWidget(kind)
+        self._transform_section(el)
+        self._title({"text": "Carácter", "image": "Imagen", "vector": "Colores", "shape": "Forma"}[t])
         if t == "text":
             self.text_edit = QPlainTextEdit(el.get("text", ""))
             self.text_edit.setStyleSheet(f"QPlainTextEdit {{ background: #121212; border: 1px solid {T.LINE}; "
@@ -1828,7 +2285,7 @@ class GraphicsView(QWidget):
             cv.setToolTip("Texto en arco: a la derecha curva hacia arriba, a la izquierda hacia abajo (0 = recto)")
             cv.valueChanged.connect(lambda v: self.set_prop(el, "curve", float(v) if abs(v) >= 3 else 0.0))
             self._row("Curva", cv)
-            self._title("Efectos")
+            self._title("Efectos de texto")
             oc = ColorButton(el.get("outline", "#000000"), False, self.design_colors)
             oc.changed.connect(lambda c: self.set_prop(el, "outline", c))
             ow = self._spin(self._to_unit(el.get("outline_w", 0.0)), 0, 500, 2 if self._mm() else 1,
@@ -1860,8 +2317,6 @@ class GraphicsView(QWidget):
             r.addWidget(shc)
             r.addWidget(sho)
             self.props.addLayout(r)
-            self.props.addWidget(_btn("Convertir a contornos", "ghost", "Como en Illustrator: el texto pasa a "
-                                                                        "trazados editables", self.outline_text))
         elif t == "shape":
             if el.get("shape") != "line":
                 fb = ColorButton(el.get("fill", "#000000"), True, self.design_colors)
@@ -1884,7 +2339,6 @@ class GraphicsView(QWidget):
             info.setObjectName("meta")
             info.setWordWrap(True)
             self.props.addWidget(info)
-            self.props.addWidget(_btn("Cambiar foto…", "ghost", "", lambda: self.change_photo(el)))
             z = QSlider(Qt.Horizontal)
             z.setRange(100, 400)
             z.setValue(int(el.get("zoom", 1.0) * 100))
@@ -1915,13 +2369,6 @@ class GraphicsView(QWidget):
             bw.setChecked(bool(el.get("bw")))
             bw.toggled.connect(lambda on: self.set_prop(el, "bw", on))
             self.props.addWidget(bw)
-            r = QHBoxLayout()
-            r.addWidget(_btn("Quitar fondo", "", "", self.remove_bg))
-            r.addWidget(_btn("Vectorizar", "", "", self.vectorize))
-            self.props.addLayout(r)
-            if el.get("orig"):
-                self.props.addWidget(_btn("Restaurar el fondo", "ghost", "Vuelve a la foto original",
-                                          lambda: self.restore_bg(el)))
         elif t == "vector":
             paths = el.get("paths", [])
             if len(paths) == 1:
@@ -1951,27 +2398,88 @@ class GraphicsView(QWidget):
             hint.setObjectName("faint")
             hint.setWordWrap(True)
             self.props.addWidget(hint)
-        # posición, tamaño, giro y opacidad (comunes)
-        self._title("Posición")
-        unit = " mm" if self._mm() else " px"
-        g = QGridLayout()
-        for i, (k, lab) in enumerate((("x", "X"), ("y", "Y"), ("w", "An"), ("h", "Al"))):
-            sb = self._spin(self._to_unit(el[k]), -100000, 100000, 1, unit)
-            sb.valueChanged.connect(lambda v, k=k: self._set_geo(el, k, self._from_unit(v)))
-            g.addWidget(QLabel(lab), i // 2, (i % 2) * 2)
-            g.addWidget(sb, i // 2, (i % 2) * 2 + 1)
-            self._geo[k] = sb
-        self.props.addLayout(g)
-        rot = self._spin(el.get("rot", 0.0), -180, 180, 1, "°")
-        rot.valueChanged.connect(lambda v: self._set_geo(el, "rot", v))
-        self._geo["rot"] = rot
-        self._row("Giro", rot)
+        self._title("Apariencia")
         op = QSlider(Qt.Horizontal)
         op.setRange(0, 100)
         op.setValue(int(el.get("opacity", 1.0) * 100))
         op.valueChanged.connect(lambda v: self.set_prop(el, "opacity", v / 100))
         self._row("Opacidad", op)
+        self._align_section()
+        self._quick_section(el)
         self.props.addStretch(1)
+
+    def _transform_section(self, el):
+        self._title("Transformar")
+        unit = " mm" if self._mm() else " px"
+        g = QGridLayout()
+        g.setHorizontalSpacing(6)
+        for i, (k, lab) in enumerate((("x", "X:"), ("w", "An:"), ("y", "Y:"), ("h", "Al:"))):
+            sb = self._spin(self._to_unit(el[k]), -100000, 100000, 2 if self._mm() else 1, unit)
+            sb.valueChanged.connect(lambda v, k=k: self._set_geo(el, k, self._from_unit(v)))
+            ll = QLabel(lab)
+            ll.setObjectName("muted")
+            g.addWidget(ll, i // 2, (i % 2) * 2)
+            g.addWidget(sb, i // 2, (i % 2) * 2 + 1)
+            self._geo[k] = sb
+        rot = self._spin(el.get("rot", 0.0), -180, 180, 1, "°")
+        rot.valueChanged.connect(lambda v: self._set_geo(el, "rot", v))
+        self._geo["rot"] = rot
+        rl = QLabel("⟲")
+        rl.setObjectName("muted")
+        g.addWidget(rl, 2, 0)
+        g.addWidget(rot, 2, 1)
+        self.props.addLayout(g)
+
+    def _align_section(self):
+        self._title("Alinear")
+        r = QHBoxLayout()
+        r.setSpacing(2)
+        for k, tip in (("left", "Izquierda"), ("hcenter", "Centro horizontal"), ("right", "Derecha"),
+                       ("top", "Arriba"), ("vcenter", "Centro vertical"), ("bottom", "Abajo")):
+            b = QPushButton()
+            b.setObjectName("vcIcon")
+            b.setIcon(vc_icon("al_" + k, 20))
+            b.setIconSize(QSize(20, 20))
+            b.setToolTip(f"Alinear: {tip} (a la página con un elemento; entre sí con varios)")
+            b.clicked.connect(lambda _=False, k=k: self.align(k))
+            r.addWidget(b)
+        more = QToolButton()
+        more.setText("···")
+        more.setPopupMode(QToolButton.InstantPopup)
+        more.setStyleSheet("QToolButton { background: transparent; border: none; } "
+                           "QToolButton::menu-indicator { image: none; }")
+        m = QMenu(more)
+        m.addAction("Repartir en horizontal").triggered.connect(lambda: self.distribute("h"))
+        m.addAction("Repartir en vertical").triggered.connect(lambda: self.distribute("v"))
+        more.setMenu(m)
+        r.addWidget(more)
+        r.addStretch(1)
+        self.props.addLayout(r)
+
+    def _quick_section(self, el):
+        """Acciones rápidas según lo seleccionado, como en VectorCraft."""
+        t = el["type"]
+        acts = []
+        if t == "text":
+            acts += [("Crear contornos", self.outline_text)]
+        if t == "image" and el.get("path"):
+            acts += [("Quitar fondo", self.remove_bg), ("Vectorizar", self.vectorize)]
+            if el.get("orig"):
+                acts += [("Restaurar el fondo", lambda: self.restore_bg(el))]
+        if t == "image":
+            acts += [("Cambiar foto", lambda: self.change_photo(el))]
+        acts += [("Duplicar", self.duplicate), ("Organizar: al frente", lambda: self.order("front")),
+                 ("Desbloquear" if el.get("locked") else "Bloquear", self.toggle_lock)]
+        self._title("Acciones rápidas")
+        g = QGridLayout()
+        g.setSpacing(6)
+        for i, (txt, fn) in enumerate(acts):
+            b = QPushButton(txt)
+            b.setObjectName("vcQuick")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(fn)
+            g.addWidget(b, i // 2, i % 2)
+        self.props.addLayout(g)
 
     def _gradient_row(self, el):
         g = el.get("grad") or {}
@@ -2024,7 +2532,10 @@ class GraphicsView(QWidget):
         self.commit(coalesce=f"{el['id']}:geo")
 
     def _page_props(self):
-        self._title("Página")
+        kind = QLabel("Documento")
+        kind.setObjectName("vcKind")
+        self.props.addWidget(kind)
+        self._title("Mesa de trabajo")
         info = QLabel(f"{self.d.get('name', '')}\n{G.size_label(self.d)}"
                       + ("  ·  300 ppp  ·  sangrado 3 mm (línea roja)\nlínea azul: margen de seguridad"
                          if self._mm() else ""))
@@ -2046,7 +2557,8 @@ class GraphicsView(QWidget):
             rs.addItem(f"{n} ({ww}×{hh} {u})", n)
         rs.currentIndexChanged.connect(lambda i: rs.itemData(i) and self.resize_design(rs.itemData(i)))
         self.props.addWidget(rs)
-        tips = QLabel("Consejos\n• Arrastra fotos desde la pestaña Fotos.\n• Rueda: zoom · espacio + arrastrar: "
+        self._title("Consejos")
+        tips = QLabel("• Plantillas, fotos, formas y tu marca: pestaña Bibliotecas.\n• Arrastra fotos desde Bibliotecas › Fotos.\n• Rueda: zoom · espacio + arrastrar: "
                       "desplazar.\n• Mayús al escalar: libera o fija la proporción.\n• Alt al mover una manecilla: "
                       "esquina.")
         tips.setObjectName("faint")
@@ -2476,47 +2988,17 @@ class GraphicsView(QWidget):
         QMessageBox.information(self, "Exportar", msg)
 
     # ---------------------------------------------------------- páginas
-    def _build_pages(self):
-        w = QFrame()
-        w.setObjectName("filmstrip")
-        w.setFixedHeight(104)
-        h = QHBoxLayout(w)
-        h.setContentsMargins(8, 4, 8, 4)
-        self.pages = QListWidget()
-        self.pages.setViewMode(QListWidget.IconMode)
-        self.pages.setFlow(QListWidget.LeftToRight)
-        self.pages.setWrapping(False)
-        self.pages.setIconSize(QSize(72, 72))
-        self.pages.setGridSize(QSize(86, 92))
-        self.pages.setMovement(QListWidget.Static)
-        self.pages.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.pages.currentRowChanged.connect(self.goto_page)
-        h.addWidget(self.pages, 1)
-        col = QGridLayout()
-        for k, (t, tip, cb) in enumerate((("+ Página", "Página nueva en blanco detrás de esta", lambda: self.page_op("add")),
-                                          ("Duplicar", "Copia de esta página", lambda: self.page_op("dup")),
-                                          ("◀", "Mover antes", lambda: self.page_op("left")),
-                                          ("▶", "Mover después", lambda: self.page_op("right")),
-                                          ("Eliminar", "Eliminar esta página", lambda: self.page_op("del")))):
-            b = _btn(t, "small", tip, cb)
-            col.addWidget(b, k // 2, k % 2)
-        h.addLayout(col)
-        return w
-
     def refresh_pages(self):
         if not hasattr(self, "pages"):
             return
         self.pages.blockSignals(True)
         views = G.page_views(self.d)
-        if self.pages.count() != len(views):
-            self.pages.clear()
-            for k in range(len(views)):
-                self.pages.addItem(QListWidgetItem(f"{k + 1}"))
+        self.pages.clear()
         for k, v in enumerate(views):
-            self.pages.item(k).setIcon(QIcon(QPixmap.fromImage(G.thumbnail(v, self.canvas.cache, 72))))
-        self.pages.setCurrentRow(self.d.get("page", 0))
+            self.pages.addItem(QIcon(QPixmap.fromImage(G.thumbnail(v, self.canvas.cache, 56))),
+                               f"{k + 1}   Página {k + 1}")
+        self.pages.setCurrentIndex(self.d.get("page", 0))
         self.pages.blockSignals(False)
-        self.pages.parentWidget().setVisible(True)
 
     def goto_page(self, i):
         if i < 0 or i == self.d.get("page", 0) or i >= len(self.d["pages"]):
@@ -2525,6 +3007,9 @@ class GraphicsView(QWidget):
         self.rebuild(select=[])
         self.canvas.resetCachedContent()
         self.canvas.viewport().update()
+        self.pages.blockSignals(True)
+        self.pages.setCurrentIndex(i)
+        self.pages.blockSignals(False)
 
     def page_op(self, op):
         if op == "add":
