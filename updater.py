@@ -1,7 +1,9 @@
 """Actualización automática desde las Releases públicas de GitHub (repo «phootflow-releases»).
 
-Tres formas de estar instalado:
-- «exe»: el PhootFlow.exe compilado. Se descarga el .exe nuevo, se verifica y un .bat lo sustituye.
+Cuatro formas de estar instalado:
+- «setup»: instalada con PhootFlow-Setup.exe (lo normal para compañeros). Se descarga el instalador nuevo, se
+  verifica y, al cerrar el programa, se ejecuta en silencio encima de la versión instalada y se reabre.
+- «exe»: el PhootFlow.exe suelto. Se descarga el .exe nuevo, se verifica y un .bat lo sustituye.
 - «source»: copia instalada con instalar.ps1 (Python + código). Se descarga PhootFlow-src.zip, se verifica,
   se copia encima, se actualizan las dependencias si cambiaron y se reinicia. Es la vía para PCs con
   Smart App Control, que bloquea ejecutables sin firmar.
@@ -24,6 +26,7 @@ import zipfile
 # El código está en un repo privado; las versiones se publican en este repo público, solo de releases.
 REPO = "davidcaptart-glitch/phootflow-releases"
 ASSET_EXE = "PhootFlow.exe"
+ASSET_SETUP = "PhootFlow-Setup.exe"
 ASSET_SRC = "PhootFlow-src.zip"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 _UA = {"User-Agent": "PhootFlow-updater", "Accept": "application/vnd.github+json"}
@@ -40,14 +43,17 @@ def is_newer(remote: str, local: str) -> bool:
 
 def mode() -> str:
     if getattr(sys, "frozen", False):
-        return "exe" if os.name == "nt" else "none"
+        if os.name != "nt":
+            return "none"
+        # el instalador deja su desinstalador junto al programa
+        return "setup" if os.path.exists(os.path.join(os.path.dirname(sys.executable), "unins000.exe")) else "exe"
     if os.path.isdir(os.path.join(APP_DIR, ".git")):
         return "dev"
     return "source"
 
 
 def can_self_update() -> bool:
-    return mode() in ("exe", "source")
+    return mode() in ("setup", "exe", "source")
 
 
 def latest() -> dict | None:
@@ -57,7 +63,7 @@ def latest() -> dict | None:
         with net.urlopen(req, timeout=8) as r:
             d = json.load(r)
         assets = {a["name"]: a["browser_download_url"] for a in d.get("assets", [])}
-        name = ASSET_EXE if mode() == "exe" else ASSET_SRC
+        name = {"setup": ASSET_SETUP, "exe": ASSET_EXE}.get(mode(), ASSET_SRC)
         if name not in assets:
             return None
         return {"version": d["tag_name"].lstrip("v"), "url": assets[name], "name": name,
@@ -92,7 +98,9 @@ def download(info: dict, progress=None) -> str:
 def apply(info: dict, progress=None) -> None:
     """Descarga, verifica, instala y deja lanzado el reinicio. Después hay que cerrar la aplicación."""
     m = mode()
-    if m == "exe":
+    if m == "setup":
+        run_setup_and_restart(download(info, progress))
+    elif m == "exe":
         swap_and_restart(download(info, progress))
     elif m == "source":
         install_source(download(info, progress))
@@ -133,6 +141,25 @@ def install_source(zip_path: str, target: str = APP_DIR) -> None:
 def restart_source() -> None:
     subprocess.Popen([_python(console=False), os.path.join(APP_DIR, "app.py")], cwd=APP_DIR,
                      creationflags=_DETACHED, close_fds=True)
+
+
+def _wait_script(pid: int, body: str) -> None:
+    bat = os.path.join(tempfile.gettempdir(), "phootflow_actualizar.bat")
+    with open(bat, "w", encoding="mbcs") as f:
+        f.write(f"""@echo off
+:espera
+tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (timeout /t 1 /nobreak >nul & goto espera)
+{body}
+del "%~f0"
+""")
+    subprocess.Popen(["cmd", "/c", bat], creationflags=_NO_WINDOW | 0x00000008, close_fds=True)
+
+
+def run_setup_and_restart(setup: str) -> None:
+    """Al cerrarse el programa, ejecuta el instalador nuevo en silencio (misma carpeta) y vuelve a abrirlo."""
+    current = sys.executable
+    _wait_script(os.getpid(), f'start "" /wait "{setup}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART '
+                              f'/CLOSEAPPLICATIONS\ndel "{setup}" >nul 2>&1\nstart "" "{current}"')
 
 
 def swap_and_restart(new_exe: str) -> None:

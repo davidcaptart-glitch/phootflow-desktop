@@ -436,6 +436,17 @@ class Updater(unittest.TestCase):
         self.assertFalse(updater.is_newer("0.1.0", "0.1.0"))
         self.assertFalse(updater.is_newer("0.1.0", "0.2.0"))
 
+    def test_setup_mode(self):
+        from unittest import mock
+        d = tempfile.mkdtemp()
+        exe = os.path.join(d, "PhootFlow.exe")
+        with mock.patch.object(sys, "frozen", True, create=True), mock.patch.object(sys, "executable", exe), \
+                mock.patch.object(os, "name", "nt"):
+            self.assertEqual(updater.mode(), "exe")
+            open(os.path.join(d, "unins000.exe"), "wb").close()
+            self.assertEqual(updater.mode(), "setup")
+            self.assertTrue(updater.can_self_update())
+
     def test_source_update_copies_files_and_rejects_bad_zips(self):
         d = tempfile.mkdtemp()
         target, z = os.path.join(d, "app"), os.path.join(d, "u.zip")

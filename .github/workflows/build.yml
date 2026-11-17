@@ -35,12 +35,52 @@ jobs:
           --icon assets/icon.ico --add-data "assets;assets"
           --collect-all rawpy --collect-data cv2 --collect-all mediapipe --collect-all onnxruntime
           --hidden-import scene_ai --hidden-import eyes --hidden-import luts --hidden-import studio --hidden-import studio_engine --hidden-import review --hidden-import masks --hidden-import compare --hidden-import zoomview --hidden-import license app.py
+      - name: Compilar la versión en carpeta (para el instalador)
+        run: >
+          pyinstaller --noconfirm --onedir --windowed --name PhootFlow
+          --distpath dist_dir --workpath build_dir
+          --icon assets/icon.ico --add-data "assets;assets"
+          --collect-all rawpy --collect-data cv2 --collect-all mediapipe --collect-all onnxruntime
+          --hidden-import scene_ai --hidden-import eyes --hidden-import luts --hidden-import studio --hidden-import studio_engine --hidden-import review --hidden-import masks --hidden-import compare --hidden-import zoomview --hidden-import license app.py
+      - name: Firmar los ejecutables (si hay certificado)
+        shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: ./instalador/firmar.ps1 -Files dist\PhootFlow.exe, dist_dir\PhootFlow\PhootFlow.exe
       - name: Comprobar que el .exe arranca y procesa
         shell: pwsh
         run: |
           $p = Start-Process -FilePath dist\PhootFlow.exe -ArgumentList "--selftest" -Wait -PassThru
           Get-Content "$env:TEMP\phootflow_selftest.log"
           if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Instalador (Inno Setup)
+        shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $v = (python -c "import version; print(version.__version__)").Trim()
+          & $iscc /Q "/DMyVersion=$v" "/DSrcDir=$PWD\dist_dir\PhootFlow" "/DOutDir=$PWD\dist" instalador\PhootFlow.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup falló" }
+          ./instalador/firmar.ps1 -Files dist\PhootFlow-Setup.exe
+      - name: Comprobar el instalador (instalar, abrir, desinstalar)
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\PhootFlow-Setup.exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "La instalación falló ($($p.ExitCode))" }
+          $app = Join-Path $env:LOCALAPPDATA "Programs\PhootFlowApp"
+          foreach ($f in "PhootFlow.exe", "unins000.exe") { if (-not (Test-Path "$app\$f")) { throw "Falta $f tras instalar" } }
+          if (-not (Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs" -Filter "PhootFlow.lnk" -Recurse)) { throw "Falta el acceso directo" }
+          $p = Start-Process "$app\PhootFlow.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:TEMP\phootflow_selftest.log"
+          if ($p.ExitCode -ne 0) { throw "La app instalada no pasó el selftest" }
+          $p = Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          Start-Sleep 3
+          if (Test-Path "$app\PhootFlow.exe") { throw "La desinstalación dejó el programa" }
+          Write-Host "Instalar, abrir y desinstalar: OK"
       - name: Paquete de código (instalación con Python y autoactualización en PCs con Smart App Control)
         shell: pwsh
         run: |
@@ -51,7 +91,7 @@ jobs:
       - name: Sumas de verificación
         shell: pwsh
         run: |
-          foreach ($f in "PhootFlow.exe", "PhootFlow-src.zip") {
+          foreach ($f in "PhootFlow-Setup.exe", "PhootFlow.exe", "PhootFlow-src.zip") {
             $h = (Get-FileHash "dist\$f" -Algorithm SHA256).Hash.ToLower()
             Set-Content -Path "dist\$f.sha256" -Value $h -NoNewline -Encoding ascii
           }
@@ -63,7 +103,7 @@ jobs:
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/PhootFlow.exe dist/PhootFlow.exe.sha256 dist/PhootFlow-src.zip dist/PhootFlow-src.zip.sha256 instalar.ps1 --title "PhootFlow ${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" dist/PhootFlow-Setup.exe dist/PhootFlow-Setup.exe.sha256 dist/PhootFlow.exe dist/PhootFlow.exe.sha256 dist/PhootFlow-src.zip dist/PhootFlow-src.zip.sha256 instalar.ps1 --title "PhootFlow ${{ github.ref_name }}" --generate-notes
       # El código es privado: las apps instaladas buscan las versiones en este repo público, solo de releases.
       # RELEASES_TOKEN: token fine-grained con «Contents: read and write» solo en phootflow-releases (ver LICENCIAS.md).
       - name: Publicar en el repo público de releases
@@ -76,4 +116,4 @@ jobs:
           if (-not $env:RELEASES_TOKEN) { throw "Falta el secreto RELEASES_TOKEN: las apps instaladas no verían esta versión." }
           gh release view "${{ github.ref_name }}" --json body -q .body | Set-Content -Path notas.md -Encoding utf8
           $env:GH_TOKEN = $env:RELEASES_TOKEN
-          gh release create "${{ github.ref_name }}" dist/PhootFlow.exe dist/PhootFlow.exe.sha256 dist/PhootFlow-src.zip dist/PhootFlow-src.zip.sha256 instalar.ps1 --repo davidcaptart-glitch/phootflow-releases --title "PhootFlow ${{ github.ref_name }}" --notes-file notas.md
+          gh release create "${{ github.ref_name }}" dist/PhootFlow-Setup.exe dist/PhootFlow-Setup.exe.sha256 dist/PhootFlow.exe dist/PhootFlow.exe.sha256 dist/PhootFlow-src.zip dist/PhootFlow-src.zip.sha256 instalar.ps1 --repo davidcaptart-glitch/phootflow-releases --title "PhootFlow ${{ github.ref_name }}" --notes-file notas.md
