@@ -887,8 +887,16 @@ def cull(photos: list[Photo], st: Settings) -> None:
     if st.cull_focus:
         med = float(np.median([p.sharp for p in ok])) if len(ok) >= 5 else 0.0
         thr = max(SHARP_ABS_MIN, SENS[st.sensitivity] * med)
+        # con caras, manda la nitidez de la cara (comparada con las demás caras de la sesión): una foto con
+        # mucho fondo oscuro y liso puede tener poca nitidez «global» y la cara perfectamente enfocada
+        faced = [p.face_sharp for p in ok if p.face_sharp > 0]
+        med_f = float(np.median(faced)) if len(faced) >= 5 else 0.0
+        thr_f = SENS[st.sensitivity] * med_f
         for p in ok:
-            if p.keep and p.sharp < thr:
+            if not p.keep:
+                continue
+            blurry = p.face_sharp < thr_f if (p.face_sharp > 0 and med_f) else p.sharp < thr
+            if blurry:
                 p.keep, p.reason = False, "Desenfocada o movida"
     if st.cull_eyes:
         for p in ok:
