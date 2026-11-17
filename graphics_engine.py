@@ -352,10 +352,39 @@ def _ph(d, x, y, w, h, **kw):
     return image_el(d, "", x=x, y=y, w=w, h=h, **kw)
 
 
-def _t(d, text, role, x, y, w, **kw):
+def _t(d, text, role, x, y, w, fit=None, **kw):
+    """Texto de plantilla. `fit` = alto disponible hasta el siguiente elemento: si el texto no cabe (un nombre
+    largo que pasa a dos líneas), la letra se reduce en vez de montarse encima de lo de abajo."""
     el = text_el(d, text, role, **kw)
     el.update(x=x, y=y, w=w)
-    el["h"] = text_height(el)
+    if fit:
+        el["fit_h"] = float(fit)
+    return fit_text(el)
+
+
+def fit_text(el: dict) -> dict:
+    """Autoajuste como en Canva: con «fit_h», el tamaño baja lo justo para caber en ese alto (nunca sube de
+    «size_max», el tamaño elegido); sin él, la caja crece con el texto. Siempre deja «h» al día."""
+    fh = el.get("fit_h")
+    if not fh:
+        el["h"] = text_height(el)
+        return el
+    top = float(el.get("size_max") or el["size"])
+    el["size_max"] = top
+    el["size"] = top
+    h = text_height(el)
+    if h > fh:
+        lo, hi = top * 0.15, top
+        for _ in range(16):
+            mid = (lo + hi) / 2
+            el["size"] = mid
+            if text_height(el) <= fh:
+                lo = mid
+            else:
+                hi = mid
+        el["size"] = math.floor(lo * 100) / 100  # hacia abajo: redondear arriba podría volver a no caber
+        h = text_height(el)
+    el["h"] = h
     return el
 
 
@@ -366,10 +395,10 @@ def tpl_post_evento(d):
            shape_el(d, "rect", x=0, y=H * 0.72, w=W, h=H * 0.28, fill="#05070F", stroke_w=0.0),
            shape_el(d, "rect", x=W * 0.08, y=H * 0.775, w=W * 0.12, h=max(3.0, H * 0.006), fill="#F50D8A",
                     stroke_w=0.0),
-           _t(d, "Nombre del evento", "title", W * 0.08, H * 0.79, W * 0.84, color="#FFFFFF", align="left",
-              font="Georgia"),
-           _t(d, "Fecha · Lugar", "body", W * 0.08, H * 0.90, W * 0.84, color="#C9C9C9", align="left",
-              upper=True, spacing=2.0)]
+           _t(d, "Nombre del evento", "title", W * 0.08, H * 0.79, W * 0.84, fit=H * 0.108, color="#FFFFFF",
+              align="left", font="Georgia"),
+           _t(d, "Fecha · Lugar", "body", W * 0.08, H * 0.90, W * 0.84, fit=H * 0.075, color="#C9C9C9",
+              align="left", upper=True, spacing=2.0)]
     return els
 
 
@@ -379,13 +408,13 @@ def tpl_invitacion(d):
     m = min(W, H) * 0.06
     return [shape_el(d, "rect", x=m, y=m, w=W - 2 * m, h=H - 2 * m, fill="#00000000", stroke="#C9A86A",
                      stroke_w=max(2.0, m * 0.06)),
-            _t(d, "Nos casamos", "subtitle", W * 0.1, H * 0.16, W * 0.8, color="#8A7350", font="Georgia",
-               italic=True),
-            _t(d, "Ana & Pablo", "title", W * 0.1, H * 0.25, W * 0.8, color="#2B2B2B", font="Georgia",
+            _t(d, "Nos casamos", "subtitle", W * 0.1, H * 0.16, W * 0.8, fit=H * 0.085, color="#8A7350",
+               font="Georgia", italic=True),
+            _t(d, "Ana & Pablo", "title", W * 0.1, H * 0.25, W * 0.8, fit=H * 0.14, color="#2B2B2B", font="Georgia",
                bold=False),
             _ph(d, W * 0.2, H * 0.40, W * 0.6, H * 0.32, radius=min(W, H) * 0.3),
             _t(d, "Sábado 12 de septiembre · 18:00\nFinca El Olivar, Sevilla", "body", W * 0.1, H * 0.77, W * 0.8,
-               color="#4A4A4A")]
+               fit=H * 0.15, color="#4A4A4A")]
 
 
 def tpl_tarjeta(d):
@@ -393,12 +422,12 @@ def tpl_tarjeta(d):
     d["bg"] = "#05070F"
     return [shape_el(d, "rect", x=0, y=0, w=W * 0.36, h=H, fill="#F50D8A", stroke_w=0.0),
             _ph(d, W * 0.06, H * 0.28, W * 0.24, W * 0.24, radius=W * 0.12),
-            _t(d, "Tu nombre", "title", W * 0.42, H * 0.22, W * 0.54, color="#FFFFFF", align="left",
-               size=round(H * 0.12, 1)),
-            _t(d, "Fotografía de eventos", "body", W * 0.42, H * 0.40, W * 0.54, color="#F50D8A", align="left",
-               size=round(H * 0.065, 1), upper=True, spacing=1.5),
+            _t(d, "Tu nombre", "title", W * 0.42, H * 0.22, W * 0.54, fit=H * 0.17, color="#FFFFFF", align="left",
+               size=round(H * 0.11, 1)),
+            _t(d, "Fotografía de eventos", "body", W * 0.42, H * 0.40, W * 0.54, fit=H * 0.17, color="#F50D8A",
+               align="left", size=round(H * 0.065, 1), upper=True, spacing=1.5),
             _t(d, "600 000 000\ncorreo@ejemplo.com\nwww.tuweb.com", "body", W * 0.42, H * 0.58, W * 0.54,
-               color="#D8D8D8", align="left", size=round(H * 0.06, 1))]
+               fit=H * 0.36, color="#D8D8D8", align="left", size=round(H * 0.06, 1))]
 
 
 def tpl_collage(d):
@@ -408,17 +437,19 @@ def tpl_collage(d):
     return [_ph(d, g, g, W - 2 * g, H * 0.55 - 1.5 * g),
             _ph(d, g, H * 0.55 + g / 2, (W - 3 * g) / 2, H * 0.32),
             _ph(d, W / 2 + g / 2, H * 0.55 + g / 2, (W - 3 * g) / 2, H * 0.32),
-            _t(d, "Recuerdos del día", "subtitle", g, H * 0.9, W - 2 * g, color="#05070F", font="Georgia")]
+            _t(d, "Recuerdos del día", "subtitle", g, H * 0.885, W - 2 * g, fit=H * 0.1, color="#05070F",
+               font="Georgia")]
 
 
 def tpl_cita(d):
     W, H = d["w"], d["h"]
     d["bg"] = "#1F2A44"
-    return [_t(d, "“", "title", W * 0.1, H * 0.12, W * 0.8, color="#F50D8A", size=round(min(W, H) * 0.3, 1),
-               font="Georgia"),
+    return [_t(d, "“", "title", W * 0.1, H * 0.12, W * 0.8, fit=H * 0.3, color="#F50D8A",
+               size=round(min(W, H) * 0.22, 1), font="Georgia"),
             _t(d, "La fotografía es la poesía\nde lo inmóvil", "subtitle", W * 0.1, H * 0.42, W * 0.8,
-               color="#FFFFFF", font="Georgia", italic=True),
-            _t(d, "— Tu firma", "body", W * 0.1, H * 0.72, W * 0.8, color="#C9A86A", upper=True, spacing=2.0)]
+               fit=H * 0.28, color="#FFFFFF", font="Georgia", italic=True),
+            _t(d, "— Tu firma", "body", W * 0.1, H * 0.72, W * 0.8, fit=H * 0.16, color="#C9A86A", upper=True,
+               spacing=2.0)]
 
 
 def tpl_flyer(d):
@@ -427,10 +458,12 @@ def tpl_flyer(d):
     return [_ph(d, 0, 0, W, H * 0.6),
             shape_el(d, "rect", x=W * 0.07, y=H * 0.54, w=W * 0.86, h=H * 0.4, fill="#05070F", stroke_w=0.0,
                      radius=min(W, H) * 0.02),
-            _t(d, "SESIONES DE FOTOS", "title", W * 0.1, H * 0.58, W * 0.8, color="#FFFFFF",
+            _t(d, "SESIONES DE FOTOS", "title", W * 0.1, H * 0.58, W * 0.8, fit=H * 0.11, color="#FFFFFF",
                size=round(min(W, H) * 0.075, 1)),
-            _t(d, "Bodas · Comuniones · Deporte · Eventos", "body", W * 0.1, H * 0.70, W * 0.8, color="#F50D8A"),
-            _t(d, "Reserva tu fecha: 600 000 000", "subtitle", W * 0.1, H * 0.80, W * 0.8, color="#FFFFFF")]
+            _t(d, "Bodas · Comuniones · Deporte · Eventos", "body", W * 0.1, H * 0.70, W * 0.8, fit=H * 0.09,
+               color="#F50D8A"),
+            _t(d, "Reserva tu fecha: 600 000 000", "subtitle", W * 0.1, H * 0.80, W * 0.8, fit=H * 0.115,
+               color="#FFFFFF")]
 
 
 TEMPLATES = {"Post de evento": tpl_post_evento, "Invitación": tpl_invitacion, "Tarjeta de visita": tpl_tarjeta,
@@ -445,9 +478,9 @@ def tpl_tarjeta_reverso(d):
     W, H = d["w"], d["h"]
     d["bg"] = "#F50D8A"
     return [_ph(d, (W - H * 0.42) / 2, H * 0.12, H * 0.42, H * 0.42, radius=H * 0.21),
-            _t(d, "TU MARCA", "title", W * 0.1, H * 0.60, W * 0.8, color="#FFFFFF", size=round(H * 0.11, 1),
-               spacing=3.0),
-            _t(d, "Fotografía de eventos", "body", W * 0.1, H * 0.78, W * 0.8, color="#05070F",
+            _t(d, "TU MARCA", "title", W * 0.1, H * 0.60, W * 0.8, fit=H * 0.17, color="#FFFFFF",
+               size=round(H * 0.11, 1), spacing=3.0),
+            _t(d, "Fotografía de eventos", "body", W * 0.1, H * 0.78, W * 0.8, fit=H * 0.15, color="#05070F",
                size=round(H * 0.06, 1))]
 
 
@@ -500,7 +533,7 @@ def apply_brand(d: dict, kit: dict) -> int:
             f = kit.get("title_font") if e.get("size", 0) >= 0.06 * m else kit.get("body_font")
             if f:
                 e["font"] = f
-                e["h"] = text_height(e)
+                fit_text(e)
                 n += 1
     return n
 

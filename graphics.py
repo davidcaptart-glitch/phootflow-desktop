@@ -605,8 +605,11 @@ class ElementItem(QGraphicsItem):
             if corner:
                 k = nw / W0
                 el["size"] = round(e0["size"] * k, 2)
+                if e0.get("fit_h"):  # escalar también el hueco del autoajuste
+                    el["fit_h"] = e0["fit_h"] * k
+                    el["size_max"] = e0.get("size_max", e0["size"]) * k
             el["w"] = nw
-            nh = G.text_height(el)
+            nh = G.fit_text(el)["h"]
             if "n" in h:
                 y0 = y1 - nh
             else:
@@ -1357,6 +1360,7 @@ class GraphicsView(QWidget):
         self.pen_stroke = "#05070F"
         self._building = False
         self._photo_paths: list[str] = []
+        self._closing = False
         self.d = G.design_from_preset("Instagram vertical 4:5")
         self.canvas = Canvas(self)
         self.save_timer = QTimer(self)
@@ -1968,9 +1972,15 @@ class GraphicsView(QWidget):
     def _thumb_loop(self, paths):
         from studio import quick_thumb
         for i, p in enumerate(paths):
-            if paths is not self._photo_paths and paths != self._photo_paths:
+            if self._closing or (paths is not self._photo_paths and paths != self._photo_paths):
                 return
-            self.thumbs_ready.emit(i, quick_thumb(p, 224))
+            data = quick_thumb(p, 224)
+            if self._closing:
+                return
+            try:
+                self.thumbs_ready.emit(i, data)
+            except RuntimeError:  # la vista ya se destruyó (cierre de la app)
+                return
 
     def _on_thumb(self, i, data):
         it = self.photos.item(i)
@@ -2197,9 +2207,15 @@ class GraphicsView(QWidget):
 
     def set_prop(self, el, key, val, refit_text=False):
         el[key] = val
+        if el["type"] == "text" and key == "size" and el.get("fit_h"):
+            el["size_max"] = val  # el tamaño que elige el usuario es el nuevo máximo del autoajuste
         if el["type"] == "text" and (refit_text or key in ("text", "font", "size", "bold", "italic", "line",
                                                            "spacing", "upper", "w", "curve")):
-            el["h"] = G.text_height(el)
+            G.fit_text(el)
+            if key != "size" and getattr(self, "_size_sb", None):
+                self._size_sb.blockSignals(True)
+                self._size_sb.setValue(self._font_pt(el["size"]))
+                self._size_sb.blockSignals(False)
         it = self.items.get(el["id"])
         if it:
             it.sync()
@@ -2527,7 +2543,7 @@ class GraphicsView(QWidget):
                 el["w"] = v / r
         el[k] = v
         if el["type"] == "text" and k == "w":
-            el["h"] = G.text_height(el)
+            G.fit_text(el)
         self.items[el["id"]].sync()
         self.commit(coalesce=f"{el['id']}:geo")
 
@@ -3177,5 +3193,6 @@ class GraphicsView(QWidget):
         self.build_props()
 
     def shutdown(self):
+        self._closing = True  # para el hilo de miniaturas antes de que se destruya la vista
         self.save_timer.stop()
         self.save_now()

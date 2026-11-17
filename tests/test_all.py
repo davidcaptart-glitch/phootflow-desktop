@@ -843,6 +843,30 @@ class Graphics(unittest.TestCase):
             with open(pdf, "rb") as f:
                 self.assertEqual(len(re.findall(rb"/Type\s*/Page[^s]", f.read())), 2)
 
+    def test_templates_fit_long_texts_without_overlap(self):
+        import graphics_engine as G
+        for name in G.TEMPLATES:
+            d = G.design_from_preset(G.TEMPLATE_SIZE[name])
+            G.apply_template(d, name)
+            for pg in d["pages"]:
+                texts = [e for e in pg["elements"] if e["type"] == "text"]
+                self.assertTrue(all(e.get("fit_h") for e in texts), name)
+                # el texto de ejemplo también cabe en su hueco (antes «Nombre del evento» pasaba a dos líneas)
+                self.assertTrue(all(e["h"] <= e["fit_h"] + 0.5 for e in texts), name)
+                for e in texts:
+                    e["text"] = "Celebración del décimo octavo cumpleaños de Mireia y sus amigos " * 2
+                    G.fit_text(e)
+                    self.assertLessEqual(e["h"], e["fit_h"] + 0.5, f"{name}: {e['text'][:10]}")
+                    self.assertLessEqual(e["size"], e["size_max"])
+                texts.sort(key=lambda e: e["y"])
+                for a_, b_ in zip(texts, texts[1:]):
+                    if a_["x"] < b_["x"] + b_["w"] and b_["x"] < a_["x"] + a_["w"]:
+                        self.assertLessEqual(a_["y"] + a_["h"], b_["y"] + 0.5, f"{name}: se solapan")
+                # al volver a un texto corto recupera el tamaño elegido
+                for e in texts:
+                    e["text"] = "Hola"
+                    self.assertEqual(G.fit_text(e)["size"], e["size_max"], name)
+
     def test_snap_align_and_save(self):
         import graphics_engine as G
         d = G.design_from_preset("Instagram cuadrado")
