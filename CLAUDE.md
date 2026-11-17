@@ -39,9 +39,9 @@ python -m unittest discover -s tests   # 36 pruebas, sin fotos reales ni red
   `render(lin, ajustes)`. Ajustes por foto en `<carpeta>/.phootflow/studio/<foto>.json`. Proxy de 2048 px y
   borrador de 1024 px mientras se arrastra. `Shell` (app.py) aloja Events (`Main`) y Studio con el interruptor.
 - `graphics.py` / `graphics_engine.py` — entorno **Graphics** (Canva + Illustrator): diseños JSON en
-  `%APPDATA%\PhootFlow\diseños`, varias páginas, kit de marca (`diseños\marca.json`), plantillas, capas, grupos, imán, texto curvo,
-  pluma y nodos, Buscatrazos, QR, quitar fondo
-  (PNG aparte en `diseñosecortes`), vectorizar (OpenCV) y PDF de imprenta (sangrado, marcas, CMYK simple).
+  `%APPDATA%\PhootFlow\diseños`, varias páginas, kit de marca (`diseños\marca.json`), plantillas, capas,
+  grupos, imán, texto curvo, pluma y nodos, Buscatrazos, QR, quitar fondo
+  (PNG aparte en `diseños\recortes`), vectorizar (OpenCV) y PDF de imprenta (sangrado, marcas, CMYK simple).
   Un solo pintor (`paint_element`) para lienzo y exportación.
 - `luts.py` — LUT .cube por tipo de sesión; `eyes.py` (MediaPipe) y `scene_ai.py` (CLIP, onnxruntime): IA local.
 - `drive.py` — OAuth de escritorio con PKCE y Drive v3 por REST.
