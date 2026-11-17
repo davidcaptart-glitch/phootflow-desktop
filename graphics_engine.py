@@ -73,8 +73,72 @@ def new_design(w: float, h: float, unit: str = "px", name: str = "Diseño sin t�
     if unit == "mm":
         w, h = mm_to_px(w), mm_to_px(h)
     now = time.time()
-    return {"version": 1, "id": new_id(), "name": name, "w": round(float(w), 2), "h": round(float(h), 2),
-            "unit": unit, "dpi": dpi, "bg": bg, "elements": [], "created": now, "modified": now}
+    d = {"version": 1, "id": new_id(), "name": name, "w": round(float(w), 2), "h": round(float(h), 2),
+         "unit": unit, "dpi": dpi, "bg": bg, "elements": [], "created": now, "modified": now}
+    return ensure_pages(d)
+
+
+# ------------------------------------------------------------------ páginas
+# d["pages"] = [{"bg", "elements"}, …]; d["elements"] y d["bg"] son siempre los de la página activa d["page"]
+# (el resto del código trabaja con ellos). `sync_page` vuelve a guardar la activa en la lista.
+
+def ensure_pages(d: dict) -> dict:
+    if not d.get("pages"):
+        d["pages"] = [{"bg": d.get("bg", "#FFFFFF"), "elements": d.get("elements", [])}]
+    d["page"] = i = min(max(int(d.get("page", 0)), 0), len(d["pages"]) - 1)
+    d["elements"] = d["pages"][i]["elements"]
+    d["bg"] = d["pages"][i]["bg"]
+    return d
+
+
+def sync_page(d: dict) -> None:
+    if not d.get("pages"):
+        ensure_pages(d)
+    pg = d["pages"][d.get("page", 0)]
+    pg["elements"] = d["elements"]
+    pg["bg"] = d["bg"]
+
+
+def set_page(d: dict, i: int) -> None:
+    sync_page(d)
+    d["page"] = i
+    ensure_pages(d)
+
+
+def page_views(d: dict) -> list[dict]:
+    """Cada página como un diseño de una sola página (para exportar y miniaturas)."""
+    sync_page(d)
+    return [dict(d, bg=pg["bg"], elements=pg["elements"]) for pg in d["pages"]]
+
+
+def add_page(d: dict, duplicate_current: bool = False) -> int:
+    sync_page(d)
+    if duplicate_current:
+        els = [dict(copy.deepcopy(e), id=new_id()) for e in d["elements"]]
+        pg = {"bg": d["bg"], "elements": els}
+    else:
+        pg = {"bg": d["bg"], "elements": []}
+    d["pages"].insert(d["page"] + 1, pg)
+    set_page(d, d["page"] + 1)
+    return d["page"]
+
+
+def delete_page(d: dict) -> None:
+    sync_page(d)
+    if len(d["pages"]) < 2:
+        return
+    del d["pages"][d["page"]]
+    d["page"] = min(d["page"], len(d["pages"]) - 1)
+    ensure_pages(d)
+
+
+def move_page(d: dict, delta: int) -> None:
+    sync_page(d)
+    i, j = d["page"], d["page"] + delta
+    if 0 <= j < len(d["pages"]):
+        d["pages"][i], d["pages"][j] = d["pages"][j], d["pages"][i]
+        d["page"] = j
+        ensure_pages(d)
 
 
 def design_from_preset(name: str) -> dict:
@@ -377,9 +441,68 @@ TEMPLATE_SIZE = {"Post de evento": "Instagram vertical 4:5", "Invitación": "A5 
                  "Cita": "Instagram cuadrado", "Flyer de servicios": "A5 (flyer)"}
 
 
+def tpl_tarjeta_reverso(d):
+    W, H = d["w"], d["h"]
+    d["bg"] = "#F50D8A"
+    return [_ph(d, (W - H * 0.42) / 2, H * 0.12, H * 0.42, H * 0.42, radius=H * 0.21),
+            _t(d, "TU MARCA", "title", W * 0.1, H * 0.60, W * 0.8, color="#FFFFFF", size=round(H * 0.11, 1),
+               spacing=3.0),
+            _t(d, "Fotografía de eventos", "body", W * 0.1, H * 0.78, W * 0.8, color="#05070F",
+               size=round(H * 0.06, 1))]
+
+
+BACKS = {"Tarjeta de visita": tpl_tarjeta_reverso}
+
+
 def apply_template(d: dict, name: str) -> None:
-    """Sustituye los elementos por los de la plantilla, adaptada al tamaño del diseño."""
+    """Sustituye los elementos de la página por los de la plantilla, adaptada al tamaño del diseño. Si la plantilla
+    tiene reverso (tarjeta de visita) y el diseño solo tiene una página, se añade como segunda."""
+    ensure_pages(d)
     d["elements"] = TEMPLATES[name](d)
+    sync_page(d)
+    if name in BACKS and len(d["pages"]) == 1:
+        tmp = dict(d)
+        els = BACKS[name](tmp)
+        d["pages"].append({"bg": tmp["bg"], "elements": els})
+
+
+# ------------------------------------------------------------------ kit de marca
+
+def brand_path(cfg_dir: str) -> str:
+    return os.path.join(designs_dir(cfg_dir), "marca.json")
+
+
+def load_brand(cfg_dir: str) -> dict:
+    kit = {"colors": [], "title_font": "", "body_font": "", "logos": []}
+    try:
+        with open(brand_path(cfg_dir), encoding="utf-8") as f:
+            kit.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+    kit["logos"] = [q for q in kit["logos"] if os.path.exists(q)]
+    return kit
+
+
+def save_brand(cfg_dir: str, kit: dict) -> None:
+    with open(brand_path(cfg_dir), "w", encoding="utf-8") as f:
+        json.dump(kit, f, ensure_ascii=False, indent=1)
+
+
+def apply_brand(d: dict, kit: dict) -> int:
+    """Pone las fuentes de la marca en todos los textos (títulos: los grandes; el resto, cuerpo). Devuelve cuántos."""
+    n = 0
+    sync_page(d)
+    m = min(d["w"], d["h"])
+    for pg in d["pages"]:
+        for e in pg["elements"]:
+            if e["type"] != "text":
+                continue
+            f = kit.get("title_font") if e.get("size", 0) >= 0.06 * m else kit.get("body_font")
+            if f:
+                e["font"] = f
+                e["h"] = text_height(e)
+                n += 1
+    return n
 
 
 # ------------------------------------------------------------------ guardar / abrir
@@ -391,6 +514,7 @@ def designs_dir(cfg_dir: str) -> str:
 
 
 def save(d: dict, folder: str) -> str:
+    sync_page(d)
     d["modified"] = time.time()
     path = os.path.join(folder, f"{d['id']}.json")
     tmp = path + ".tmp"
@@ -405,7 +529,7 @@ def load(path: str) -> dict:
         d = json.load(f)
     if not isinstance(d, dict) or "elements" not in d or "w" not in d:
         raise ValueError("No es un diseño de PhootFlow")
-    return d
+    return ensure_pages(d)
 
 
 def list_designs(folder: str) -> list[tuple[str, dict]]:
@@ -890,10 +1014,42 @@ def element_qpath(el: dict):
     return element_transform(el).map(p)
 
 
+def _curved_path(el: dict):
+    """Texto en arco (una línea): «curve» = grados del arco; positivo hacia arriba, negativo como una sonrisa.
+    Centrado en la caja y con la parte de arriba en y = 0."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFontMetricsF, QPainterPath, QTransform
+    font = text_font(el)
+    fm = QFontMetricsF(font)
+    txt = " ".join(_text_value(el).split("\n"))
+    total = max(1.0, fm.horizontalAdvance(txt))
+    ang = math.radians(max(-359.0, min(359.0, float(el.get("curve", 0.0)))))
+    R = total / abs(ang)
+    up = ang > 0
+    path = QPainterPath()
+    path.setFillRule(Qt.WindingFill)
+    x = -total / 2
+    for ch in txt:
+        adv = fm.horizontalAdvance(ch)
+        th = (x + adv / 2) / R
+        cp = QPainterPath()
+        cp.addText(-adv / 2, 0, font, ch)
+        if up:   # letras sobre un círculo cuyo centro queda debajo
+            px, py, rot = R * math.sin(th), R - R * math.cos(th), math.degrees(th)
+        else:    # letras colgando de un círculo cuyo centro queda encima
+            px, py, rot = R * math.sin(th), -R + R * math.cos(th), -math.degrees(th)
+        path.addPath(QTransform().translate(px, py).rotate(rot).map(cp))
+        x += adv
+    br = path.boundingRect()
+    return QTransform.fromTranslate(el["w"] / 2 - br.center().x(), -br.top()).map(path)
+
+
 def text_outline(el: dict):
     """Texto → contornos (como «Crear contornos» de Illustrator): la imprenta no necesita la fuente."""
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QPainterPath, QTransform
+    if abs(float(el.get("curve", 0.0))) >= 1:
+        return _curved_path(el)
     p = QPainterPath()
     p.setFillRule(Qt.WindingFill)
     lays, _ = _text_layout(el)
@@ -1088,6 +1244,8 @@ def _text_layout(el, scale=1.0):
 
 def text_height(el: dict) -> float:
     try:
+        if abs(float(el.get("curve", 0.0))) >= 1:
+            return max(1.0, _curved_path(el).boundingRect().height())
         return max(_text_layout(el)[1], el.get("size", 24) * 0.5)
     except Exception:
         return el.get("size", 24) * el.get("line", 1.15) * max(1, el.get("text", "").count("\n") + 1)
@@ -1163,10 +1321,11 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
             p.setBrush(make_brush(el.get("fill"), el.get("grad"), QRectF(0, 0, w, h)))
         p.drawPath(path)
     elif t == "text":
-        lays, _ = _text_layout(el)
+        curved = abs(float(el.get("curve", 0.0))) >= 1
+        lays = [] if curved else _text_layout(el)[0]
         sh = el.get("shadow")
         ow = float(el.get("outline_w", 0.0))
-        if sh or ow > 0:
+        if sh or ow > 0 or curved:
             path = text_outline(el)
             if sh:
                 # sombra dura y desplazada (vectorial: se imprime igual que se ve)
@@ -1182,6 +1341,10 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
             if ow > 0:
                 p.strokePath(path, QPen(qcolor(el.get("outline", "#000000")), ow, Qt.SolidLine, Qt.RoundCap,
                                         Qt.RoundJoin))
+        if curved:
+            p.setPen(Qt.NoPen)
+            p.setBrush(qcolor(el.get("color")))
+            p.drawPath(path)
         p.setPen(qcolor(el.get("color")))
         for lay in lays:
             lay.draw(p, QPointF(0, 0))
@@ -1358,7 +1521,10 @@ def export_pdf(d: dict, path: str, cache: ImageCache, bleed_mm: float = 3.0, mar
     w.setPageLayout(QPageLayout(QPageSize(QSizeF(pw, ph), QPageSize.Millimeter, "", QPageSize.ExactMatch),
                                 QPageLayout.Portrait, QMarginsF(0, 0, 0, 0), QPageLayout.Millimeter))
     p = QPainter(w)
-    _paint_print(p, d, cache, bleed, marks, cmyk, res)
+    for i, pv in enumerate(page_views(d) if d.get("pages") else [d]):
+        if i:
+            w.newPage()
+        _paint_print(p, pv, cache, bleed, marks, cmyk, res)
     p.end()
     return path
 

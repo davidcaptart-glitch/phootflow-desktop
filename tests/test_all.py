@@ -517,6 +517,40 @@ class Graphics(unittest.TestCase):
         G.paint_element(pa, t, G.ImageCache())  # pinta contorno y sombra sin errores
         pa.end()
 
+    def test_pages_curved_text_and_brand(self):
+        import re
+        import graphics_engine as G
+        d = G.design_from_preset("Tarjeta de visita")
+        G.apply_template(d, "Tarjeta de visita")
+        self.assertEqual(len(d["pages"]), 2)  # anverso y reverso
+        front = len(d["elements"])
+        G.add_page(d, duplicate_current=True)
+        self.assertEqual((len(d["pages"]), d["page"], len(d["elements"])), (3, 1, front))
+        self.assertNotEqual(d["elements"][0]["id"], d["pages"][0]["elements"][0]["id"])
+        d["elements"] = []  # el código de la interfaz reasigna la lista: sync_page la guarda en su página
+        d["bg"] = "#123456"
+        G.move_page(d, 1)
+        self.assertEqual((d["page"], d["pages"][2]["bg"], d["pages"][2]["elements"]), (2, "#123456", []))
+        G.delete_page(d)
+        self.assertEqual(len(d["pages"]), 2)
+        t = G.text_el(d, "Fotografía de eventos", "subtitle")
+        flat = t["h"]
+        t["curve"] = 140.0
+        self.assertGreater(G.text_height(t), flat * 1.3)  # el arco ocupa más alto que la línea recta
+        self.assertEqual(G.outline_text_el(t)["type"], "vector")
+        d["elements"].append(t)
+        n = G.apply_brand(d, {"title_font": "Georgia", "body_font": "Arial"})
+        self.assertGreater(n, 3)
+        self.assertEqual(t["font"], "Arial" if t["size"] < 0.06 * min(d["w"], d["h"]) else "Georgia")
+        with tempfile.TemporaryDirectory() as tmp:
+            back = G.load(G.save(d, tmp))
+            self.assertEqual([len(pg["elements"]) for pg in back["pages"]],
+                             [len(pg["elements"]) for pg in d["pages"]])
+            self.assertIs(back["elements"], back["pages"][back["page"]]["elements"])
+            pdf = G.export_pdf(d, os.path.join(tmp, "t.pdf"), G.ImageCache())
+            with open(pdf, "rb") as f:
+                self.assertEqual(len(re.findall(rb"/Type\s*/Page[^s]", f.read())), 2)
+
     def test_snap_align_and_save(self):
         import graphics_engine as G
         d = G.design_from_preset("Instagram cuadrado")

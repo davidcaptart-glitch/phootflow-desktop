@@ -102,6 +102,8 @@ class ColorButton(QPushButton):
         self.allow_none = allow_none
         self.extra = extra or (lambda: [])
         self.setFixedHeight(26)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
         self.clicked.connect(self._menu)
         self.set(value)
@@ -1064,11 +1066,15 @@ class GraphicsView(QWidget):
         mid.setSpacing(0)
         mid.addWidget(self._build_top())
         mid.addWidget(self.canvas, 1)
+        mid.addWidget(self._build_pages())
         h.addLayout(mid, 1)
         h.addWidget(self._build_right())
         self.canvas.sc.selectionChanged.connect(self.on_selection)
         self.thumbs_ready.connect(self._on_thumb)
         self._shortcuts()
+        self.pages_timer = QTimer(self)
+        self.pages_timer.setSingleShot(True)
+        self.pages_timer.timeout.connect(self.refresh_pages)
         self.load_design(self._initial_design())
 
     # ---------------------------------------------------------- construcción
@@ -1192,7 +1198,7 @@ class GraphicsView(QWidget):
                 ev.addWidget(_btn(txt, "", "", cb), r + i // 2, i % 2)
             r += (len(items) + 1) // 2
         ev.setRowStretch(r, 1)
-        tabs.addTab(el, "Elementos")
+        tabs.addTab(el, "Añadir")
 
         # Mis diseños
         md = QWidget()
@@ -1213,7 +1219,8 @@ class GraphicsView(QWidget):
         row.addWidget(_btn("Duplicar", "", "", self.duplicate_design))
         row.addWidget(_btn("Eliminar", "", "", self.delete_design))
         mv.addLayout(row)
-        tabs.addTab(md, "Guardados")
+        tabs.addTab(md, "Míos")
+        tabs.addTab(self._build_brand(), "Marca")
         tabs.currentChanged.connect(lambda i: i == 3 and self.refresh_mine())
         return w
 
@@ -1408,7 +1415,7 @@ class GraphicsView(QWidget):
     def load_design(self, d: dict):
         if self._last:
             self.save_now()
-        self.d = d
+        self.d = G.ensure_pages(d)
         self.undo_st, self.redo_st = [], []
         self._last = json.dumps(d, sort_keys=True)
         self.name.setText(d.get("name", ""))
@@ -1417,6 +1424,7 @@ class GraphicsView(QWidget):
         self.rebuild()
         QTimer.singleShot(0, self.canvas.fit)
         self._update_undo()
+        self.refresh_pages()
 
     def new_design(self, preset: str):
         self.load_design(G.design_from_preset(preset))
@@ -1436,6 +1444,7 @@ class GraphicsView(QWidget):
         G.apply_template(self.d, name)
         self.rebuild()
         self.commit()
+        self.refresh_pages()
 
     def open_path(self, path):
         try:
@@ -1489,7 +1498,7 @@ class GraphicsView(QWidget):
             return  # no llenar «Mis diseños» de diseños vacíos
         try:
             path = G.save(self.d, self.ddir)
-            G.thumbnail(self.d, self.canvas.cache, 220).save(os.path.splitext(path)[0] + ".png")
+            G.thumbnail(G.page_views(self.d)[0], self.canvas.cache, 220).save(os.path.splitext(path)[0] + ".png")
             self.saved_lbl.setText("Guardado")
         except OSError as ex:
             self.saved_lbl.setText(f"No se pudo guardar: {ex}")
@@ -1607,6 +1616,7 @@ class GraphicsView(QWidget):
 
     # ---------------------------------------------------------- historial
     def commit(self, coalesce: str | None = None):
+        G.sync_page(self.d)
         js = json.dumps(self.d, sort_keys=True)
         if js == self._last:
             return
@@ -1621,10 +1631,11 @@ class GraphicsView(QWidget):
         self.save_timer.start(1500)
         self.refresh_layers()
         self._update_undo()
+        self.pages_timer.start(600)
 
     def _restore(self, js):
         sel = [i.el["id"] for i in self.canvas.sc.selectedItems()]
-        self.d = json.loads(js)
+        self.d = G.ensure_pages(json.loads(js))
         self._last = js
         self.name.setText(self.d.get("name", ""))
         self.size_lbl.setText(G.size_label(self.d))
@@ -1632,6 +1643,7 @@ class GraphicsView(QWidget):
         self.rebuild(select=sel)
         self.save_timer.start(1500)
         self._update_undo()
+        self.refresh_pages()
 
     def undo(self):
         if self.undo_st:
@@ -1686,7 +1698,7 @@ class GraphicsView(QWidget):
         return v * self.d["dpi"] / 72 if self._mm() else v
 
     def design_colors(self):
-        cols = [self.d.get("bg", "#FFFFFF")]
+        cols = list(self.brand.get("colors", [])) + [self.d.get("bg", "#FFFFFF")]
         for e in self.d["elements"]:
             for k in ("fill", "stroke", "color"):
                 if e.get(k):
@@ -1710,6 +1722,8 @@ class GraphicsView(QWidget):
         self.props.addWidget(lab)
 
     def _row(self, label, w_):
+        w_.setMinimumWidth(0)
+        w_.setSizePolicy(QSizePolicy.Ignored, w_.sizePolicy().verticalPolicy())
         r = QHBoxLayout()
         lab = QLabel(label)
         lab.setFixedWidth(84)
@@ -1734,7 +1748,7 @@ class GraphicsView(QWidget):
     def set_prop(self, el, key, val, refit_text=False):
         el[key] = val
         if el["type"] == "text" and (refit_text or key in ("text", "font", "size", "bold", "italic", "line",
-                                                           "spacing", "upper", "w")):
+                                                           "spacing", "upper", "w", "curve")):
             el["h"] = G.text_height(el)
         it = self.items.get(el["id"])
         if it:
@@ -1769,6 +1783,8 @@ class GraphicsView(QWidget):
         self._title({"text": "Texto", "image": "Foto", "vector": "Vector", "shape": "Forma"}[t])
         if t == "text":
             self.text_edit = QPlainTextEdit(el.get("text", ""))
+            self.text_edit.setStyleSheet(f"QPlainTextEdit {{ background: #121212; border: 1px solid {T.LINE}; "
+                                         f"border-radius: 3px; color: {T.TEXT_STRONG}; }}")
             self.text_edit.setFixedHeight(80)
             self.text_edit.textChanged.connect(lambda: self.set_prop(el, "text", self.text_edit.toPlainText()))
             self.props.addWidget(self.text_edit)
@@ -1806,6 +1822,12 @@ class GraphicsView(QWidget):
             sp = self._spin(el.get("spacing", 0.0), -5, 40, 1, "", 0.5)
             sp.valueChanged.connect(lambda v: self.set_prop(el, "spacing", v))
             self._row("Espaciado", sp)
+            cv = QSlider(Qt.Horizontal)
+            cv.setRange(-180, 180)
+            cv.setValue(int(el.get("curve", 0)))
+            cv.setToolTip("Texto en arco: a la derecha curva hacia arriba, a la izquierda hacia abajo (0 = recto)")
+            cv.valueChanged.connect(lambda v: self.set_prop(el, "curve", float(v) if abs(v) >= 3 else 0.0))
+            self._row("Curva", cv)
             self._title("Efectos")
             oc = ColorButton(el.get("outline", "#000000"), False, self.design_colors)
             oc.changed.connect(lambda c: self.set_prop(el, "outline", c))
@@ -2037,7 +2059,8 @@ class GraphicsView(QWidget):
         nd = G.design_from_preset(preset)
         s = min(nd["w"] / self.d["w"], nd["h"] / self.d["h"])
         ox, oy = (nd["w"] - self.d["w"] * s) / 2, (nd["h"] - self.d["h"] * s) / 2
-        for e in self.d["elements"]:
+        G.sync_page(self.d)
+        for e in [e for pg in self.d["pages"] for e in pg["elements"]]:
             e["x"], e["y"] = e["x"] * s + ox, e["y"] * s + oy
             e["w"], e["h"] = e["w"] * s, e["h"] * s
             for k in ("size", "stroke_w", "radius"):
@@ -2419,28 +2442,254 @@ class GraphicsView(QWidget):
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            warn = G.image_warnings(self.d, self.canvas.cache) if self._mm() else []
+            views = G.page_views(self.d)
+            warn = [w_ for v in views for w_ in G.image_warnings(v, self.canvas.cache)] if self._mm() else []
+            files = [path]
             if i == 0:
-                d = copy.deepcopy(self.d)
+                d = G.ensure_pages(copy.deepcopy(self.d))
                 if dlg.outline.isChecked():
-                    d["elements"] = [G.outline_text_el(e) if e["type"] == "text" else e for e in d["elements"]]
+                    for pg in d["pages"]:
+                        pg["elements"] = [G.outline_text_el(e) if e["type"] == "text" else e
+                                          for e in pg["elements"]]
+                    G.ensure_pages(d)
                 G.export_pdf(d, path, self.canvas.cache, dlg.bleed.value(), dlg.marks.isChecked(),
                              dlg.cmyk.isChecked())
-            elif i in (1, 2):
-                G.export_raster(self.d, path, self.canvas.cache, float(dlg.scale.currentIndex() + 1),
-                                dlg.quality.value())
             else:
-                G.export_svg(self.d, path, self.canvas.cache)
+                # varias páginas: un archivo por página (nombre-1, nombre-2…)
+                root, ext_ = os.path.splitext(path)
+                files = [path] if len(views) == 1 else [f"{root}-{k + 1}{ext_}" for k in range(len(views))]
+                for v, f in zip(views, files):
+                    if i in (1, 2):
+                        G.export_raster(v, f, self.canvas.cache, float(dlg.scale.currentIndex() + 1),
+                                        dlg.quality.value())
+                    else:
+                        G.export_svg(v, f, self.canvas.cache)
         except Exception as ex:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Exportar", f"No se pudo exportar: {ex}")
             return
         QApplication.restoreOverrideCursor()
-        msg = f"Exportado: {path}"
+        msg = "Exportado:\n" + "\n".join(files)
         if warn:
             msg += "\n\nFotos con poca resolución para imprimir a este tamaño (menos de 200 ppp):\n• " + \
                    "\n• ".join(warn)
         QMessageBox.information(self, "Exportar", msg)
+
+    # ---------------------------------------------------------- páginas
+    def _build_pages(self):
+        w = QFrame()
+        w.setObjectName("filmstrip")
+        w.setFixedHeight(104)
+        h = QHBoxLayout(w)
+        h.setContentsMargins(8, 4, 8, 4)
+        self.pages = QListWidget()
+        self.pages.setViewMode(QListWidget.IconMode)
+        self.pages.setFlow(QListWidget.LeftToRight)
+        self.pages.setWrapping(False)
+        self.pages.setIconSize(QSize(72, 72))
+        self.pages.setGridSize(QSize(86, 92))
+        self.pages.setMovement(QListWidget.Static)
+        self.pages.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.pages.currentRowChanged.connect(self.goto_page)
+        h.addWidget(self.pages, 1)
+        col = QGridLayout()
+        for k, (t, tip, cb) in enumerate((("+ Página", "Página nueva en blanco detrás de esta", lambda: self.page_op("add")),
+                                          ("Duplicar", "Copia de esta página", lambda: self.page_op("dup")),
+                                          ("◀", "Mover antes", lambda: self.page_op("left")),
+                                          ("▶", "Mover después", lambda: self.page_op("right")),
+                                          ("Eliminar", "Eliminar esta página", lambda: self.page_op("del")))):
+            b = _btn(t, "small", tip, cb)
+            col.addWidget(b, k // 2, k % 2)
+        h.addLayout(col)
+        return w
+
+    def refresh_pages(self):
+        if not hasattr(self, "pages"):
+            return
+        self.pages.blockSignals(True)
+        views = G.page_views(self.d)
+        if self.pages.count() != len(views):
+            self.pages.clear()
+            for k in range(len(views)):
+                self.pages.addItem(QListWidgetItem(f"{k + 1}"))
+        for k, v in enumerate(views):
+            self.pages.item(k).setIcon(QIcon(QPixmap.fromImage(G.thumbnail(v, self.canvas.cache, 72))))
+        self.pages.setCurrentRow(self.d.get("page", 0))
+        self.pages.blockSignals(False)
+        self.pages.parentWidget().setVisible(True)
+
+    def goto_page(self, i):
+        if i < 0 or i == self.d.get("page", 0) or i >= len(self.d["pages"]):
+            return
+        G.set_page(self.d, i)
+        self.rebuild(select=[])
+        self.canvas.resetCachedContent()
+        self.canvas.viewport().update()
+
+    def page_op(self, op):
+        if op == "add":
+            G.add_page(self.d)
+        elif op == "dup":
+            G.add_page(self.d, duplicate_current=True)
+        elif op == "left":
+            G.move_page(self.d, -1)
+        elif op == "right":
+            G.move_page(self.d, 1)
+        elif op == "del":
+            if len(self.d["pages"]) < 2 or QMessageBox.question(
+                    self, "Eliminar página", f"¿Eliminar la página {self.d['page'] + 1}? Se puede deshacer.") \
+                    != QMessageBox.Yes:
+                return
+            G.delete_page(self.d)
+        self.rebuild(select=[])
+        self.canvas.viewport().update()
+        self.commit()
+        self.refresh_pages()
+
+    # ---------------------------------------------------------- kit de marca
+    def _build_brand(self):
+        self.brand = G.load_brand(self.cfg_dir)
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(4, 8, 4, 4)
+        t = QLabel("COLORES")
+        t.setObjectName("cardTitle")
+        v.addWidget(t)
+        self.brand_cols = QListWidget()
+        self.brand_cols.setViewMode(QListWidget.IconMode)
+        self.brand_cols.setIconSize(QSize(30, 30))
+        self.brand_cols.setGridSize(QSize(38, 38))
+        self.brand_cols.setMovement(QListWidget.Static)
+        self.brand_cols.setFixedHeight(90)
+        self.brand_cols.setToolTip("Aparecen los primeros en todos los selectores de color · doble clic: aplicar al "
+                                   "elemento seleccionado")
+        self.brand_cols.itemDoubleClicked.connect(lambda it: self.apply_color(it.data(Qt.UserRole)))
+        v.addWidget(self.brand_cols)
+        r = QHBoxLayout()
+        r.addWidget(_btn("Añadir color…", "small", "", self._brand_add_color))
+        r.addWidget(_btn("Quitar", "small", "", self._brand_del_color))
+        v.addLayout(r)
+        t = QLabel("FUENTES")
+        t.setObjectName("cardTitle")
+        v.addWidget(t)
+        self.brand_title = QFontComboBox()
+        self.brand_body = QFontComboBox()
+        for cb, key, lab in ((self.brand_title, "title_font", "Títulos"), (self.brand_body, "body_font", "Texto")):
+            if self.brand.get(key):
+                cb.setCurrentText(self.brand[key])
+            cb.currentFontChanged.connect(lambda f, key=key: self._brand_set(key, f.family()))
+            r = QHBoxLayout()
+            lb = QLabel(lab)
+            lb.setFixedWidth(50)
+            lb.setObjectName("muted")
+            r.addWidget(lb)
+            r.addWidget(cb, 1)
+            v.addLayout(r)
+        v.addWidget(_btn("Aplicar las fuentes a este diseño", "", "Títulos (textos grandes) y texto (el resto), en "
+                                                                  "todas las páginas", self.apply_brand))
+        t = QLabel("LOGOS")
+        t.setObjectName("cardTitle")
+        v.addWidget(t)
+        self.brand_logos = PhotoList()
+        self.brand_logos.setViewMode(QListWidget.IconMode)
+        self.brand_logos.setIconSize(QSize(100, 70))
+        self.brand_logos.setGridSize(QSize(112, 84))
+        self.brand_logos.setResizeMode(QListWidget.Adjust)
+        self.brand_logos.setMovement(QListWidget.Static)
+        self.brand_logos.setDragEnabled(True)
+        self.brand_logos.setToolTip("Arrastra al lienzo o doble clic para añadir")
+        self.brand_logos.itemDoubleClicked.connect(lambda it: self.place_photo(it.data(Qt.UserRole)))
+        v.addWidget(self.brand_logos, 1)
+        r = QHBoxLayout()
+        r.addWidget(_btn("Añadir logo…", "small", "PNG con transparencia, JPG o el recorte de «Quitar fondo»",
+                         self._brand_add_logo))
+        r.addWidget(_btn("Quitar", "small", "", self._brand_del_logo))
+        v.addLayout(r)
+        self._brand_refresh()
+        return w
+
+    def _brand_refresh(self):
+        self.brand_cols.clear()
+        for c in self.brand["colors"]:
+            it = QListWidgetItem(_swatch_icon(c, 30), "")
+            it.setData(Qt.UserRole, c)
+            it.setToolTip(c)
+            self.brand_cols.addItem(it)
+        self.brand_logos.clear()
+        for path in self.brand["logos"]:
+            it = QListWidgetItem(QIcon(path), "")
+            it.setData(Qt.UserRole, path)
+            it.setToolTip(os.path.basename(path))
+            self.brand_logos.addItem(it)
+
+    def _brand_save(self):
+        try:
+            G.save_brand(self.cfg_dir, self.brand)
+        except OSError as ex:
+            QMessageBox.warning(self, "Marca", f"No se pudo guardar: {ex}")
+        self._brand_refresh()
+
+    def _brand_set(self, key, val):
+        self.brand[key] = val
+        self._brand_save()
+
+    def _brand_add_color(self):
+        c = QColorDialog.getColor(QColor(T.ACCENT), self, "Color de la marca")
+        if c.isValid():
+            col = c.name(QColor.HexRgb).upper()
+            if col not in self.brand["colors"]:
+                self.brand["colors"].append(col)
+                self._brand_save()
+
+    def _brand_del_color(self):
+        it = self.brand_cols.currentItem()
+        if it:
+            self.brand["colors"].remove(it.data(Qt.UserRole))
+            self._brand_save()
+
+    def _brand_add_logo(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Logo", self.folder, "Imágenes (*.png *.jpg *.jpeg *.svg *.tif)")
+        if path and path not in self.brand["logos"]:
+            self.brand["logos"].append(path)
+            self._brand_save()
+
+    def _brand_del_logo(self):
+        it = self.brand_logos.currentItem()
+        if it:
+            self.brand["logos"].remove(it.data(Qt.UserRole))
+            self._brand_save()
+
+    def apply_brand(self):
+        if not (self.brand.get("title_font") or self.brand.get("body_font")):
+            QMessageBox.information(self, "Marca", "Elige primero las fuentes de la marca.")
+            return
+        n = G.apply_brand(self.d, self.brand)
+        G.ensure_pages(self.d)
+        self.rebuild()
+        self.commit()
+        self.saved_lbl.setText(f"Fuentes de marca en {n} textos")
+
+    def apply_color(self, col):
+        """Doble clic en un color de la marca: al elemento seleccionado (texto, forma o vector) o al fondo."""
+        sel = self.selected()
+        if not sel:
+            self.d["bg"] = col
+            self.canvas.resetCachedContent()
+            self.canvas.viewport().update()
+            self.commit()
+            return
+        for e in sel:
+            if e["type"] == "text":
+                e["color"] = col
+            elif e["type"] == "shape":
+                e.pop("grad", None)
+                e["fill" if e.get("shape") != "line" else "stroke"] = col
+            elif e["type"] == "vector":
+                for sp in e["paths"][-1:]:
+                    sp["fill"] = col
+            self.items[e["id"]].update()
+        self.commit()
+        self.build_props()
 
     def shutdown(self):
         self.save_timer.stop()
