@@ -357,15 +357,31 @@ def _fmt_time(sec: float) -> str:
 
 # ------------------------------------------------------------------ piezas de interfaz
 
-def card(title: str) -> tuple[QFrame, QVBoxLayout]:
+def card(title: str, open_: bool = True) -> tuple[QFrame, QVBoxLayout]:
+    """Panel plegable con cabecera, como los paneles de Lightroom (Biblioteca) y Capture One."""
     f = QFrame()
     f.setObjectName("card")
-    v = QVBoxLayout(f)
-    v.setContentsMargins(14, 12, 14, 14)
-    v.setSpacing(8)
-    t = QLabel(title.upper())
-    t.setObjectName("cardTitle")
-    v.addWidget(t)
+    outer = QVBoxLayout(f)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setSpacing(0)
+    head = QPushButton()
+    head.setObjectName("section")
+    head.setCheckable(True)
+    head.setChecked(open_)
+    head.setCursor(Qt.PointingHandCursor)
+    body = QWidget()
+    v = QVBoxLayout(body)
+    v.setContentsMargins(12, 8, 12, 12)
+    v.setSpacing(7)
+    body.setVisible(open_)
+
+    def label(on):
+        head.setText(("\u25be   " if on else "\u25b8   ") + title)
+
+    label(open_)
+    head.toggled.connect(lambda on: (body.setVisible(on), label(on)))
+    outer.addWidget(head)
+    outer.addWidget(body)
     return f, v
 
 
@@ -445,8 +461,8 @@ class ThumbDelegate(QStyledItemDelegate):
         sel = bool(option.state & QStyle.State_Selected)
         hover = bool(option.state & QStyle.State_MouseOver)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(T.SURFACE_2))
-        p.drawRoundedRect(r, 10, 10)
+        p.setBrush(QColor("#262626"))
+        p.drawRoundedRect(r, 3, 3)
         img = r.adjusted(6, 6, -6, -30)
         pm = self.win.thumb_pixmap(ph)
         if pm:
@@ -500,7 +516,7 @@ class ThumbDelegate(QStyledItemDelegate):
         if sel or hover:
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QColor(T.ACCENT if sel else "#3A4163"), 2))
-            p.drawRoundedRect(QRectF(r).adjusted(1, 1, -1, -1), 10, 10)
+            p.drawRoundedRect(QRectF(r).adjusted(1, 1, -1, -1), 3, 3)
         p.restore()
 
 
@@ -628,8 +644,8 @@ class Main(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         inner = QWidget()
         v = QVBoxLayout(inner)
-        v.setContentsMargins(14, 6, 14, 14)
-        v.setSpacing(12)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
         scroll.setWidget(inner)
         outer.addWidget(scroll, 1)
 
@@ -1165,6 +1181,8 @@ class Main(QMainWindow):
         def job():
             ensure_extras()
             E.setup_eyes(model_dir)
+            import masks as M
+            M.configure(model_dir)
             E.setup_scene_ai(model_dir, prog)
             bits = ["ojos cerrados" if E.EYES["ready"] else "", "tipo de evento" if E.AI["ready"] else ""]
             bits = [b for b in bits if b]
@@ -1647,43 +1665,41 @@ class Shell(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
+        # cabecera como la placa de identidad + selector de módulos de Lightroom
         head = QFrame()
-        head.setObjectName("sidebar")
-        head.setFixedHeight(56)
+        head.setObjectName("topbar")
+        head.setFixedHeight(48)
         hh = QHBoxLayout(head)
-        hh.setContentsMargins(18, 8, 18, 8)
+        hh.setContentsMargins(16, 6, 18, 6)
         mark = QLabel()
-        mark.setPixmap(QPixmap(E.asset("mark.png")).scaledToHeight(30, Qt.SmoothTransformation))
+        mark.setPixmap(QPixmap(E.asset("mark.png")).scaledToHeight(24, Qt.SmoothTransformation))
         word = QLabel()
-        word.setPixmap(QPixmap(E.asset("wordmark.png")).scaledToHeight(18, Qt.SmoothTransformation))
+        word.setPixmap(QPixmap(E.asset("wordmark.png")).scaledToHeight(15, Qt.SmoothTransformation))
         hh.addWidget(mark)
         hh.addSpacing(8)
         hh.addWidget(word)
-        hh.addSpacing(28)
-        seg = QFrame()
-        seg.setObjectName("segBar")
-        sh = QHBoxLayout(seg)
-        sh.setContentsMargins(3, 3, 3, 3)
-        sh.setSpacing(2)
-        self.env_btn = {}
-        group = QButtonGroup(self)
-        for key, text, tip in ((ENV_EVENTS, "Events", "Edición automática de sesiones completas"),
-                               (ENV_STUDIO, "Studio", "Edición foto a foto, como Lightroom")):
-            b = button(text, "seg", tip)
-            b.setCheckable(True)
-            b.setMinimumWidth(96)
-            b.clicked.connect(lambda _, k=key: self.switch(k))
-            group.addButton(b)
-            sh.addWidget(b)
-            self.env_btn[key] = b
-        hh.addWidget(seg)
+        hh.addSpacing(22)
         self.folder_lbl = QLabel("")
-        self.folder_lbl.setObjectName("muted")
-        hh.addSpacing(16)
+        self.folder_lbl.setObjectName("meta")
         hh.addWidget(self.folder_lbl, 1)
-        b_open = button("Abrir carpeta…", "primary", "Elige la sesión y en qué entorno trabajarla (Ctrl+O)")
+        b_open = button("Abrir carpeta…", "ghost", "Elige la sesión y en qué entorno trabajarla (Ctrl+O)")
         b_open.clicked.connect(self.open_folder)
         hh.addWidget(b_open)
+        hh.addSpacing(18)
+        self.env_btn = {}
+        group = QButtonGroup(self)
+        for i, (key, text, tip) in enumerate(((ENV_EVENTS, "Events", "Edición automática de sesiones completas (Ctrl+Tab)"),
+                                              (ENV_STUDIO, "Studio", "Edición foto a foto, como Lightroom (Ctrl+Tab)"))):
+            if i:
+                sep = QLabel("|")
+                sep.setObjectName("moduleSep")
+                hh.addWidget(sep)
+            b = button(text, "module", tip)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _, k=key: self.switch(k))
+            group.addButton(b)
+            hh.addWidget(b)
+            self.env_btn[key] = b
         v.addWidget(head)
 
         from PySide6.QtWidgets import QStackedWidget
@@ -1754,7 +1770,9 @@ class Shell(QMainWindow):
             ph.keep, ph.reviewed, ph.reason = True, True, ""
         self.switch(ENV_EVENTS)
         photos = [p for p in self.events.photos if p.thumb and not p.error]
-        self.events.open_review(photos.index(ph) if ph in photos else 0)
+        i = photos.index(ph) if ph in photos else 0
+        # si se aprobó, se sigue con la siguiente; si se volvió sin cambios, se queda en esa
+        self.events.open_review(min(i + 1, len(photos) - 1) if use else i)
 
     def closeEvent(self, e):
         self.events.closeEvent(e)

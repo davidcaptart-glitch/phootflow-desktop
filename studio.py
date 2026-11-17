@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QByteArray, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QMenu,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
                                QSlider, QSpinBox, QStyle, QStyledItemDelegate, QTabWidget, QToolButton, QVBoxLayout,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 import engine as E
 import luts as L
 import studio_engine as SE
+import masks as M
 import theme as T
 
 DRAFT_PX, FULL_PX = 860, 1600
@@ -83,7 +84,7 @@ class FilmDelegate(QStyledItemDelegate):
         self.view = view
 
     def sizeHint(self, *_):
-        return QSize(210, 150)
+        return QSize(126, 96)
 
     def paint(self, p: QPainter, opt, idx):
         it: Item = self.view.items[idx.data(ROLE)]
@@ -95,7 +96,7 @@ class FilmDelegate(QStyledItemDelegate):
         p.setBrush(QColor(T.SURFACE_2))
         p.drawRoundedRect(r, 8, 8)
         pm = self.view.thumb_pm(it)
-        img = r.adjusted(5, 5, -5, -24)
+        img = r.adjusted(3, 3, -3, -18)
         if pm:
             s = pm.size().scaled(img.size(), Qt.KeepAspectRatio)
             tr = QRectF(img.x() + (img.width() - s.width()) / 2, img.y() + (img.height() - s.height()) / 2,
@@ -108,7 +109,7 @@ class FilmDelegate(QStyledItemDelegate):
         f = QFont(p.font())
         f.setPointSizeF(8)
         p.setFont(f)
-        foot = r.adjusted(8, r.height() - 22, -8, -4)
+        foot = r.adjusted(5, r.height() - 17, -5, -2)
         p.setPen(QColor(T.MUTED))
         p.drawText(foot, Qt.AlignLeft | Qt.AlignVCenter, it.name)
         stars = "★" * int(st.get("rating", 0))
@@ -125,7 +126,7 @@ class FilmDelegate(QStyledItemDelegate):
         if sel:
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QColor(T.ACCENT), 2))
-            p.drawRoundedRect(QRectF(r).adjusted(1, 1, -1, -1), 8, 8)
+            p.drawRoundedRect(QRectF(r).adjusted(1, 1, -1, -1), 3, 3)
         p.restore()
 
 
@@ -139,6 +140,31 @@ class Canvas(QWidget):
         self.pm = self.before = None
         self.show_before = False
         self.msg = "Abre una carpeta y elige una foto"
+        self.img_rect = QRectF()
+        self.on_mouse = None  # callback(evento, x, y) con x, y en 0..1 sobre la foto mostrada
+        self.setMouseTracking(True)
+
+    def _norm(self, e):
+        r = self.img_rect
+        if r.width() <= 0:
+            return None
+        p = e.position()
+        return (min(1, max(0, (p.x() - r.x()) / r.width())), min(1, max(0, (p.y() - r.y()) / r.height())))
+
+    def mousePressEvent(self, e):
+        n = self._norm(e)
+        if n and self.on_mouse:
+            self.on_mouse("press", *n, e.button() == Qt.RightButton)
+
+    def mouseMoveEvent(self, e):
+        n = self._norm(e)
+        if n and self.on_mouse and e.buttons():
+            self.on_mouse("move", *n, bool(e.buttons() & Qt.RightButton))
+
+    def mouseReleaseEvent(self, e):
+        n = self._norm(e)
+        if n and self.on_mouse:
+            self.on_mouse("release", *n, e.button() == Qt.RightButton)
 
     def set(self, pm=None, before=None, msg=""):
         if pm is not None:
@@ -162,6 +188,7 @@ class Canvas(QWidget):
         r = QRectF(area.x() + (area.width() - s.width()) / 2, area.y() + (area.height() - s.height()) / 2,
                    s.width(), s.height())
         p.drawPixmap(r.toRect(), pm)
+        self.img_rect = r
         if self.show_before:
             p.setPen(QColor(T.TEXT))
             p.fillRect(QRectF(r.x() + 8, r.y() + 8, 70, 22), QColor(5, 7, 15, 180))
@@ -213,11 +240,12 @@ class SliderRow(QWidget):
         self.key, self.neutral, self.step = key, neutral, step
         self.k = int(round(1 / step)) if step < 1 else 1
         g = QGridLayout(self)
-        g.setContentsMargins(0, 0, 0, 0)
+        g.setContentsMargins(0, 1, 0, 1)
         g.setHorizontalSpacing(8)
         g.setVerticalSpacing(0)
         self.lab = QLabel(label)
-        self.lab.setObjectName("muted")
+        self.lab.setFixedWidth(96)
+        self.lab.setStyleSheet(f"color: {T.MUTED};")
         self.lab.setToolTip("Doble clic para restablecer")
         self.lab.mouseDoubleClickEvent = lambda e: self.set_value(self.neutral, emit=True)
         self.sl = QSlider(Qt.Horizontal)
@@ -227,13 +255,15 @@ class SliderRow(QWidget):
         self.lo, self.hi = lo, hi
         self.dec = 0 if step >= 1 else (2 if step < 0.1 else 1)
         self.val = QLineEdit()
-        self.val.setFixedWidth(58)
+        self.val.setFixedWidth(44)
         self.val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.val.setStyleSheet("QLineEdit { padding: 2px 6px; }")
-        self.sl.setStyleSheet("QSlider::sub-page:horizontal { background: " + T.SURFACE_3 + "; }")
+        self.val.setStyleSheet("QLineEdit { padding: 1px 3px; background: transparent; border: none; }"
+                               "QLineEdit:focus { background: #121212; border: 1px solid #555; }")
+        self.sl.setStyleSheet(T.slider_qss(key))
         g.addWidget(self.lab, 0, 0)
-        g.addWidget(self.val, 0, 1, Qt.AlignRight)
-        g.addWidget(self.sl, 1, 0, 1, 2)
+        g.addWidget(self.sl, 0, 1)
+        g.addWidget(self.val, 0, 2)
+        g.setColumnStretch(1, 1)
         self.sl.valueChanged.connect(self._from_slider)
         self.sl.sliderReleased.connect(lambda: self.changed.emit(self.key, self.value(), True))
         self.val.editingFinished.connect(self._from_text)
@@ -269,29 +299,32 @@ class SliderRow(QWidget):
 
 
 class Section(QWidget):
-    """Panel plegable como los de Lightroom."""
+    """Panel plegable como los de Lightroom / Capture One: cabecera con título y triángulo."""
 
     def __init__(self, title, open_=True):
         super().__init__()
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(6)
+        v.setSpacing(0)
+        self.title = title
         self.head = QPushButton()
-        self.head.setText(("▾  " if open_ else "▸  ") + title.upper())
+        self.head.setObjectName("section")
         self.head.setCheckable(True)
         self.head.setChecked(open_)
-        self.head.setStyleSheet(f"QPushButton {{ border: none; color: {T.MUTED}; font-weight: 600; "
-                                f"font-size: 8.5pt; text-align: left; padding: 6px 0; background: transparent; }}")
+        self.head.setCursor(Qt.PointingHandCursor)
         self.head.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.body = QWidget()
         self.lay = QVBoxLayout(self.body)
-        self.lay.setContentsMargins(0, 0, 0, 6)
-        self.lay.setSpacing(8)
+        self.lay.setContentsMargins(10, 8, 8, 10)
+        self.lay.setSpacing(5)
         self.body.setVisible(open_)
-        self.head.toggled.connect(lambda on: (self.body.setVisible(on),
-                                              self.head.setText(("▾  " if on else "▸  ") + title.upper())))
+        self._label(open_)
+        self.head.toggled.connect(lambda on: (self.body.setVisible(on), self._label(on)))
         v.addWidget(self.head)
         v.addWidget(self.body)
+
+    def _label(self, on):
+        self.head.setText(("▾   " if on else "▸   ") + self.title)
 
 
 # ------------------------------------------------------------------ vista Studio
@@ -315,6 +348,9 @@ class StudioView(QWidget):
         self._req = 0
         self._jobs: queue.Queue = queue.Queue()
         threading.Thread(target=self._render_loop, daemon=True).start()
+        self.mask_i: int | None = None      # máscara seleccionada
+        self.mask_show = False              # superponer la máscara seleccionada
+        self._drag = None
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self._save_cur)
@@ -322,11 +358,17 @@ class StudioView(QWidget):
         self._full_timer.setSingleShot(True)
         self._full_timer.timeout.connect(lambda: self.request(draft=False))
 
+        self._last_label = ""
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(0)
-        h.addWidget(self._build_library())
-        h.addWidget(self._build_center(), 1)
+        h.addWidget(self._build_left())
+        mid = QVBoxLayout()
+        mid.setContentsMargins(0, 0, 0, 0)
+        mid.setSpacing(0)
+        mid.addWidget(self._build_center(), 1)
+        mid.addWidget(self._build_filmstrip())
+        h.addLayout(mid, 1)
         h.addWidget(self._build_develop())
 
         self.rendered.connect(self._on_rendered)
@@ -342,70 +384,103 @@ class StudioView(QWidget):
             QShortcut(QKeySequence(str(n)), self, lambda n=n: self.set_rating(n))
 
     # ---------------------------------------------------------- construcción
-    def _build_library(self):
+    def _build_left(self):
+        """Panel izquierdo (Lightroom): Navegador, Presets e Historial."""
         w = QFrame()
         w.setObjectName("sidebar")
-        w.setFixedWidth(240)
+        w.setFixedWidth(250)
         v = QVBoxLayout(w)
-        v.setContentsMargins(12, 12, 12, 12)
-        v.setSpacing(8)
-        t = QLabel("BIBLIOTECA")
-        t.setObjectName("cardTitle")
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        nav = Section("Navegador")
+        self.nav = QLabel()
+        self.nav.setAlignment(Qt.AlignCenter)
+        self.nav.setMinimumHeight(150)
+        self.nav.setStyleSheet(f"background: {T.BG};")
+        self.nav_info = QLabel("")
+        self.nav_info.setObjectName("meta")
+        self.nav_info.setWordWrap(True)
+        nav.lay.addWidget(self.nav)
+        nav.lay.addWidget(self.nav_info)
+        v.addWidget(nav)
+        pre = Section("Presets")
+        row = QHBoxLayout()
+        self.preset_search = QComboBox()
+        self.preset_search.addItems(["Todos", "Mis presets", "LightCraft"])
+        self.preset_search.currentIndexChanged.connect(self.reload_presets)
+        b_save = _btn("＋", "small", "Guardar los ajustes actuales como preset")
+        b_save.setFixedWidth(30)
+        b_save.clicked.connect(self.save_preset)
+        row.addWidget(self.preset_search, 1)
+        row.addWidget(b_save)
+        pre.lay.addLayout(row)
+        self.preset_list = QListWidget()
+        self.preset_list.setObjectName("list")
+        self.preset_list.setMouseTracking(True)
+        self.preset_list.setToolTip("Pasa el ratón para ver cómo queda; clic para aplicarlo")
+        self.preset_list.itemEntered.connect(self._preview_preset)
+        self.preset_list.itemClicked.connect(lambda it: self.apply_preset_data(it.data(ROLE)))
+        self.preset_list.leaveEvent = lambda e: self.request(draft=False)
+        pre.lay.addWidget(self.preset_list)
+        v.addWidget(pre, 1)
+        his = Section("Historial")
+        self.hist_list = QListWidget()
+        self.hist_list.setObjectName("list")
+        self.hist_list.setMaximumHeight(190)
+        self.hist_list.itemClicked.connect(self._history_jump)
+        his.lay.addWidget(self.hist_list)
+        v.addWidget(his)
+        self.preset_cb = QComboBox()  # compatibilidad: algunos atajos aplican por índice
+        self.preset_cb.hide()
+        return w
+
+    def _build_filmstrip(self):
+        """Tira de fotos inferior (Lightroom), con filtro y contador."""
+        w = QFrame()
+        w.setObjectName("filmstrip")
+        w.setFixedHeight(142)
+        v = QVBoxLayout(w)
+        v.setContentsMargins(10, 4, 10, 4)
+        v.setSpacing(2)
+        top = QHBoxLayout()
         self.lib_info = QLabel("Sin carpeta")
-        self.lib_info.setObjectName("muted")
-        self.lib_info.setWordWrap(True)
+        self.lib_info.setObjectName("meta")
         self.filter = QComboBox()
         self.filter.addItems(["Todas", "Elegidas (P)", "Sin rechazadas", "Con 3★ o más", "Editadas"])
+        self.filter.setFixedWidth(150)
         self.filter.currentIndexChanged.connect(self.apply_filter)
+        top.addWidget(self.lib_info, 1)
+        flt = QLabel("Filtro")
+        flt.setObjectName("meta")
+        top.addWidget(flt)
+        top.addWidget(self.filter)
+        v.addLayout(top)
         self.film = QListWidget()
         self.film.setObjectName("grid")
+        self.film.setStyleSheet("QListWidget#grid { background: #111111; }")
         self.film.setViewMode(QListView.IconMode)
         self.film.setFlow(QListView.LeftToRight)
-        self.film.setWrapping(True)
-        self.film.setResizeMode(QListView.Adjust)
+        self.film.setWrapping(False)
         self.film.setUniformItemSizes(True)
+        self.film.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.film.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.film.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.film.setItemDelegate(FilmDelegate(self))
         self.film.currentRowChanged.connect(self.select)
-        v.addWidget(t)
-        v.addWidget(self.lib_info)
-        v.addWidget(self.filter)
         v.addWidget(self.film, 1)
         return w
 
     def _build_center(self):
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(12, 10, 12, 10)
-        v.setSpacing(8)
-        bar = QHBoxLayout()
-        self.title = QLabel("Studio")
-        self.title.setObjectName("h1")
-        bar.addWidget(self.title, 1)
-        self.b_before = _btn("Antes / después", "ghost", "Atajo: \\")
-        self.b_before.setCheckable(True)
-        self.b_before.toggled.connect(self._set_before)
-        self.b_auto = _btn("Auto", "ghost", "Ajuste automático (exposición en caras, giro, recorte)")
-        self.b_reset = _btn("Restablecer", "ghost")
-        self.b_copy = _btn("Copiar", "ghost", "Copiar ajustes (Ctrl+Mayús+C)")
-        self.b_paste = _btn("Pegar", "ghost", "Pegar ajustes en las seleccionadas (Ctrl+Mayús+V)")
-        self.b_sync = _btn("Sincronizar", "ghost", "Aplicar los ajustes de esta foto a todas las seleccionadas")
-        self.b_export = _btn("Exportar…", "primary", "Ctrl+E")
-        self.b_auto.clicked.connect(self.auto)
-        self.b_reset.clicked.connect(self.reset)
-        self.b_copy.clicked.connect(self.copy_settings)
-        self.b_paste.clicked.connect(self.paste_settings)
-        self.b_sync.clicked.connect(self.sync_selected)
-        self.b_export.clicked.connect(self.export_dialog)
-        for b in (self.b_before, self.b_auto, self.b_reset, self.b_copy, self.b_paste, self.b_sync, self.b_export):
-            bar.addWidget(b)
-        v.addLayout(bar)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
         self.banner = QFrame()
         self.banner.setObjectName("banner")
         bh = QHBoxLayout(self.banner)
         bh.setContentsMargins(12, 6, 6, 6)
         self.banner_txt = QLabel("")
-        self.b_use = _btn("Usar en Events y volver", "primary")
+        self.b_use = _btn("Aprobar y volver a Events", "primary")
         self.b_back = _btn("Volver sin cambios", "ghost")
         bh.addWidget(self.banner_txt, 1)
         bh.addWidget(self.b_back)
@@ -414,108 +489,414 @@ class StudioView(QWidget):
         self.b_use.clicked.connect(lambda: self._finish_events(True))
         self.b_back.clicked.connect(lambda: self._finish_events(False))
         self._events_cb = None
-        v.addWidget(self.banner)
+        bw = QWidget()
+        bl = QVBoxLayout(bw)
+        bl.setContentsMargins(10, 8, 10, 0)
+        bl.addWidget(self.banner)
+        v.addWidget(bw)
         self.canvas = Canvas()
+        self.canvas.on_mouse = self._canvas_mouse
         v.addWidget(self.canvas, 1)
-        foot = QHBoxLayout()
+        # barra de herramientas bajo la foto (Lightroom): vista, valoración, marcas y acciones
+        bar = QFrame()
+        bar.setObjectName("toolbar")
+        bar.setFixedHeight(42)
+        hb = QHBoxLayout(bar)
+        hb.setContentsMargins(10, 4, 10, 4)
+        hb.setSpacing(6)
+        self.b_before = _btn("Y|Y", "flat", "Antes / después (\\)")
+        self.b_before.setCheckable(True)
+        self.b_before.toggled.connect(self._set_before)
+        hb.addWidget(self.b_before)
+        hb.addSpacing(8)
         self.stars = []
         for n in range(1, 6):
             b = QToolButton()
             b.setText("☆")
-            b.setStyleSheet(f"QToolButton {{ border: none; font-size: 15pt; color: {T.WARN}; background: transparent; }}")
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(f"QToolButton {{ border: none; font-size: 12pt; color: {T.MUTED}; background: transparent; }}"
+                            f"QToolButton:hover {{ color: {T.TEXT_STRONG}; }}")
             b.clicked.connect(lambda _, n=n: self.set_rating(0 if self._rating() == n else n))
             self.stars.append(b)
-            foot.addWidget(b)
+            hb.addWidget(b)
+        hb.addSpacing(8)
+        self.b_pick = _btn("⚑", "flat", "Elegida (P)")
+        self.b_rej = _btn("✕", "flat", "Rechazada (X)")
+        self.b_pick.clicked.connect(lambda: self.set_flag(0 if self._flag() == 1 else 1))
+        self.b_rej.clicked.connect(lambda: self.set_flag(0 if self._flag() == -1 else -1))
+        hb.addWidget(self.b_pick)
+        hb.addWidget(self.b_rej)
         self.flag_lbl = QLabel("")
-        self.flag_lbl.setObjectName("muted")
-        foot.addSpacing(12)
-        foot.addWidget(self.flag_lbl)
-        foot.addStretch(1)
+        self.flag_lbl.setObjectName("meta")
+        hb.addWidget(self.flag_lbl)
+        self.title = QLabel("Studio")
+        self.title.setObjectName("meta")
+        hb.addSpacing(10)
+        hb.addWidget(self.title, 1)
         self.pb = QProgressBar()
         self.pb.setTextVisible(False)
-        self.pb.setFixedWidth(220)
+        self.pb.setFixedWidth(160)
         self.pb.hide()
         self.status = QLabel("")
-        self.status.setObjectName("muted")
-        foot.addWidget(self.status)
-        foot.addWidget(self.pb)
-        v.addLayout(foot)
+        self.status.setObjectName("meta")
+        hb.addWidget(self.status)
+        hb.addWidget(self.pb)
+        self.b_auto = _btn("Auto", "ghost", "Ajuste automático (exposición en caras, giro, recorte)")
+        self.b_copy = _btn("Copiar", "ghost", "Copiar ajustes (Ctrl+Mayús+C)")
+        self.b_paste = _btn("Pegar", "ghost", "Pegar ajustes en las seleccionadas (Ctrl+Mayús+V)")
+        self.b_sync = _btn("Sincronizar…", "ghost", "Aplicar los ajustes de esta foto a todas las seleccionadas")
+        self.b_reset = _btn("Restablecer", "ghost")
+        self.b_export = _btn("Exportar…", "primary", "Ctrl+E")
+        self.b_auto.clicked.connect(self.auto)
+        self.b_reset.clicked.connect(self.reset)
+        self.b_copy.clicked.connect(self.copy_settings)
+        self.b_paste.clicked.connect(self.paste_settings)
+        self.b_sync.clicked.connect(self.sync_selected)
+        self.b_export.clicked.connect(self.export_dialog)
+        for b in (self.b_auto, self.b_copy, self.b_paste, self.b_sync, self.b_reset, self.b_export):
+            hb.addWidget(b)
+        v.addWidget(bar)
         return w
 
     def _build_develop(self):
+        """Panel derecho: histograma + pestañas de herramientas a la derecha (Capture One)."""
+        from PySide6.QtWidgets import QButtonGroup, QStackedWidget
         outer = QFrame()
         outer.setObjectName("previewPane")
-        outer.setFixedWidth(340)
-        ov = QVBoxLayout(outer)
-        ov.setContentsMargins(12, 12, 6, 12)
-        ov.setSpacing(8)
+        outer.setFixedWidth(372)
+        oh = QHBoxLayout(outer)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.setSpacing(0)
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        top = QWidget()
+        tv = QVBoxLayout(top)
+        tv.setContentsMargins(10, 10, 10, 6)
+        tv.setSpacing(4)
         self.hist = Histogram()
-        ov.addWidget(self.hist)
-        row = QHBoxLayout()
-        self.preset_cb = QComboBox()
-        self.preset_cb.setToolTip("Presets de Studio guardados por ti")
-        self.preset_cb.activated.connect(self.apply_preset)
-        b_save = _btn("Guardar", "small", "Guardar los ajustes actuales como preset")
-        b_save.clicked.connect(self.save_preset)
-        row.addWidget(self.preset_cb, 1)
-        row.addWidget(b_save)
-        ov.addLayout(row)
-        row = QHBoxLayout()
-        self.lut_cb = QComboBox()
-        self.lut_cb.setToolTip("LUT (.cube) de todos los tipos de sesión")
-        self.lut_cb.activated.connect(lambda _: self._set("lut", self.lut_cb.currentData() or "", True))
-        self.bw_cb = QCheckBox("B/N")
-        self.bw_cb.toggled.connect(lambda on: (self._set("bw", on, True), self.bw_style.setEnabled(on)))
-        row.addWidget(self.lut_cb, 1)
-        row.addWidget(self.bw_cb)
-        ov.addLayout(row)
-        self.bw_style = QComboBox()
-        self.bw_style.addItems(list(E.BW_STYLES))
-        self.bw_style.setToolTip("Estilo de blanco y negro")
-        self.bw_style.activated.connect(lambda _: self._set("bw_style", self.bw_style.currentText(), True))
-        ov.addWidget(self.bw_style)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        body = QWidget()
-        bv = QVBoxLayout(body)
-        bv.setContentsMargins(0, 0, 8, 0)
-        bv.setSpacing(4)
+        self.exif = QLabel("")
+        self.exif.setObjectName("meta")
+        self.exif.setAlignment(Qt.AlignCenter)
+        tv.addWidget(self.hist)
+        tv.addWidget(self.exif)
+        col.addWidget(top)
+        self.pages = QStackedWidget()
+        col.addWidget(self.pages, 1)
+        oh.addLayout(col, 1)
+        tabs = QFrame()
+        tabs.setObjectName("tooltabs")
+        tabs.setFixedWidth(40)
+        tl = QVBoxLayout(tabs)
+        tl.setContentsMargins(0, 10, 0, 10)
+        tl.setSpacing(2)
+        group = QButtonGroup(self)
         self.rows: dict[str, SliderRow] = {}
-        for i, (title, ctrls) in enumerate(SE.PANELS):
-            sec = Section(title, open_=i < 2)
+
+        def page(title):
+            sc = QScrollArea()
+            sc.setWidgetResizable(True)
+            sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            body = QWidget()
+            bv = QVBoxLayout(body)
+            bv.setContentsMargins(0, 0, 0, 0)
+            bv.setSpacing(0)
+            sc.setWidget(body)
+            self.pages.addWidget(sc)
+            return bv
+
+        def sliders(sec, ctrls):
             for c in ctrls:
                 r = SliderRow(*c)
                 r.changed.connect(self._set)
                 self.rows[c[0]] = r
                 sec.lay.addWidget(r)
-            if title == "Detalle":
-                lut_k = SliderRow("lut_strength", "Intensidad del LUT", 0, 100, 1, 100)
-                lut_k.changed.connect(self._set)
-                self.rows["lut_strength"] = lut_k
-                sec.lay.addWidget(lut_k)
-            bv.addWidget(sec)
-            if title == "Curva tonal":
-                hsl = Section("Mezcla de color (HSL)", open_=False)
-                tabs = QTabWidget()
-                for p, name in (("h", "Tono"), ("s", "Saturación"), ("l", "Luminancia")):
-                    page = QWidget()
-                    pv = QVBoxLayout(page)
-                    pv.setSpacing(6)
-                    for b, label, _ in SE.HSL_BANDS:
-                        r = SliderRow(f"hsl_{b}_{p}", label, -100, 100, 1, 0)
-                        r.changed.connect(self._set)
-                        self.rows[r.key] = r
-                        pv.addWidget(r)
-                    tabs.addTab(page, name)
-                hsl.lay.addWidget(tabs)
-                bv.addWidget(hsl)
-        bv.addStretch(1)
-        scroll.setWidget(body)
-        ov.addWidget(scroll, 1)
+
+        panels = dict(SE.PANELS)
+        layout = [("☀", "Luz", ["Básico", "Presencia", "Curva tonal"]),
+                  ("◐", "Color", ["_color", "_hsl", "Gradación de color"]),
+                  ("◭", "Detalle", ["Detalle", "Efectos"]),
+                  ("◎", "Máscaras", ["_masks"]),
+                  ("⟲", "Geometría", ["Geometría"])]
+        for i, (icon, name, secs) in enumerate(layout):
+            bv = page(name)
+            for t in secs:
+                if t == "_masks":
+                    bv.addWidget(self._build_masks())
+                elif t == "_color":
+                    sec = Section("Perfil, LUT y B/N")
+                    row = QHBoxLayout()
+                    self.lut_cb = QComboBox()
+                    self.lut_cb.setToolTip("LUT (.cube) de todos los tipos de sesión")
+                    self.lut_cb.activated.connect(lambda _: self._set("lut", self.lut_cb.currentData() or "", True))
+                    row.addWidget(QLabel("LUT"))
+                    row.addWidget(self.lut_cb, 1)
+                    sec.lay.addLayout(row)
+                    lut_k = SliderRow("lut_strength", "Intensidad", 0, 100, 1, 100)
+                    lut_k.changed.connect(self._set)
+                    self.rows["lut_strength"] = lut_k
+                    sec.lay.addWidget(lut_k)
+                    row = QHBoxLayout()
+                    self.bw_cb = QCheckBox("Blanco y negro")
+                    self.bw_cb.toggled.connect(lambda on: (self._set("bw", on, True), self.bw_style.setEnabled(on)))
+                    self.bw_style = QComboBox()
+                    self.bw_style.addItems(list(E.BW_STYLES))
+                    self.bw_style.activated.connect(lambda _: self._set("bw_style", self.bw_style.currentText(), True))
+                    row.addWidget(self.bw_cb)
+                    row.addWidget(self.bw_style, 1)
+                    sec.lay.addLayout(row)
+                    bv.addWidget(sec)
+                elif t == "_hsl":
+                    hsl = Section("Mezcla de color (HSL)")
+                    tb = QTabWidget()
+                    for p_, nm in (("h", "Tono"), ("s", "Saturación"), ("l", "Luminancia")):
+                        pg = QWidget()
+                        pv = QVBoxLayout(pg)
+                        pv.setContentsMargins(0, 6, 0, 0)
+                        pv.setSpacing(5)
+                        for b, label, _ in SE.HSL_BANDS:
+                            r = SliderRow(f"hsl_{b}_{p_}", label, -100, 100, 1, 0)
+                            r.changed.connect(self._set)
+                            self.rows[r.key] = r
+                            pv.addWidget(r)
+                        tb.addTab(pg, nm)
+                    hsl.lay.addWidget(tb)
+                    bv.addWidget(hsl)
+                else:
+                    sec = Section(t)
+                    sliders(sec, panels[t])
+                    bv.addWidget(sec)
+            bv.addStretch(1)
+            b = QPushButton(icon)
+            b.setObjectName("tooltab")
+            b.setCheckable(True)
+            b.setToolTip(name)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _, i=i: self.pages.setCurrentIndex(i))
+            group.addButton(b)
+            tl.addWidget(b)
+            if i == 0:
+                b.setChecked(True)
+        tl.addStretch(1)
+        oh.addWidget(tabs)
         self.reload_presets()
         self.reload_luts()
         return outer
+
+    # ---------------------------------------------------------- presets (vista previa al pasar el ratón), historial
+    def _preview_preset(self, it):
+        s = it.data(ROLE)
+        if s and self.cur and self.cur.path in self._proxy:
+            self._req += 1
+            self._jobs.put((self._req, self.cur.path, dict(copy.deepcopy(self.cur.settings), **s), True, None))
+
+    def apply_preset_data(self, s):
+        if s and self.cur:
+            self._push_history("Preset")
+            self.cur.settings = dict(self.cur.settings, **copy.deepcopy(s))
+            self._load_controls()
+            self.request(draft=False)
+            self._save_timer.start(300)
+
+    def _refresh_history(self):
+        self.hist_list.clear()
+        it = self.cur
+        if not it:
+            return
+        for label, _ in reversed(getattr(it, "timeline", [])):
+            self.hist_list.addItem(label)
+        self.hist_list.addItem("Importar")
+
+    def _history_jump(self, item):
+        it = self.cur
+        tl = getattr(it, "timeline", []) if it else []
+        row = self.hist_list.row(item)
+        idx = len(tl) - 1 - row  # la lista va de lo más reciente a lo más antiguo
+        target = copy.deepcopy(tl[idx][1]) if 0 <= idx < len(tl) else SE.new_settings(
+            **{k: it.settings.get(k) for k in ("rating", "flag")})
+        it.history.append(copy.deepcopy(it.settings))
+        it.settings = target
+        self._load_controls(refresh_history=False)
+        self.request(draft=False)
+        SE.save(self.folder, it.path, it.settings)
+
+    # ---------------------------------------------------------- máscaras
+    def _build_masks(self):
+        sec = Section("Máscaras", open_=True)
+        row = QHBoxLayout()
+        add = _btn("＋ Añadir máscara", "small")
+        menu = QMenu(add)
+        groups = [("Manual", M.MANUAL_TYPES), ("Personas (IA)", M.AI_TYPES),
+                  ("Cara (IA)", {k: v[0] for k, v in M.FACE_PARTS.items()}), ("Otros", M.OTHER_TYPES)]
+        for title, items in groups:
+            menu.addSection(title)
+            for k, label in items.items():
+                menu.addAction(label, lambda k=k: self.add_mask(k))
+        add.setMenu(menu)
+        self.b_mshow = _btn("Ver", "small", "Superponer la máscara en la foto (O)")
+        self.b_mshow.setCheckable(True)
+        self.b_mshow.toggled.connect(self._toggle_mask_view)
+        self.b_minv = _btn("Invertir", "small")
+        self.b_minv.clicked.connect(self._invert_mask)
+        self.b_mdel = _btn("Borrar", "small")
+        self.b_mdel.clicked.connect(self._delete_mask)
+        row.addWidget(add, 1)
+        for b in (self.b_mshow, self.b_minv, self.b_mdel):
+            row.addWidget(b)
+        sec.lay.addLayout(row)
+        self.mask_list = QListWidget()
+        self.mask_list.setFixedHeight(96)
+        self.mask_list.currentRowChanged.connect(self._select_mask)
+        sec.lay.addWidget(self.mask_list)
+        self.mask_hint = QLabel("")
+        self.mask_hint.setObjectName("muted")
+        self.mask_hint.setWordWrap(True)
+        sec.lay.addWidget(self.mask_hint)
+        self.mask_box = QWidget()
+        mb = QVBoxLayout(self.mask_box)
+        mb.setContentsMargins(0, 0, 0, 0)
+        mb.setSpacing(6)
+        self.mrows: dict[str, SliderRow] = {}
+        for key, label, lo, hi, st, neu in [("amount", "Cantidad", 0, 100, 1, 100), ("feather", "Difuminado", 0, 100, 1, 50),
+                                            ("brush", "Tamaño del pincel", 1, 30, 1, 6),
+                                            ("lo", "Luz desde", 0, 100, 1, 60), ("hi", "Luz hasta", 0, 100, 1, 100),
+                                            ("hue", "Tono", 0, 360, 1, 25), ("range", "Amplitud", 5, 90, 1, 30)] + \
+                [(k, l, a, b, s_, n) for k, l, a, b, s_, n in M.ADJ]:
+            r = SliderRow("m_" + key, label, lo, hi, st, neu)
+            r.changed.connect(self._mask_value)
+            self.mrows[key] = r
+            mb.addWidget(r)
+        self.mask_box.hide()
+        sec.lay.addWidget(self.mask_box)
+        QShortcut(QKeySequence("O"), self, lambda: self.b_mshow.toggle())
+        return sec
+
+    def _masks(self) -> list:
+        return self.cur.settings.setdefault("masks", []) if self.cur else []
+
+    def _refresh_masks(self, select=None):
+        self.mask_list.blockSignals(True)
+        self.mask_list.clear()
+        for m in self._masks():
+            on = any(m.get("adj", {}).values())
+            self.mask_list.addItem(("● " if on else "○ ") + m["name"] + ("  (invertida)" if m.get("invert") else ""))
+        self.mask_list.blockSignals(False)
+        n = len(self._masks())
+        if select is not None and n:
+            self.mask_list.setCurrentRow(min(select, n - 1))
+        elif n == 0:
+            self._select_mask(-1)
+
+    def add_mask(self, kind):
+        if not self.cur:
+            return
+        self._push_history()
+        self._masks().append(M.new_mask(kind))
+        self._refresh_masks(select=len(self._masks()) - 1)
+        if kind in M.AI_TYPES or kind in M.FACE_PARTS:
+            self.status.setText("Máscara con IA: la primera vez se descarga el modelo (16 MB)…")
+        self.b_mshow.setChecked(True)
+        self.request(draft=False)
+        self._save_timer.start(400)
+
+    def _select_mask(self, i):
+        self.mask_i = i if i is not None and i >= 0 else None
+        m = self._masks()[self.mask_i] if self.mask_i is not None and self.mask_i < len(self._masks()) else None
+        self.mask_box.setVisible(m is not None)
+        if not m:
+            self.mask_hint.setText("Añade una máscara para ajustar solo una zona (caras, fondo, cielo…).")
+            return
+        t, p = m["type"], m["params"]
+        hints = {"radial": "Arrastra sobre la foto: el punto inicial es el centro.",
+                 "linear": "Arrastra sobre la foto: de donde el efecto es completo a donde desaparece.",
+                 "brush": "Pinta sobre la foto. Botón derecho: borrar.",
+                 "luma": "Elige el rango de luminosidad.", "color": "Elige el tono y su amplitud."}
+        self.mask_hint.setText(hints.get(t, "Zona detectada automáticamente con IA."))
+        vis = {"feather": t in ("radial", "brush", "luma"), "brush": t == "brush", "lo": t == "luma",
+               "hi": t == "luma", "hue": t == "color", "range": t == "color"}
+        for k, r in self.mrows.items():
+            r.setVisible(vis.get(k, True))
+            if k == "amount":
+                r.set_value(m.get("amount", 100))
+            elif k == "brush":
+                r.set_value(p.get("_size", 6))
+            elif k in p:
+                r.set_value(p[k])
+            elif k in m["adj"]:
+                r.set_value(m["adj"][k])
+        if self.mask_show:
+            self.request(draft=False)
+
+    def _mask_value(self, key, value, final):
+        if not self.cur or self.mask_i is None:
+            return
+        m = self._masks()[self.mask_i]
+        k = key[2:]
+        if final:
+            self._push_history(f"{m['name']}: {self.mrows[k].lab.text()}")
+        if k == "amount":
+            m["amount"] = value
+        elif k == "brush":
+            m["params"]["_size"] = value
+            return
+        elif k in m["params"]:
+            m["params"][k] = value
+        else:
+            m["adj"][k] = value
+        self._refresh_masks(select=self.mask_i)
+        self.request(draft=not final)
+        self._save_timer.start(600)
+
+    def _toggle_mask_view(self, on):
+        self.mask_show = on
+        self.request(draft=False)
+
+    def _invert_mask(self):
+        if self.cur and self.mask_i is not None:
+            self._push_history()
+            m = self._masks()[self.mask_i]
+            m["invert"] = not m.get("invert")
+            self._refresh_masks(select=self.mask_i)
+            self.request(draft=False)
+            self._save_timer.start(400)
+
+    def _delete_mask(self):
+        if self.cur and self.mask_i is not None:
+            self._push_history()
+            del self._masks()[self.mask_i]
+            self._refresh_masks(select=max(0, self.mask_i - 1))
+            self.request(draft=False)
+            self._save_timer.start(400)
+
+    def _canvas_mouse(self, ev, x, y, right):
+        """Dibujo de máscaras sobre la foto (las coordenadas son de la foto completa mientras se ve la máscara)."""
+        if not self.cur or self.mask_i is None:
+            return
+        m = self._masks()[self.mask_i]
+        t, p = m["type"], m["params"]
+        if t not in ("radial", "linear", "brush"):
+            return
+        if ev == "press":
+            self._push_history()
+            self._drag = (x, y)
+            if not self.mask_show:
+                self.b_mshow.setChecked(True)
+        if self._drag is None:
+            return
+        x0, y0 = self._drag
+        if t == "radial":
+            p.update(cx=x0, cy=y0, rx=max(0.02, abs(x - x0)), ry=max(0.02, abs(y - y0)))
+        elif t == "linear":
+            p.update(x0=x0, y0=y0, x1=x, y1=y)
+        elif t == "brush":
+            size = p.get("_size", 6) / 200.0
+            p.setdefault("strokes", []).append([round(x, 4), round(y, 4), size, -1 if right else 1])
+        if ev == "release":
+            self._drag = None
+            self.request(draft=False)
+            self._save_timer.start(400)
+        else:
+            self.request(draft=True)
 
     # ---------------------------------------------------------- carpeta y miniaturas
     def open_folder(self, folder: str):
@@ -532,7 +913,7 @@ class StudioView(QWidget):
         for i, it in enumerate(self.items):
             li = QListWidgetItem()
             li.setData(ROLE, i)
-            li.setSizeHint(QSize(210, 150))
+            li.setSizeHint(QSize(126, 96))
             self.film.addItem(li)
         self.lib_info.setText(f"{os.path.basename(folder)} · {len(self.items)} fotos")
         self.title.setText(os.path.basename(folder))
@@ -584,11 +965,44 @@ class StudioView(QWidget):
             it.needs_auto_ev = self.events_lookup(it.path) is None  # sin análisis de Events: exposición del proxy
         self.title.setText(it.name)
         self._load_controls()
+        self._show_exif(it)
         if it.path in self._proxy:
             self.request(draft=False)
         else:
             self.canvas.set(msg="Cargando…")
             threading.Thread(target=self._load_proxy, args=(it.path,), daemon=True).start()
+
+    def _show_exif(self, it: Item):
+        ph = E.Photo(path=it.path)
+        try:
+            E.read_meta(ph)
+        except Exception:
+            pass
+        m = ph.meta
+        bits = []
+        if ph.iso:
+            bits.append(f"ISO {ph.iso}")
+        if m.get("exposure"):
+            bits.append(f"{str(m['exposure']).strip('[]')} s")
+        if m.get("fnumber"):
+            fn = str(m["fnumber"]).strip("[]")
+            try:
+                a, b = (fn.split("/") + ["1"])[:2]
+                fn = f"{float(a) / float(b):.1f}"
+            except ValueError:
+                pass
+            bits.append(f"f/{fn}")
+        if m.get("focal"):
+            fo = str(m["focal"]).strip("[]")
+            try:
+                a, b = (fo.split("/") + ["1"])[:2]
+                fo = f"{float(a) / float(b):.0f}"
+            except ValueError:
+                pass
+            bits.append(f"{fo} mm")
+        self.exif.setText("   ".join(bits))
+        cam = " ".join(str(m.get(k, "")).strip() for k in ("model",) if m.get(k))
+        self.nav_info.setText(f"{it.name}  {('· ' + cam) if cam else ''}")
 
     def _initial_settings(self, it: Item) -> dict:
         ph = self.events_lookup(it.path)
@@ -627,7 +1041,8 @@ class StudioView(QWidget):
         if not self.cur or self.cur.path not in self._proxy:
             return
         self._req += 1
-        self._jobs.put((self._req, self.cur.path, copy.deepcopy(self.cur.settings), draft))
+        self._jobs.put((self._req, self.cur.path, copy.deepcopy(self.cur.settings), draft,
+                        self.mask_i if self.mask_show else None))
         if draft:
             self._full_timer.start(260)
 
@@ -636,7 +1051,7 @@ class StudioView(QWidget):
             job = self._jobs.get()
             while not self._jobs.empty():  # solo cuenta la última petición
                 job = self._jobs.get()
-            n, path, s, draft = job
+            n, path, s, draft, show = job
             if path not in self._proxy:
                 continue
             lin = self._proxy[path][0]
@@ -646,7 +1061,8 @@ class StudioView(QWidget):
                 s = dict(s, nr_luma=0)  # la limpieza de grano solo en la vista definitiva
             t = time.time()
             try:
-                img = SE.render(lin, s, seed=hash(path) & 0xFFFF)
+                img = SE.render(lin, s, seed=hash(path) & 0xFFFF, key=path, show_mask=show,
+                                crop=show is None)
             except Exception as e:
                 self.rendered.emit(n, None, f"{type(e).__name__}: {e}", draft)
                 continue
@@ -657,12 +1073,16 @@ class StudioView(QWidget):
             return
         if img is None:
             return self.canvas.set(msg=f"Error al revelar: {info}")
-        self.canvas.set(pm=_pixmap(img), msg="" if not draft else "vista rápida")
+        pm = _pixmap(img)
+        self.canvas.set(pm=pm, msg="" if not draft else "vista rápida")
         self.hist.set(img)
+        self.nav.setPixmap(pm.scaled(self.nav.width() - 4, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     # ---------------------------------------------------------- ajustes
-    def _load_controls(self):
+    def _load_controls(self, refresh_history: bool = True):
         s = self.cur.settings
+        if refresh_history:
+            self._refresh_history()
         for k, r in self.rows.items():
             r.set_value(s.get(k, SE.DEFAULTS.get(k, 0)))
         self.bw_cb.blockSignals(True)
@@ -673,8 +1093,10 @@ class StudioView(QWidget):
         i = self.lut_cb.findData(s.get("lut") or None)
         self.lut_cb.setCurrentIndex(max(0, i))
         self._show_rating()
+        self._refresh_masks(select=0 if s.get("masks") else None)
 
-    def _push_history(self):
+    def _push_history(self, label: str = ""):
+        self._last_label = label or self._last_label or "Ajuste"
         it = self.cur
         it.history.append(copy.deepcopy(it.settings))
         it.history = it.history[-100:]
@@ -684,7 +1106,10 @@ class StudioView(QWidget):
         if not self.cur:
             return
         if final:
-            self._push_history()
+            r = self.rows.get(key)
+            name = r.lab.text() if r else key
+            self._push_history(f"{name} {value:+g}" if isinstance(value, (int, float)) and not isinstance(value, bool)
+                               else f"{name}")
         self.cur.settings[key] = value
         self.request(draft=not final)
         self._save_timer.start(600)
@@ -693,6 +1118,11 @@ class StudioView(QWidget):
     def _save_cur(self):
         if self.cur and self.folder and self.cur.settings is not None:
             SE.save(self.folder, self.cur.path, self.cur.settings)
+            tl = self.cur.__dict__.setdefault("timeline", [])
+            if not tl or tl[-1][1] != self.cur.settings:
+                tl.append((self._last_label or "Ajuste", copy.deepcopy(self.cur.settings)))
+                del tl[:-60]
+                self._refresh_history()
 
     def undo(self):
         it = self.cur
@@ -772,10 +1202,18 @@ class StudioView(QWidget):
     def _rating(self):
         return int((self.cur.settings or {}).get("rating", 0)) if self.cur else 0
 
+    def _flag(self):
+        return int((self.cur.settings or {}).get("flag", 0)) if self.cur else 0
+
     def _show_rating(self):
         n = self._rating()
         for i, b in enumerate(self.stars, start=1):
             b.setText("★" if i <= n else "☆")
+            b.setStyleSheet(f"QToolButton {{ border: none; font-size: 12pt; background: transparent; "
+                            f"color: {T.WARN if i <= n else T.FAINT}; }}")
+        fl = self._flag()
+        self.b_pick.setStyleSheet(f"color: {T.TEXT_STRONG if fl == 1 else T.FAINT};")
+        self.b_rej.setStyleSheet(f"color: {T.DANGER if fl == -1 else T.FAINT};")
         f = (self.cur.settings or {}).get("flag", 0) if self.cur else 0
         self.flag_lbl.setText({1: "⚑ Elegida", -1: "✕ Rechazada"}.get(f, ""))
 
@@ -803,7 +1241,26 @@ class StudioView(QWidget):
         self.canvas.update()
 
     # ---------------------------------------------------------- presets y LUT
-    def reload_presets(self):
+    def reload_presets(self, *_):
+        if hasattr(self, "preset_list"):
+            self.preset_list.clear()
+            which = self.preset_search.currentIndex()
+            groups = []
+            if which in (0, 1):
+                groups.append(("MIS PRESETS", SE.list_presets(self.cfg_dir)))
+            if which in (0, 2):
+                groups.append(("LIGHTCRAFT", SE.LIGHTCRAFT_PRESETS))
+            for title, items in groups:
+                head = QListWidgetItem(title)
+                head.setFlags(Qt.NoItemFlags)
+                head.setForeground(QColor(T.FAINT))
+                self.preset_list.addItem(head)
+                for name, st in items.items():
+                    it = QListWidgetItem("   " + name)
+                    it.setData(ROLE, st)
+                    self.preset_list.addItem(it)
+        if not hasattr(self, "preset_cb"):
+            return
         self.preset_cb.clear()
         self.preset_cb.addItem("Presets…", None)
         for name, s in SE.list_presets(self.cfg_dir).items():
