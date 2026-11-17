@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 import engine as E
 import luts as L
 import studio_engine as SE
+import compare as CMP
 import masks as M
 import theme as T
 
@@ -138,7 +139,7 @@ class Canvas(QWidget):
         self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.pm = self.before = None
-        self.show_before = False
+        self.cmp = CMP.CompareState()
         self.msg = "Abre una carpeta y elige una foto"
         self.img_rect = QRectF()
         self.on_mouse = None  # callback(evento, x, y) con x, y en 0..1 sobre la foto mostrada
@@ -151,17 +152,38 @@ class Canvas(QWidget):
         p = e.position()
         return (min(1, max(0, (p.x() - r.x()) / r.width())), min(1, max(0, (p.y() - r.y()) / r.height())))
 
+    def _near_line(self, e) -> bool:
+        """¿El clic cae sobre la línea de la ventanilla? (si no, el clic es para dibujar máscaras)"""
+        st, r, pt = self.cmp, self.img_rect, e.position()
+        if not st.split or r.width() <= 0:
+            return False
+        if self.on_mouse is None or not getattr(self, "mask_drawing", lambda: False)():
+            return True  # sin máscara que dibujar: cualquier clic mueve la línea
+        if st.mode == "v":
+            return abs(pt.x() - (r.x() + r.width() * st.pos)) < 24
+        return abs(pt.y() - (r.y() + r.height() * st.pos)) < 24
+
     def mousePressEvent(self, e):
+        if self._near_line(e):
+            self.cmp.dragging = True
+            CMP.drag(self.cmp, self.img_rect, e.position().x(), e.position().y())
+            return self.update()
         n = self._norm(e)
         if n and self.on_mouse:
             self.on_mouse("press", *n, e.button() == Qt.RightButton)
 
     def mouseMoveEvent(self, e):
+        if self.cmp.dragging:
+            CMP.drag(self.cmp, self.img_rect, e.position().x(), e.position().y())
+            return self.update()
         n = self._norm(e)
         if n and self.on_mouse and e.buttons():
             self.on_mouse("move", *n, bool(e.buttons() & Qt.RightButton))
 
     def mouseReleaseEvent(self, e):
+        if self.cmp.dragging:
+            self.cmp.dragging = False
+            return
         n = self._norm(e)
         if n and self.on_mouse:
             self.on_mouse("release", *n, e.button() == Qt.RightButton)
@@ -178,7 +200,7 @@ class Canvas(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.fillRect(self.rect(), QColor(T.BG))
-        pm = self.before if (self.show_before and self.before is not None) else self.pm
+        pm = self.pm
         if pm is None:
             p.setPen(QColor(T.MUTED))
             p.drawText(self.rect(), Qt.AlignCenter, self.msg)
@@ -187,12 +209,8 @@ class Canvas(QWidget):
         s = pm.size().scaled(area.size(), Qt.KeepAspectRatio)
         r = QRectF(area.x() + (area.width() - s.width()) / 2, area.y() + (area.height() - s.height()) / 2,
                    s.width(), s.height())
-        p.drawPixmap(r.toRect(), pm)
         self.img_rect = r
-        if self.show_before:
-            p.setPen(QColor(T.TEXT))
-            p.fillRect(QRectF(r.x() + 8, r.y() + 8, 70, 22), QColor(5, 7, 15, 180))
-            p.drawText(QRectF(r.x() + 8, r.y() + 8, 70, 22), Qt.AlignCenter, "Antes")
+        CMP.paint(p, r, pm, self.before, self.cmp)
         if self.msg:
             p.setPen(QColor(T.MUTED))
             p.drawText(self.rect().adjusted(0, 0, -20, -6), Qt.AlignRight | Qt.AlignBottom, self.msg)
@@ -347,6 +365,7 @@ class StudioView(QWidget):
         self._proxy: OrderedDict = OrderedDict()  # ruta -> (proxy lineal, antes sRGB)
         self._req = 0
         self._jobs: queue.Queue = queue.Queue()
+        self._before_cache: dict = {}
         threading.Thread(target=self._render_loop, daemon=True).start()
         self.mask_i: int | None = None      # máscara seleccionada
         self.mask_show = False              # superponer la máscara seleccionada
@@ -378,7 +397,7 @@ class StudioView(QWidget):
         for k, fn in (("Ctrl+Z", self.undo), ("Ctrl+Y", self.redo), ("Ctrl+Shift+C", self.copy_settings),
                       ("Ctrl+Shift+V", self.paste_settings), ("\\", self.toggle_before),
                       ("P", lambda: self.set_flag(1)), ("X", lambda: self.set_flag(-1)), ("U", lambda: self.set_flag(0)),
-                      ("Ctrl+E", self.export_dialog)):
+                      ("Ctrl+E", self.export_dialog), ("Y", self.next_split)):
             QShortcut(QKeySequence(k), self, fn)
         for n in range(6):
             QShortcut(QKeySequence(str(n)), self, lambda n=n: self.set_rating(n))
@@ -496,6 +515,9 @@ class StudioView(QWidget):
         v.addWidget(bw)
         self.canvas = Canvas()
         self.canvas.on_mouse = self._canvas_mouse
+        self.canvas.mask_drawing = lambda: bool(
+            self.cur and self.mask_i is not None and self.mask_i < len(self._masks())
+            and self._masks()[self.mask_i]["type"] in ("radial", "linear", "brush"))
         v.addWidget(self.canvas, 1)
         # barra de herramientas bajo la foto (Lightroom): vista, valoración, marcas y acciones
         bar = QFrame()
@@ -504,10 +526,9 @@ class StudioView(QWidget):
         hb = QHBoxLayout(bar)
         hb.setContentsMargins(10, 4, 10, 4)
         hb.setSpacing(6)
-        self.b_before = _btn("Y|Y", "flat", "Antes / después (\\)")
-        self.b_before.setCheckable(True)
-        self.b_before.toggled.connect(self._set_before)
-        hb.addWidget(self.b_before)
+        self.cmp_bar = CMP.CompareBar()
+        self.cmp_bar.changed.connect(self.set_compare)
+        hb.addWidget(self.cmp_bar)
         hb.addSpacing(8)
         self.stars = []
         for n in range(1, 6):
@@ -1033,7 +1054,7 @@ class StudioView(QWidget):
                 it.settings["exposure"] = round(float(ev), 2)
                 self.rows["exposure"].set_value(it.settings["exposure"])
             it.needs_auto_ev = False
-            self.canvas.set(before=_pixmap(self._proxy[path][1]))
+            self.canvas.before = None
             self.request(draft=False)
 
     # ---------------------------------------------------------- render en segundo plano
@@ -1042,7 +1063,7 @@ class StudioView(QWidget):
             return
         self._req += 1
         self._jobs.put((self._req, self.cur.path, copy.deepcopy(self.cur.settings), draft,
-                        self.mask_i if self.mask_show else None))
+                        self.mask_i if self.mask_show else None, self.canvas.cmp.active))
         if draft:
             self._full_timer.start(260)
 
@@ -1051,7 +1072,8 @@ class StudioView(QWidget):
             job = self._jobs.get()
             while not self._jobs.empty():  # solo cuenta la última petición
                 job = self._jobs.get()
-            n, path, s, draft, show = job
+            n, path, s, draft, show = job[:5]
+            want_before = len(job) > 5 and job[5]
             if path not in self._proxy:
                 continue
             lin = self._proxy[path][0]
@@ -1066,7 +1088,19 @@ class StudioView(QWidget):
             except Exception as e:
                 self.rendered.emit(n, None, f"{type(e).__name__}: {e}", draft)
                 continue
-            self.rendered.emit(n, img, time.time() - t, draft)
+            before = None
+            if want_before:
+                key = (path, lin.shape, tuple(s.get("crop", (0, 0, 1, 1))), s.get("angle", 0), show is None)
+                before = self._before_cache.get(key)
+                if before is None:
+                    try:
+                        neutral = SE.new_settings(crop=s.get("crop", [0.0, 0.0, 1.0, 1.0]), angle=s.get("angle", 0))
+                        before = SE.render(lin, neutral, crop=show is None)
+                        self._before_cache.clear()
+                        self._before_cache[key] = before
+                    except Exception:
+                        before = None
+            self.rendered.emit(n, img, (time.time() - t, before), draft)
 
     def _on_rendered(self, n, img, info, draft):
         if draft and n < self._req:  # llegó tarde: ya hay una petición más nueva en camino
@@ -1074,6 +1108,9 @@ class StudioView(QWidget):
         if img is None:
             return self.canvas.set(msg=f"Error al revelar: {info}")
         pm = _pixmap(img)
+        before = info[1] if isinstance(info, tuple) else None
+        if before is not None:
+            self.canvas.before = _pixmap(before)
         self.canvas.set(pm=pm, msg="" if not draft else "vista rápida")
         self.hist.set(img)
         self.nav.setPixmap(pm.scaled(self.nav.width() - 4, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -1234,10 +1271,21 @@ class StudioView(QWidget):
         self.film.viewport().update()
 
     def toggle_before(self):
-        self.b_before.toggle()
+        self.set_compare("off" if self.canvas.cmp.mode == "full" else "full")
+
+    def next_split(self):
+        self.canvas.cmp.next_split()
+        self.set_compare(self.canvas.cmp.mode)
+
+    def set_compare(self, mode):
+        self.canvas.cmp.mode = mode
+        self.cmp_bar.set_mode(mode)
+        if mode != "off" and self.canvas.before is None:
+            self.request(draft=False)  # hace falta el «antes» con la misma geometría
+        self.canvas.update()
 
     def _set_before(self, on):
-        self.canvas.show_before = on
+        self.set_compare("full" if on else "off")
         self.canvas.update()
 
     # ---------------------------------------------------------- presets y LUT

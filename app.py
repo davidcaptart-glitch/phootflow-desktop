@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QSizePolicy, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
 
 import drive as gdrive
+import compare as CMP
 import engine as E
 import license as LIC
 import luts as L
@@ -413,6 +414,14 @@ def np_to_pixmap(a: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(QImage(a.data, w, h, 3 * w, QImage.Format_RGB888).copy())
 
 
+def render_before(ph: E.Photo) -> np.ndarray:
+    """La foto tal como salió de la cámara (exposición 0, sin estilo), con el mismo giro, para comparar."""
+    import copy as _copy
+    c = _copy.copy(ph)
+    c.ev = 0.0
+    return render_preview(c, None)
+
+
 def render_preview(ph: E.Photo, style: dict | None = None) -> np.ndarray:
     """Vista previa con la exposición y el giro actuales, el color de la sesión y el LUT (si hay)."""
     from PIL import Image
@@ -529,10 +538,25 @@ class PreviewLabel(QLabel):
         self.setMinimumHeight(260)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.pm, self.crop, self.dim = None, None, False
+        self.before = None
+        self.cmp = CMP.CompareState()
+        self.r = QRectF()
 
-    def set_image(self, pm, crop, dim=False):
-        self.pm, self.crop, self.dim = pm, crop, dim
+    def set_image(self, pm, crop, dim=False, before=None):
+        self.pm, self.crop, self.dim, self.before = pm, crop, dim, before
         self.update()
+
+    def mousePressEvent(self, e):
+        if CMP.drag(self.cmp, self.r, e.position().x(), e.position().y()):
+            self.cmp.dragging = True
+            self.update()
+
+    def mouseMoveEvent(self, e):
+        if self.cmp.dragging and CMP.drag(self.cmp, self.r, e.position().x(), e.position().y()):
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        self.cmp.dragging = False
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -549,8 +573,9 @@ class PreviewLabel(QLabel):
         s = self.pm.size().scaled(area.size(), Qt.KeepAspectRatio)
         r = QRectF(area.x() + (area.width() - s.width()) / 2, area.y() + (area.height() - s.height()) / 2,
                    s.width(), s.height())
-        p.drawPixmap(r.toRect(), self.pm)
-        if self.crop and self.crop != (0.0, 0.0, 1.0, 1.0):
+        self.r = r
+        CMP.paint(p, r, self.pm, self.before, self.cmp)
+        if self.crop and self.crop != (0.0, 0.0, 1.0, 1.0) and not self.cmp.active:
             x0, y0, x1, y1 = self.crop
             c = QRectF(r.x() + x0 * r.width(), r.y() + y0 * r.height(), (x1 - x0) * r.width(),
                        (y1 - y0) * r.height())
@@ -956,7 +981,18 @@ class Main(QMainWindow):
         v.setContentsMargins(16, 6, 20, 12)
         v.setSpacing(10)
         self.preview = PreviewLabel()
+        row = QHBoxLayout()
+        lab = QLabel("Antes / después")
+        lab.setObjectName("meta")
+        self.cmp_bar = CMP.CompareBar()
+        self.cmp_bar.changed.connect(self.set_compare)
+        row.addWidget(lab)
+        row.addStretch(1)
+        row.addWidget(self.cmp_bar)
+        v.addLayout(row)
         v.addWidget(self.preview, 1)
+        QShortcut(QKeySequence("Y"), self, lambda: (self.preview.cmp.next_split(),
+                                                    self.set_compare(self.preview.cmp.mode)))
         self.p_title = QLabel("")
         self.p_title.setObjectName("h1")
         self.p_info = QLabel("")
@@ -1343,7 +1379,13 @@ class Main(QMainWindow):
             pm = self.thumb_pixmap(ph) if ph else None
             return self.preview.set_image(pm, None)
         pm = np_to_pixmap(render_preview(ph, self.settings().style))
-        self.preview.set_image(pm, ph.crops.get(ph.best), dim=not ph.keep)
+        before = np_to_pixmap(render_before(ph)) if self.preview.cmp.active else None
+        self.preview.set_image(pm, ph.crops.get(ph.best), dim=not ph.keep, before=before)
+
+    def set_compare(self, mode):
+        self.preview.cmp.mode = mode
+        self.cmp_bar.set_mode(mode)
+        self.show_preview()
 
     def on_photo_look(self, text):
         if self.cur:
@@ -1473,7 +1515,7 @@ class Main(QMainWindow):
         dlg = review.ReviewDialog(self, render_fn, studio_fn,
                                   lambda ph: os.path.normcase(ph.path) in overrides, start,
                                   bw_style=self.bw_style_cb.currentText(), bw_on=self.c_bw.isChecked(),
-                                  look=self.look_cb.currentText())
+                                  look=self.look_cb.currentText(), before_fn=render_before)
         dlg.exec()
         self.refresh_counts()
         self.apply_filter()

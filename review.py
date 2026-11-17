@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, 
                                QListWidgetItem, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate, QVBoxLayout,
                                QWidget)
 
+import compare as CMP
 import engine as E
 import theme as T
 
@@ -79,10 +80,25 @@ class Big(QWidget):
         super().__init__()
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.pm, self.text, self.rejected = None, "", False
+        self.before = None
+        self.cmp = CMP.CompareState()
+        self.r = QRectF()
 
-    def set(self, pm, text="", rejected=False):
-        self.pm, self.text, self.rejected = pm, text, rejected
+    def set(self, pm, text="", rejected=False, before=None):
+        self.pm, self.text, self.rejected, self.before = pm, text, rejected, before
         self.update()
+
+    def mousePressEvent(self, e):
+        if CMP.drag(self.cmp, self.r, e.position().x(), e.position().y()):
+            self.cmp.dragging = True
+            self.update()
+
+    def mouseMoveEvent(self, e):
+        if self.cmp.dragging and CMP.drag(self.cmp, self.r, e.position().x(), e.position().y()):
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        self.cmp.dragging = False
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -93,7 +109,8 @@ class Big(QWidget):
             s = self.pm.size().scaled(area.size(), Qt.KeepAspectRatio)
             r = QRectF(area.x() + (area.width() - s.width()) / 2, area.y() + (area.height() - s.height()) / 2,
                        s.width(), s.height())
-            p.drawPixmap(r.toRect(), self.pm)
+            self.r = r
+            CMP.paint(p, r, self.pm, self.before, self.cmp)
             if self.rejected:
                 p.fillRect(r, QColor(5, 7, 15, 110))
                 p.setPen(QPen(QColor(T.DANGER), 3))
@@ -109,7 +126,7 @@ class ReviewDialog(QDialog):
     studio_requested = Signal(object)
 
     def __init__(self, main, render_fn, studio_render_fn, is_studio_fn, start=0, bw_style="Editorial",
-                 bw_on=False, look="Natural"):
+                 bw_on=False, look="Natural", before_fn=None):
         super().__init__(main)
         self.setWindowTitle("Revisión antes de exportar")
         self.setWindowState(Qt.WindowMaximized)
@@ -121,6 +138,8 @@ class ReviewDialog(QDialog):
         self.bw_style = bw_style  # estilo de B/N de la sesión
         self.bw_on = bw_on        # ¿se exporta versión B/N?
         self.look = look          # look de color de la sesión
+        self.before_fn = before_fn  # foto tal como salió de la cámara (para comparar)
+        self._before: dict = {}
         self._cache: dict = {}
 
         v = QVBoxLayout(self)
@@ -144,6 +163,9 @@ class ReviewDialog(QDialog):
         top.addSpacing(12)
         top.addWidget(self.counts, 1)
         top.addWidget(self.filter)
+        self.cmp_bar = CMP.CompareBar()
+        self.cmp_bar.changed.connect(self.set_compare)
+        top.addWidget(self.cmp_bar)
         top.addWidget(self.b_bw)
         top.addWidget(b_close)
         top.addWidget(self.b_export)
@@ -226,6 +248,8 @@ class ReviewDialog(QDialog):
         v.addWidget(self.strip)
 
         for k, fn in (("A", lambda: self.decide(True)), ("R", lambda: self.decide(False)), ("B", self.b_bw.toggle),
+                      ("\\", lambda: self.set_compare("off" if self.big.cmp.mode == "full" else "full")),
+                      ("Y", lambda: (self.big.cmp.next_split(), self.set_compare(self.big.cmp.mode))),
                       ("E", self._studio), (Qt.Key_Right, lambda: self.step(1)), (Qt.Key_Left, lambda: self.step(-1))):
             QShortcut(QKeySequence(k), self, fn)
         self.b_bw.setEnabled(True)
@@ -303,7 +327,15 @@ class ReviewDialog(QDialog):
             else:
                 img = E.bw_editorial(color, seed=ph.dhash & 0xFFFFFFFF, style=bws)
                 label += f"  ·  B/N {bws}"
-        self.big.set(_pm(img), label, rejected=not ph.keep)
+        before = None
+        if self.big.cmp.active and self.before_fn and not studio:
+            b = self._before.get(ph.path)
+            if b is None:
+                b = self._before[ph.path] = self.before_fn(ph)
+                if len(self._before) > 20:
+                    self._before.pop(next(iter(self._before)))
+            before = _pm(crop(b, box))
+        self.big.set(_pm(img), label, rejected=not ph.keep, before=before)
         self._fill_crops(ph, base, studio)
         self._fill_bw(ph, color if self.bw else crop(base, box), studio)
 
@@ -369,6 +401,11 @@ class ReviewDialog(QDialog):
         if ph and name and name in ph.crops:
             ph.best = name
             self.show_photo()
+
+    def set_compare(self, mode):
+        self.big.cmp.mode = mode
+        self.cmp_bar.set_mode(mode)
+        self.show_photo()
 
     def decide(self, keep: bool):
         ph = self.cur()
