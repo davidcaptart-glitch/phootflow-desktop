@@ -23,6 +23,7 @@ import engine as E
 import luts as L
 import studio_engine as SE
 import compare as CMP
+import zoomview as Z
 import masks as M
 import theme as T
 
@@ -140,6 +141,7 @@ class Canvas(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.pm = self.before = None
         self.cmp = CMP.CompareState()
+        self.zoom = Z.Zoom(self)
         self.msg = "Abre una carpeta y elige una foto"
         self.img_rect = QRectF()
         self.on_mouse = None  # callback(evento, x, y) con x, y en 0..1 sobre la foto mostrada
@@ -163,7 +165,33 @@ class Canvas(QWidget):
             return abs(pt.x() - (r.x() + r.width() * st.pos)) < 24
         return abs(pt.y() - (r.y() + r.height() * st.pos)) < 24
 
+    def zoom_pixmap(self):
+        return self.pm
+
+    def _area(self):
+        return QRectF(self.rect()).adjusted(12, 12, -12, -12)
+
+    def wheelEvent(self, e):
+        if self.pm is not None:
+            self.zoom.wheel(e.angleDelta().y(), e.position(), self._area(), self.pm.size())
+            self.update()
+
+    def mouseDoubleClickEvent(self, e):
+        if self.pm is not None and not self._near_line(e):
+            self.zoom.toggle(e.position(), self._area(), self.pm.size())
+            self.update()
+
+    def _wants_pan(self, e) -> bool:
+        if e.button() == Qt.MiddleButton:
+            return True
+        drawing = getattr(self, "mask_drawing", lambda: False)()
+        return self.zoom.active and e.button() == Qt.LeftButton and not drawing
+
     def mousePressEvent(self, e):
+        if self._wants_pan(e) and not (self.cmp.split and self._near_line(e)):
+            self.zoom.start_pan(e.position())
+            self.setCursor(Qt.ClosedHandCursor)
+            return
         if self._near_line(e):
             self.cmp.dragging = True
             CMP.drag(self.cmp, self.img_rect, e.position().x(), e.position().y())
@@ -173,6 +201,9 @@ class Canvas(QWidget):
             self.on_mouse("press", *n, e.button() == Qt.RightButton)
 
     def mouseMoveEvent(self, e):
+        if self.zoom.panning:
+            self.zoom.pan(e.position(), self._area(), self.pm.size())
+            return self.update()
         if self.cmp.dragging:
             CMP.drag(self.cmp, self.img_rect, e.position().x(), e.position().y())
             return self.update()
@@ -181,6 +212,10 @@ class Canvas(QWidget):
             self.on_mouse("move", *n, bool(e.buttons() & Qt.RightButton))
 
     def mouseReleaseEvent(self, e):
+        if self.zoom.panning:
+            self.zoom.end_pan()
+            self.setCursor(Qt.ArrowCursor)
+            return
         if self.cmp.dragging:
             self.cmp.dragging = False
             return
@@ -205,12 +240,16 @@ class Canvas(QWidget):
             p.setPen(QColor(T.MUTED))
             p.drawText(self.rect(), Qt.AlignCenter, self.msg)
             return
-        area = self.rect().adjusted(16, 16, -16, -16)
-        s = pm.size().scaled(area.size(), Qt.KeepAspectRatio)
-        r = QRectF(area.x() + (area.width() - s.width()) / 2, area.y() + (area.height() - s.height()) / 2,
-                   s.width(), s.height())
+        area = self._area()
+        r = self.zoom.rect(area, pm.size())
         self.img_rect = r
+        p.setClipRect(area)
         CMP.paint(p, r, pm, self.before, self.cmp)
+        if not self.cmp.active:
+            self.zoom.draw_tile(p, r)
+        p.setClipping(False)
+        self.zoom.draw_badge(p, area, pm.size(), busy=self.zoom.active and self.zoom.tile is None
+                             and self.zoom.pct * max(1, self.zoom.full_size[0]) > pm.width() * 1.15)
         if self.msg:
             p.setPen(QColor(T.MUTED))
             p.drawText(self.rect().adjusted(0, 0, -20, -6), Qt.AlignRight | Qt.AlignBottom, self.msg)
@@ -397,7 +436,9 @@ class StudioView(QWidget):
         for k, fn in (("Ctrl+Z", self.undo), ("Ctrl+Y", self.redo), ("Ctrl+Shift+C", self.copy_settings),
                       ("Ctrl+Shift+V", self.paste_settings), ("\\", self.toggle_before),
                       ("P", lambda: self.set_flag(1)), ("X", lambda: self.set_flag(-1)), ("U", lambda: self.set_flag(0)),
-                      ("Ctrl+E", self.export_dialog), ("Y", self.next_split)):
+                      ("Ctrl+E", self.export_dialog), ("Y", self.next_split),
+                      ("Z", lambda: (self.canvas.zoom.toggle(None, self.canvas._area(), self.canvas.pm.size())
+                                     if self.canvas.pm is not None else None))):
             QShortcut(QKeySequence(k), self, fn)
         for n in range(6):
             QShortcut(QKeySequence(str(n)), self, lambda n=n: self.set_rating(n))
@@ -515,6 +556,8 @@ class StudioView(QWidget):
         v.addWidget(bw)
         self.canvas = Canvas()
         self.canvas.on_mouse = self._canvas_mouse
+        self.canvas.zoom.provider = self._tile
+        self._full: tuple | None = None
         self.canvas.mask_drawing = lambda: bool(
             self.cur and self.mask_i is not None and self.mask_i < len(self._masks())
             and self._masks()[self.mask_i]["type"] in ("radial", "linear", "brush"))
@@ -1102,12 +1145,35 @@ class StudioView(QWidget):
                         before = None
             self.rendered.emit(n, img, (time.time() - t, before), draft)
 
+    def _tile(self, box):
+        """Zona visible a resolución completa con los ajustes actuales (zoom > vista previa)."""
+        it = self.cur
+        if not it:
+            return None
+        if self._full is None or self._full[0] != it.path:
+            self._full = (it.path, E.load_linear(it.path, half=False, rebuild_highlights=True))
+        lin = self._full[1]
+        s = copy.deepcopy(it.settings)
+        c = s.get("crop", [0.0, 0.0, 1.0, 1.0]) if self.canvas.cmp.mode == "off" and not self.mask_show \
+            else [0.0, 0.0, 1.0, 1.0]
+        box_rot = (c[0] + box[0] * (c[2] - c[0]), c[1] + box[1] * (c[3] - c[1]),
+                   c[0] + box[2] * (c[2] - c[0]), c[1] + box[3] * (c[3] - c[1]))
+        flat = dict(s, angle=0, crop=[0.0, 0.0, 1.0, 1.0])
+        return Z.region(lin, float(s.get("angle", 0)), box_rot,
+                        lambda part: SE.render(part, flat, seed=hash(it.path) & 0xFFFF, key=it.path + "#zona"),
+                        E._safe_rect)
+
     def _on_rendered(self, n, img, info, draft):
         if draft and n < self._req:  # llegó tarde: ya hay una petición más nueva en camino
             return
         if img is None:
             return self.canvas.set(msg=f"Error al revelar: {info}")
         pm = _pixmap(img)
+        if not draft and self.cur:
+            fw, fh = E.full_size(self.cur.path)
+            c = self.cur.settings.get("crop", [0.0, 0.0, 1.0, 1.0])
+            self.canvas.zoom.reset(key=(self.cur.path, n), full_size=(int(fw * (c[2] - c[0])) or fw, fh))
+            self.canvas.zoom.schedule()
         before = info[1] if isinstance(info, tuple) else None
         if before is not None:
             self.canvas.before = _pixmap(before)

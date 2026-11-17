@@ -143,8 +143,10 @@ def detect_scene(photos) -> tuple[str, dict[str, float]]:
 
 # ------------------------------------------------------------------ aplicar un estilo
 
-def apply_color(rgb: np.ndarray, style: dict) -> np.ndarray:
-    """Calidez, tinte, croma y curva aprendida (en Lab). RGB 0..1 -> RGB 0..1."""
+def apply_color(rgb: np.ndarray, style: dict, stats: dict | None = None) -> np.ndarray:
+    """Calidez, tinte, croma y curva aprendida (en Lab). RGB 0..1 -> RGB 0..1.
+    `stats`: medidas de la foto entera para el estilo aprendido. Si llega vacío se rellena con las de esta
+    imagen; si llega lleno se usan esas (así una zona ampliada se revela igual que la foto completa)."""
     lut = style.get("lut")
     target = style.get("target_q")
     chroma = float(style.get("chroma", 1.0))
@@ -157,19 +159,27 @@ def apply_color(rgb: np.ndarray, style: dict) -> np.ndarray:
         lab[..., 0] = np.interp(lab[..., 0], np.linspace(0, 100, len(lut)), lut).astype(np.float32)
     if target is not None:  # estilo aprendido solo de fotos acabadas: acercar la distribución, sin forzarla
         k = float(style.get("strength", 0.6))
-        sub = lab[::8, ::8]
-        src_q = np.percentile(sub[..., 0], np.linspace(0, 100, 256)) + np.arange(256) * 1e-6
+        if not stats:
+            sub = lab[::8, ::8]
+            c = np.hypot(sub[..., 1], sub[..., 2])
+            mid = (sub[..., 0] > 20) & (sub[..., 0] < 85)
+            got = {"src_q": np.percentile(sub[..., 0], np.linspace(0, 100, 256)) + np.arange(256) * 1e-6,
+                   "mid": bool(mid.any())}
+            if mid.any():
+                got.update(c=float(np.median(c[mid])), a=float(np.median(sub[..., 1][mid])),
+                           b=float(np.median(sub[..., 2][mid])))
+            if stats is not None:
+                stats.update(got)
+            stats = got
         tq = np.asarray(target, np.float32)
-        lab[..., 0] = ((1 - k) * lab[..., 0] + k * np.interp(lab[..., 0], src_q, tq)).astype(np.float32)
-        c = np.hypot(sub[..., 1], sub[..., 2])
-        mid = (sub[..., 0] > 20) & (sub[..., 0] < 85)
-        if style.get("target_chroma") and mid.any():
-            ratio = np.clip(style["target_chroma"] / max(float(np.median(c[mid])), 1e-3), 0.6, 1.6)
+        lab[..., 0] = ((1 - k) * lab[..., 0] + k * np.interp(lab[..., 0], stats["src_q"], tq)).astype(np.float32)
+        if style.get("target_chroma") and stats["mid"]:
+            ratio = np.clip(style["target_chroma"] / max(stats["c"], 1e-3), 0.6, 1.6)
             chroma *= 1 + k * (ratio - 1)
             # el color medio se acerca a medias y con tope: en discoteca el «color medio» son los focos,
             # y llevarlo entero tiñe de magenta fotos que no lo tenían
-            tint += 0.5 * k * (float(style.get("target_a", 0)) - float(np.median(sub[..., 1][mid])) * chroma)
-            warm += 0.5 * k * (float(style.get("target_b", 0)) - float(np.median(sub[..., 2][mid])) * chroma)
+            tint += 0.5 * k * (float(style.get("target_a", 0)) - stats["a"] * chroma)
+            warm += 0.5 * k * (float(style.get("target_b", 0)) - stats["b"] * chroma)
             tint, warm = float(np.clip(tint, -5, 5)), float(np.clip(warm, -7, 7))
     lab[..., 1] = lab[..., 1] * chroma + tint
     lab[..., 2] = lab[..., 2] * chroma + warm

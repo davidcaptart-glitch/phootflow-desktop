@@ -1019,11 +1019,47 @@ def skin_mask(ycc: np.ndarray) -> np.ndarray:
                       interpolation=cv2.INTER_LINEAR)
 
 
+_SIZES: dict = {}
+
+
+def full_size(path: str) -> tuple[int, int]:
+    """(ancho, alto) de la foto a resolución completa y ya orientada, sin revelarla (con caché)."""
+    if path in _SIZES:
+        return _SIZES[path]
+    w = h = 0
+    try:
+        if is_raw(path) and rawpy is not None:
+            with rawpy.imread(path) as r:
+                s = r.sizes
+                w, h = s.width, s.height
+                if s.flip in (5, 6):
+                    w, h = h, w
+        else:
+            with Image.open(path) as im:
+                w, h = im.size
+                if (im.getexif() or {}).get(0x0112) in (5, 6, 7, 8):
+                    w, h = h, w
+    except Exception:
+        pass
+    _SIZES[path] = (w, h)
+    return w, h
+
+
+def load_full(ph: Photo) -> np.ndarray:
+    return load_linear(ph.path, half=False, rebuild_highlights=ph.clipped > 0.002)
+
+
 def develop(ph: Photo, st: Settings) -> np.ndarray:
     """Revelado a resolución completa: exposición, grano, contraste, nitidez, estilo y giro. RGB 0..1."""
+    return np.clip(rotate(develop_lin(load_full(ph), ph, st), ph.angle), 0, 1)
+
+
+def develop_lin(lin: np.ndarray, ph: Photo, st: Settings, color_stats: dict | None = None) -> np.ndarray:
+    """El revelado de Events sobre una imagen lineal (entera o una zona), SIN girar. Todo es local salvo los
+    ajustes de sesión, que llegan en `st`: por eso sirve también para el detalle al 100 % de una zona."""
     sty = dict(styles.BASE, **(st.style or {}))
-    g = tone(load_linear(ph.path, half=False, rebuild_highlights=ph.clipped > 0.002),
-             ph.ev + float(sty["ev_bias"]))
+    g = tone(lin, ph.ev + float(sty["ev_bias"]))
+    del lin
     mult = NR_LEVELS[st.nr] * float(sty["nr"])
     # grano: según el ruido MEDIDO en la foto (a resolución completa ≈ el doble que en la de análisis,
     # y corregido por la diferencia de exposición). Si no hay medida, por ISO y exposición.
@@ -1061,7 +1097,7 @@ def develop(ph: Photo, st: Settings) -> np.ndarray:
     ycc[..., 2] += (SKIN_CB - ycc[..., 2]) * 0.30 * skin * (ycc[..., 2] > SKIN_CB)
     out = np.clip(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB), 0, 1)
     del ycc
-    out = styles.apply_color(out, sty)
+    out = styles.apply_color(out, sty, color_stats)
     if sty.get("cube"):
         k = float(sty.get("cube_strength", 1.0)) if ph.lut_strength is None else float(ph.lut_strength)
         out = luts.apply(out, sty["cube"], k)
@@ -1070,7 +1106,7 @@ def develop(ph: Photo, st: Settings) -> np.ndarray:
         bws = photo_bw_style(ph, st)
         if bws != BW_NONE:
             out = bw_editorial(out, seed=ph.dhash & 0xFFFFFFFF, style=bws)
-    return np.clip(rotate(out, ph.angle), 0, 1)
+    return np.clip(out, 0, 1)
 
 
 BW_NONE = "Sin B/N"  # valor por foto: esta foto no tiene versión en blanco y negro

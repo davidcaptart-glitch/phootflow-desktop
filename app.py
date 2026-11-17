@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 
 import drive as gdrive
 import compare as CMP
+import zoomview as Z
 import engine as E
 import license as LIC
 import luts as L
@@ -540,22 +541,44 @@ class PreviewLabel(QLabel):
         self.pm, self.crop, self.dim = None, None, False
         self.before = None
         self.cmp = CMP.CompareState()
+        self.zoom = Z.Zoom(self)
         self.r = QRectF()
 
     def set_image(self, pm, crop, dim=False, before=None):
         self.pm, self.crop, self.dim, self.before = pm, crop, dim, before
         self.update()
 
+    def zoom_pixmap(self):
+        return self.pm
+
+    def _area(self):
+        return QRectF(self.rect()).adjusted(10, 10, -10, -10)
+
+    def wheelEvent(self, e):
+        if self.pm is not None:
+            self.zoom.wheel(e.angleDelta().y(), e.position(), self._area(), self.pm.size())
+
+    def mouseDoubleClickEvent(self, e):
+        if self.pm is not None:
+            self.zoom.toggle(e.position(), self._area(), self.pm.size())
+
     def mousePressEvent(self, e):
+        if self.zoom.active and (e.button() == Qt.MiddleButton or not self.cmp.split):
+            self.zoom.start_pan(e.position())
+            return
         if CMP.drag(self.cmp, self.r, e.position().x(), e.position().y()):
             self.cmp.dragging = True
             self.update()
 
     def mouseMoveEvent(self, e):
+        if self.zoom.panning:
+            self.zoom.pan(e.position(), self._area(), self.pm.size())
+            return self.update()
         if self.cmp.dragging and CMP.drag(self.cmp, self.r, e.position().x(), e.position().y()):
             self.update()
 
     def mouseReleaseEvent(self, e):
+        self.zoom.end_pan()
         self.cmp.dragging = False
 
     def paintEvent(self, e):
@@ -569,12 +592,16 @@ class PreviewLabel(QLabel):
             p.setPen(QColor(T.MUTED))
             p.drawText(self.rect(), Qt.AlignCenter, "Elige una foto de la rejilla")
             return
-        area = self.rect().adjusted(10, 10, -10, -10)
-        s = self.pm.size().scaled(area.size(), Qt.KeepAspectRatio)
-        r = QRectF(area.x() + (area.width() - s.width()) / 2, area.y() + (area.height() - s.height()) / 2,
-                   s.width(), s.height())
+        area = self._area()
+        r = self.zoom.rect(area, self.pm.size())
         self.r = r
+        p.save()
+        p.setClipRect(area)
         CMP.paint(p, r, self.pm, self.before, self.cmp)
+        if not self.cmp.active:
+            self.zoom.draw_tile(p, r)
+        p.restore()
+        self.zoom.draw_badge(p, area, self.pm.size())
         if self.crop and self.crop != (0.0, 0.0, 1.0, 1.0) and not self.cmp.active:
             x0, y0, x1, y1 = self.crop
             c = QRectF(r.x() + x0 * r.width(), r.y() + y0 * r.height(), (x1 - x0) * r.width(),
@@ -993,6 +1020,8 @@ class Main(QMainWindow):
         v.addWidget(self.preview, 1)
         QShortcut(QKeySequence("Y"), self, lambda: (self.preview.cmp.next_split(),
                                                     self.set_compare(self.preview.cmp.mode)))
+        QShortcut(QKeySequence("Z"), self, lambda: self.preview.zoom.toggle(
+            None, self.preview._area(), self.preview.pm.size()) if self.preview.pm is not None else None)
         self.p_title = QLabel("")
         self.p_title.setObjectName("h1")
         self.p_info = QLabel("")
@@ -1381,6 +1410,32 @@ class Main(QMainWindow):
         pm = np_to_pixmap(render_preview(ph, self.settings().style))
         before = np_to_pixmap(render_before(ph)) if self.preview.cmp.active else None
         self.preview.set_image(pm, ph.crops.get(ph.best), dim=not ph.keep, before=before)
+        style = self.settings().style
+        self.preview.zoom.reset(key=(ph.path, round(ph.ev, 2), round(ph.angle, 2), ph.look, ph.bw_style,
+                                     str(sorted((k, str(v)) for k, v in style.items() if k != "lut"))[:400]),
+                                full_size=E.full_size(ph.path))
+        self.preview.zoom.provider = lambda box, ph=ph: self.zone_tile(ph, box, False)
+        self.preview.zoom.schedule()
+
+    def zone_tile(self, ph, box_rot, bw_view: bool):
+        """Zona visible a resolución completa con el revelado real de Events (para el zoom > vista previa)."""
+        if getattr(self, "_full", None) is None or self._full[0] != ph.path:
+            self._full = (ph.path, E.load_full(ph))
+        st = self.settings()
+        stats = None
+        if (st.style or {}).get("target_q") is not None:  # estilo aprendido: medidas de la foto entera
+            stats = {}
+            E.develop_lin(self._full[1][::6, ::6], ph, st, stats)
+
+        def dev(part):
+            out = E.develop_lin(part, ph, st, stats)
+            if bw_view and not st.style.get("bw"):
+                bws = E.photo_bw_style(ph, st)
+                if bws != E.BW_NONE:
+                    out = E.bw_editorial(out, seed=ph.dhash & 0xFFFFFFFF, style=bws)
+            return out
+
+        return Z.region(self._full[1], ph.angle, box_rot, dev, E._safe_rect)
 
     def set_compare(self, mode):
         self.preview.cmp.mode = mode
@@ -1515,7 +1570,8 @@ class Main(QMainWindow):
         dlg = review.ReviewDialog(self, render_fn, studio_fn,
                                   lambda ph: os.path.normcase(ph.path) in overrides, start,
                                   bw_style=self.bw_style_cb.currentText(), bw_on=self.c_bw.isChecked(),
-                                  look=self.look_cb.currentText(), before_fn=render_before)
+                                  look=self.look_cb.currentText(), before_fn=render_before,
+                                  tile_fn=self.zone_tile)
         dlg.exec()
         self.refresh_counts()
         self.apply_filter()

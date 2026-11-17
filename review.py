@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, 
                                QWidget)
 
 import compare as CMP
+import zoomview as Z
 import engine as E
 import theme as T
 
@@ -82,22 +83,44 @@ class Big(QWidget):
         self.pm, self.text, self.rejected = None, "", False
         self.before = None
         self.cmp = CMP.CompareState()
+        self.zoom = Z.Zoom(self)
         self.r = QRectF()
 
     def set(self, pm, text="", rejected=False, before=None):
         self.pm, self.text, self.rejected, self.before = pm, text, rejected, before
         self.update()
 
+    def zoom_pixmap(self):
+        return self.pm
+
+    def _area(self):
+        return QRectF(self.rect()).adjusted(12, 12, -12, -12)
+
+    def wheelEvent(self, e):
+        if self.pm is not None:
+            self.zoom.wheel(e.angleDelta().y(), e.position(), self._area(), self.pm.size())
+
+    def mouseDoubleClickEvent(self, e):
+        if self.pm is not None:
+            self.zoom.toggle(e.position(), self._area(), self.pm.size())
+
     def mousePressEvent(self, e):
+        if self.zoom.active and (e.button() == Qt.MiddleButton or not self.cmp.split):
+            self.zoom.start_pan(e.position())
+            return
         if CMP.drag(self.cmp, self.r, e.position().x(), e.position().y()):
             self.cmp.dragging = True
             self.update()
 
     def mouseMoveEvent(self, e):
+        if self.zoom.panning:
+            self.zoom.pan(e.position(), self._area(), self.pm.size())
+            return self.update()
         if self.cmp.dragging and CMP.drag(self.cmp, self.r, e.position().x(), e.position().y()):
             self.update()
 
     def mouseReleaseEvent(self, e):
+        self.zoom.end_pan()
         self.cmp.dragging = False
 
     def paintEvent(self, e):
@@ -105,12 +128,15 @@ class Big(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.fillRect(self.rect(), QColor(T.BG))
         if self.pm:
-            area = self.rect().adjusted(12, 12, -12, -12)
-            s = self.pm.size().scaled(area.size(), Qt.KeepAspectRatio)
-            r = QRectF(area.x() + (area.width() - s.width()) / 2, area.y() + (area.height() - s.height()) / 2,
-                       s.width(), s.height())
+            area = self._area()
+            r = self.zoom.rect(area, self.pm.size())
             self.r = r
+            p.setClipRect(area)
             CMP.paint(p, r, self.pm, self.before, self.cmp)
+            if not self.cmp.active:
+                self.zoom.draw_tile(p, r)
+            p.setClipping(False)
+            self.zoom.draw_badge(p, area, self.pm.size())
             if self.rejected:
                 p.fillRect(r, QColor(5, 7, 15, 110))
                 p.setPen(QPen(QColor(T.DANGER), 3))
@@ -126,7 +152,7 @@ class ReviewDialog(QDialog):
     studio_requested = Signal(object)
 
     def __init__(self, main, render_fn, studio_render_fn, is_studio_fn, start=0, bw_style="Editorial",
-                 bw_on=False, look="Natural", before_fn=None):
+                 bw_on=False, look="Natural", before_fn=None, tile_fn=None):
         super().__init__(main)
         self.setWindowTitle("Revisión antes de exportar")
         self.setWindowState(Qt.WindowMaximized)
@@ -139,6 +165,7 @@ class ReviewDialog(QDialog):
         self.bw_on = bw_on        # ¿se exporta versión B/N?
         self.look = look          # look de color de la sesión
         self.before_fn = before_fn  # foto tal como salió de la cámara (para comparar)
+        self.tile_fn = tile_fn      # tile_fn(ph, caja en la foto girada, bw) -> zona a resolución completa
         self._before: dict = {}
         self._cache: dict = {}
 
@@ -250,6 +277,8 @@ class ReviewDialog(QDialog):
         for k, fn in (("A", lambda: self.decide(True)), ("R", lambda: self.decide(False)), ("B", self.b_bw.toggle),
                       ("\\", lambda: self.set_compare("off" if self.big.cmp.mode == "full" else "full")),
                       ("Y", lambda: (self.big.cmp.next_split(), self.set_compare(self.big.cmp.mode))),
+                      ("Z", lambda: self.big.zoom.toggle(None, self.big._area(), self.big.pm.size())
+                       if self.big.pm is not None else None),
                       ("E", self._studio), (Qt.Key_Right, lambda: self.step(1)), (Qt.Key_Left, lambda: self.step(-1))):
             QShortcut(QKeySequence(k), self, fn)
         self.b_bw.setEnabled(True)
@@ -336,6 +365,16 @@ class ReviewDialog(QDialog):
                     self._before.pop(next(iter(self._before)))
             before = _pm(crop(b, box))
         self.big.set(_pm(img), label, rejected=not ph.keep, before=before)
+        if self.tile_fn and not studio:
+            fw, fh = E.full_size(ph.path)
+            self.big.zoom.reset(key=(ph.path, ph.best, self.bw, self.photo_look(ph), self.photo_bw(ph)),
+                                full_size=(int(fw * (box[2] - box[0])) or fw, fh))
+            self.big.zoom.provider = lambda b, ph=ph, box=box: self.tile_fn(
+                ph, (box[0] + b[0] * (box[2] - box[0]), box[1] + b[1] * (box[3] - box[1]),
+                     box[0] + b[2] * (box[2] - box[0]), box[1] + b[3] * (box[3] - box[1])), self.bw)
+            self.big.zoom.schedule()
+        else:
+            self.big.zoom.provider = None
         self._fill_crops(ph, base, studio)
         self._fill_bw(ph, color if self.bw else crop(base, box), studio)
 

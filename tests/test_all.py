@@ -393,6 +393,43 @@ class ReviewFlow(unittest.TestCase):
         self.assertEqual(found[os.path.normcase(os.path.join(d, "a.jpg"))]["exposure"], 0.4)
 
 
+class Zoom(unittest.TestCase):
+    def test_region_matches_full_rotate(self):
+        import engine as E
+        import zoomview as Z
+        yy, xx = np.mgrid[0:600, 0:900].astype(np.float32)
+        lin = np.dstack([xx / 900, yy / 600, (xx + yy) / 1500]).astype(np.float32)
+        for ang in (0.0, 2.5):
+            full = E.rotate(lin, ang)
+            box = (0.3, 0.4, 0.6, 0.7)
+            h, w = full.shape[:2]
+            ref = full[int(round(box[1] * h)):, int(round(box[0] * w)):]
+            part = Z.region(lin, ang, box, lambda a: a, E._safe_rect)
+            ref = ref[:part.shape[0], :part.shape[1]]
+            self.assertLess(float(np.abs(part[2:-2, 2:-2] - ref[2:-2, 2:-2]).mean()), 0.01)
+
+    def test_zoom_geometry(self):
+        from PySide6.QtCore import QPointF, QRectF, QSize
+        from PySide6.QtWidgets import QApplication, QWidget
+        import zoomview as Z
+        QApplication.instance() or QApplication([])
+        w = QWidget()
+        z = Z.Zoom(w)
+        z.reset("a", (6000, 4000))
+        area, pm = QRectF(0, 0, 800, 600), QSize(1500, 1000)
+        self.assertFalse(z.active)
+        z.toggle(QPointF(400, 300), area, pm)
+        self.assertEqual(z.pct, 1.0)
+        r = z.rect(area, pm)
+        self.assertAlmostEqual(r.width(), 6000, places=3)
+        b = z.visible_box(area, pm)
+        self.assertAlmostEqual(b[2] - b[0], 800 / 6000, places=3)
+        z.wheel(-120, QPointF(400, 300), area, pm)
+        self.assertEqual(z.pct, 0.5)
+        z.toggle(None, area, pm)
+        self.assertFalse(z.active)
+
+
 class Updater(unittest.TestCase):
     def test_versions(self):
         self.assertTrue(updater.is_newer("v0.10.0", "0.9.9"))
