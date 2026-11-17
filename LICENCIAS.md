@@ -85,7 +85,7 @@ Ya está cambiado en esta rama:
 
 **Pendiente (lo haces tú; no he cambiado nada en GitHub):**
 
-1. Crear el repo **público** `phootflow-releases` con un README, para que tenga al menos un commit.
+1. ~~Crear el repo **público** `phootflow-releases` con un README~~. Hecho el 17/11/2026.
 2. Crear un *fine-grained token* con permiso *Contents: Read and write* solo sobre `phootflow-releases` y
    guardarlo como secreto `RELEASES_TOKEN` en `phootflow-desktop` (*Settings → Secrets and variables → Actions*).
 3. **Orden de la transición.** Las copias instaladas (0.6.0 y anteriores) buscan versiones en `phootflow-desktop`.
