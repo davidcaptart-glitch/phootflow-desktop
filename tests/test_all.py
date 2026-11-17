@@ -722,6 +722,175 @@ class Edits(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(out_dir, "Sugeridas", "a_edits_1080.jpg")))
 
 
+class Graphics(unittest.TestCase):
+    """Diseño tipo Canva/Illustrator sobre imágenes sintéticas."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+
+    def logo(self):
+        a = np.full((300, 400, 3), 255, np.uint8)
+        cv2.circle(a, (130, 150), 90, (245, 13, 138), -1)
+        cv2.rectangle(a, (240, 60), (370, 240), (5, 7, 15), -1)
+        cv2.circle(a, (305, 150), 30, (255, 255, 255), -1)  # agujero
+        return a
+
+    def test_vectorize_color_bw_and_svg(self):
+        import xml.etree.ElementTree as ET
+        import graphics_engine as G
+        vec = G.vectorize(self.logo(), "color", 3, 70)
+        fills = [p["fill"] for p in vec["paths"]]
+        self.assertEqual(len(fills), 3)
+        self.assertEqual(fills[0], "#FFFFFF")  # el fondo va debajo y lo cubre todo
+        bw = G.vectorize(self.logo(), "bw", drop_bg=True)
+        self.assertEqual([p["fill"] for p in bw["paths"]], ["#000000"])
+        # el trazado rellena lo que era tinta y respeta el agujero (par-impar)
+        path = G.parse_path(bw["paths"][0]["d"])
+        from PySide6.QtCore import QPointF
+        self.assertTrue(path.contains(QPointF(305, 90)))
+        self.assertFalse(path.contains(QPointF(305, 150)))
+        self.assertFalse(path.contains(QPointF(20, 20)))
+        root = ET.fromstring(G.vector_svg(vec).split("?>", 1)[1])
+        self.assertEqual(len(root), 3)
+
+    def test_remove_background_keeps_subject(self):
+        import graphics_engine as G
+        out, used = G.remove_background(self.logo())
+        self.assertEqual(used, "color")
+        self.assertEqual(out.shape[2], 4)
+        self.assertLess(out[10, 10, 3], 10)
+        self.assertGreater(out[150, 130, 3], 245)
+        self.assertGreater(out[150, 300, 3], 245)
+        obj = np.full((240, 320, 3), 0, np.uint8)
+        obj[:] = np.random.default_rng(3).integers(0, 90, obj.shape, dtype=np.uint8)
+        cv2.circle(obj, (160, 120), 60, (240, 220, 40), -1)
+        out, _ = G.remove_background(obj, "object")
+        self.assertGreater(out[120, 160, 3], 200)
+        self.assertLess(out[10, 10, 3], 60)
+
+    def test_nodes_pathfinder_and_outlines(self):
+        import graphics_engine as G
+        d = G.design_from_preset("Instagram cuadrado")
+        subs = [{"nodes": [{"p": [10, 10], "i": [10, 10], "o": [60, 0]},
+                           {"p": [200, 100], "i": [150, 0], "o": [200, 100]},
+                           {"p": [50, 200], "i": [50, 200], "o": [50, 200]}], "closed": True}]
+        el = G.path_el(d, subs)
+        dd = el["paths"][0]["d"]
+        self.assertEqual(G.nodes_to_d(G.d_to_nodes(dd)), dd)
+        a = G.shape_el(d, "rect", x=0, y=0, w=100, h=100)
+        b = G.shape_el(d, "rect", x=50, y=0, w=100, h=100)
+        self.assertEqual((G.pathfinder([a, b], "union")["w"], G.pathfinder([a, b], "intersect")["w"]), (150, 50))
+        self.assertAlmostEqual(G.pathfinder([a, b], "subtract")["w"], 50, places=3)
+        t = G.text_el(d, "Hola", "title")
+        o = G.outline_text_el(t)
+        self.assertEqual(o["type"], "vector")
+        self.assertGreater(len(o["paths"][0]["d"]), 100)
+
+    def test_qr_is_readable_and_text_effects_survive_outlines(self):
+        import graphics_engine as G
+        from PySide6.QtGui import QImage, QPainter
+        d = G.design_from_preset("Instagram cuadrado")
+        q = G.qr_el(d, "https://ejemplo.com/galeria")
+        d["elements"] = [q]
+        with tempfile.TemporaryDirectory() as tmp:
+            png = G.export_raster(d, os.path.join(tmp, "qr.png"), G.ImageCache(), 0.5)
+            img = cv2.imread(png)
+        text, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
+        self.assertEqual(text, "https://ejemplo.com/galeria")
+        t = G.text_el(d, "Fiesta", "title", outline="#F50D8A", outline_w=6.0,
+                      shadow={"color": "#00000080", "dx": 8, "dy": 8})
+        v = G.outline_text_el(t)
+        self.assertEqual([p["fill"] for p in v["paths"]], ["#00000080", "#00000000", t["color"]])
+        im = QImage(400, 200, QImage.Format_ARGB32)
+        im.fill(0)
+        pa = QPainter(im)
+        G.paint_element(pa, t, G.ImageCache())  # pinta contorno y sombra sin errores
+        pa.end()
+
+    def test_pages_curved_text_and_brand(self):
+        import re
+        import graphics_engine as G
+        d = G.design_from_preset("Tarjeta de visita")
+        G.apply_template(d, "Tarjeta de visita")
+        self.assertEqual(len(d["pages"]), 2)  # anverso y reverso
+        front = len(d["elements"])
+        G.add_page(d, duplicate_current=True)
+        self.assertEqual((len(d["pages"]), d["page"], len(d["elements"])), (3, 1, front))
+        self.assertNotEqual(d["elements"][0]["id"], d["pages"][0]["elements"][0]["id"])
+        d["elements"] = []  # el código de la interfaz reasigna la lista: sync_page la guarda en su página
+        d["bg"] = "#123456"
+        G.move_page(d, 1)
+        self.assertEqual((d["page"], d["pages"][2]["bg"], d["pages"][2]["elements"]), (2, "#123456", []))
+        G.delete_page(d)
+        self.assertEqual(len(d["pages"]), 2)
+        t = G.text_el(d, "Fotografía de eventos", "subtitle")
+        flat = t["h"]
+        t["curve"] = 140.0
+        self.assertGreater(G.text_height(t), flat * 1.3)  # el arco ocupa más alto que la línea recta
+        self.assertEqual(G.outline_text_el(t)["type"], "vector")
+        d["elements"].append(t)
+        n = G.apply_brand(d, {"title_font": "Georgia", "body_font": "Arial"})
+        self.assertGreater(n, 3)
+        self.assertEqual(t["font"], "Arial" if t["size"] < 0.06 * min(d["w"], d["h"]) else "Georgia")
+        with tempfile.TemporaryDirectory() as tmp:
+            back = G.load(G.save(d, tmp))
+            self.assertEqual([len(pg["elements"]) for pg in back["pages"]],
+                             [len(pg["elements"]) for pg in d["pages"]])
+            self.assertIs(back["elements"], back["pages"][back["page"]]["elements"])
+            pdf = G.export_pdf(d, os.path.join(tmp, "t.pdf"), G.ImageCache())
+            with open(pdf, "rb") as f:
+                self.assertEqual(len(re.findall(rb"/Type\s*/Page[^s]", f.read())), 2)
+
+    def test_snap_align_and_save(self):
+        import graphics_engine as G
+        d = G.design_from_preset("Instagram cuadrado")
+        e = G.shape_el(d, "rect", x=3, y=500, w=100, h=100)
+        dx, dy, gx, gy = G.snap(G.bbox(e), *G.snap_lines(d, []), 6)
+        self.assertEqual((dx, gx), (-3, [0.0]))
+        G.align(d, [e], "hcenter")
+        self.assertAlmostEqual(e["x"] + 50, 540)
+        d["elements"].append(e)
+        with tempfile.TemporaryDirectory() as tmp:
+            G.save(d, tmp)
+            (path, back), = G.list_designs(tmp)
+            self.assertEqual(back["elements"][0]["x"], e["x"])
+
+    def test_print_pdf_bleed_marks_cmyk_and_raster(self):
+        import re
+        import graphics_engine as G
+        with tempfile.TemporaryDirectory() as tmp:
+            scene().save(os.path.join(tmp, "f.jpg"))
+            d = G.design_from_preset("A5 (flyer)")
+            for name in G.TEMPLATES:
+                G.apply_template(d, name)  # todas las plantillas se montan sin errores
+            G.apply_template(d, "Flyer de servicios")
+            ph = next(e for e in d["elements"] if e["type"] == "image")
+            ph["path"] = os.path.join(tmp, "f.jpg")
+            cache = G.ImageCache()
+            pdf = os.path.join(tmp, "a.pdf")
+            G.export_pdf(d, pdf, cache, 3.0, True, True)
+            with open(pdf, "rb") as f:
+                data = f.read()
+            self.assertIn(b"DeviceCMYK", data)
+            box = [float(x) for x in re.search(rb"/MediaBox \[([\d. ]+)\]", data).group(1).split()]
+            # A5 + 2 × (3 mm de sangrado + 8 mm para las marcas), en puntos
+            self.assertAlmostEqual(box[2], (148 + 22) / 25.4 * 72, delta=1.0)
+            self.assertAlmostEqual(box[3], (210 + 22) / 25.4 * 72, delta=1.0)
+            # la foto toca el borde: se alarga hasta el sangrado
+            ext = next(e for e in G.bleed_elements(d, 30) if e["type"] == "image")
+            self.assertEqual((ext["x"], ext["y"]), (-30, -30))
+            png = G.export_raster(d, os.path.join(tmp, "a.png"), cache, 0.25)
+            with Image.open(png) as im:
+                self.assertEqual(im.size, (round(d["w"] * 0.25), round(d["h"] * 0.25)))
+            self.assertGreater(os.path.getsize(G.export_svg(d, os.path.join(tmp, "a.svg"), cache)), 1000)
+            # 800 px de ancho para ~148 mm: se avisa de que se imprimiría a menos de 200 ppp
+            warn = G.image_warnings(d, cache)
+            self.assertEqual(len(warn), 1)
+            self.assertTrue(warn[0].startswith("f.jpg: "))
+
+
 class Updater(unittest.TestCase):
     def test_versions(self):
         self.assertTrue(updater.is_newer("v0.10.0", "0.9.9"))

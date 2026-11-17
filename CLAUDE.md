@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 39 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 46 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -47,6 +47,11 @@ python -m unittest discover -s tests   # 39 pruebas, sin fotos reales ni red
   Interfaz al estilo de PhotoCraft (ArtCraft): `edits_ui.py` (panel de capas, Curvas/Niveles, pestañas) y
   `edits_adjust.py` (capas de ajuste y modos de fusión portados de PhotoCraft, MIT/Apache-2.0); selecciones
   y máscaras con `edits_engine.selection_mask`.
+- `graphics.py` / `graphics_engine.py` — entorno **Graphics** (Canva + Illustrator): diseños JSON en
+  `%APPDATA%\PhootFlow\diseños`, varias páginas, kit de marca (`diseños\marca.json`), plantillas, capas,
+  grupos, imán, texto curvo, pluma y nodos, Buscatrazos, QR, quitar fondo
+  (PNG aparte en `diseños\recortes`), vectorizar (OpenCV) y PDF de imprenta (sangrado, marcas, CMYK simple).
+  Un solo pintor (`paint_element`) para lienzo y exportación.
 - `luts.py` — LUT .cube por tipo de sesión; `eyes.py` (MediaPipe) y `scene_ai.py` (CLIP, onnxruntime): IA local.
 - `drive.py` — OAuth de escritorio con PKCE y Drive v3 por REST.
 - `license.py` — licencias: `ensure()` en `main()` (pide clave, valida en la Edge Function `licencias` de
