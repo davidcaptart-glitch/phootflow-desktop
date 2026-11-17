@@ -139,6 +139,35 @@ def vector_el(vec: dict, x: float, y: float, w: float, h: float, **kw) -> dict:
     return el
 
 
+def qr_el(d: dict, text: str, color: str = "#05070F", bg: str = "#FFFFFF") -> dict:
+    """Código QR vectorial (OpenCV, sin dependencias nuevas): módulos unidos por filas en un único trazado."""
+    m = cv2.QRCodeEncoder.create().encode(text)
+    if m is None or not m.size:
+        raise ValueError("No se pudo crear el código QR")
+    dark = m < 128
+    n = dark.shape[0]
+    q = 2  # zona en blanco alrededor
+    parts = []
+    for y in range(n):
+        x = 0
+        while x < n:
+            if dark[y, x]:
+                x0 = x
+                while x < n and dark[y, x]:
+                    x += 1
+                parts.append(f"M {x0 + q} {y + q} L {x + q} {y + q} L {x + q} {y + q + 1} L {x0 + q} {y + q + 1} Z")
+            else:
+                x += 1
+    s_ = n + 2 * q
+    paths = [{"fill": bg, "d": f"M 0 0 L {s_} 0 L {s_} {s_} L 0 {s_} Z"}] if bg else []
+    paths.append({"fill": color, "d": " ".join(parts)})
+    side = min(d["w"], d["h"]) * 0.25
+    el = base_el("vector", (d["w"] - side) / 2, (d["h"] - side) / 2, side, side, viewbox=[s_, s_], paths=paths,
+                 qr=text)
+    el["name"] = "QR  " + text[:30]
+    return el
+
+
 def find(d: dict, eid: str) -> dict | None:
     return next((e for e in d["elements"] if e["id"] == eid), None)
 
@@ -162,7 +191,8 @@ def layer_name(el: dict) -> str:
     if t == "image":
         return "Foto  " + (os.path.basename(el["path"]) if el.get("path") else "(hueco)")
     if t == "vector":
-        return f"Vector  ({len(el.get('paths', []))} colores)"
+        n = len(el.get("paths", []))
+        return f"Vector  ({n} {'color' if n == 1 else 'colores'})"
     return {"rect": "Rectángulo", "ellipse": "Círculo", "triangle": "Triángulo", "star": "Estrella",
             "line": "Línea"}.get(el.get("shape"), "Forma")
 
@@ -613,7 +643,7 @@ def _hex(c) -> str:
 
 
 def vectorize(rgb: np.ndarray, mode: str = "color", colors: int = 6, detail: int = 60,
-              drop_bg: bool = False, curves: bool = True, max_side: int = 1000) -> dict:
+              drop_bg: bool = False, curves: bool = True, max_side: int = 1000, invert: bool = False) -> dict:
     """Mapa de bits → trazados vectoriales.
 
     mode «bw»: tinta negra sobre lo que se parezca al fondo (umbral de Otsu; se decide qué es tinta mirando los
@@ -643,6 +673,8 @@ def vectorize(rgb: np.ndarray, mode: str = "color", colors: int = 6, detail: int
         _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         dark = th == 0
         ink = dark if dark[border & opaque].mean() < 0.5 else ~dark
+        if invert:
+            ink = ~ink
         ink &= opaque
         if not drop_bg:
             layers.append(("#FFFFFF", np.ones((h, w), bool)))
@@ -735,6 +767,203 @@ def parse_path(d: str):
     return p
 
 
+# ------------------------------------------------------------------ trazados editables (tipo Illustrator)
+# Un nodo es {"p": [x, y], "i": [x, y], "o": [x, y]}: el punto de anclaje y sus manecillas de entrada y salida
+# (iguales a "p" si es una esquina). Un subtrazado es {"nodes": [...], "closed": bool}.
+
+def nodes_to_d(subs: list[dict]) -> str:
+    f = lambda q: f"{q[0]:.2f} {q[1]:.2f}"  # noqa: E731
+    out = []
+    for s in subs:
+        ns = s["nodes"]
+        if not ns:
+            continue
+        parts = ["M " + f(ns[0]["p"])]
+        segs = list(zip(ns, ns[1:])) + ([(ns[-1], ns[0])] if s.get("closed") and len(ns) > 1 else [])
+        for a, b in segs:
+            if a["o"] == a["p"] and b["i"] == b["p"]:
+                parts.append("L " + f(b["p"]))
+            else:
+                parts.append(f"C {f(a['o'])} {f(b['i'])} {f(b['p'])}")
+        if s.get("closed"):
+            parts.append("Z")
+        out.append(" ".join(parts))
+    return " ".join(out)
+
+
+def d_to_nodes(d: str) -> list[dict]:
+    toks = _TOK.findall(d)
+    subs, cur, i, cmd = [], None, 0, "M"
+    while i < len(toks):
+        t = toks[i]
+        if t in "MLCZ":
+            cmd = t
+            i += 1
+            if t == "Z" and cur:
+                cur["closed"] = True
+                ns = cur["nodes"]
+                if len(ns) > 1 and abs(ns[0]["p"][0] - ns[-1]["p"][0]) < 1e-6 and \
+                        abs(ns[0]["p"][1] - ns[-1]["p"][1]) < 1e-6:
+                    ns[0]["i"] = ns[-1]["i"]
+                    ns.pop()
+            continue
+        n = 6 if cmd == "C" else 2
+        v = [float(x) for x in toks[i:i + n]]
+        if len(v) < n:
+            break
+        i += n
+        if cmd == "M":
+            cur = {"nodes": [{"p": v[:2], "i": v[:2], "o": v[:2]}], "closed": False}
+            subs.append(cur)
+            cmd = "L"
+        elif cmd == "L" and cur:
+            cur["nodes"].append({"p": v[:2], "i": v[:2], "o": v[:2]})
+        elif cur:
+            cur["nodes"][-1]["o"] = v[:2]
+            cur["nodes"].append({"p": v[4:6], "i": v[2:4], "o": v[4:6]})
+    return subs
+
+
+def qpath_to_d(path) -> str:
+    """QPainterPath → «M L C Z» (para guardar el resultado del Buscatrazos)."""
+    from PySide6.QtGui import QPainterPath
+    out, i, n, start = [], 0, path.elementCount(), None
+    while i < n:
+        e = path.elementAt(i)
+        if e.type == QPainterPath.ElementType.MoveToElement:
+            if start is not None:
+                out.append("Z")
+            out.append(f"M {e.x:.2f} {e.y:.2f}")
+            start = (e.x, e.y)
+            i += 1
+        elif e.type == QPainterPath.ElementType.LineToElement:
+            out.append(f"L {e.x:.2f} {e.y:.2f}")
+            i += 1
+        else:
+            c1, c2, pt = path.elementAt(i), path.elementAt(i + 1), path.elementAt(i + 2)
+            out.append(f"C {c1.x:.2f} {c1.y:.2f} {c2.x:.2f} {c2.y:.2f} {pt.x:.2f} {pt.y:.2f}")
+            i += 3
+    if start is not None:
+        out.append("Z")
+    return " ".join(out)
+
+
+def path_el(d: dict, subs: list[dict], fill: str = "#F50D8A", stroke: str = "#05070F", stroke_w: float = 0.0,
+            closed_fill: bool = True) -> dict | None:
+    """Trazado de la pluma (en coordenadas del diseño) → elemento vector con caja ajustada."""
+    pts = [q for s in subs for nd in s["nodes"] for q in (nd["p"], nd["i"], nd["o"])]
+    if not pts:
+        return None
+    xs, ys = [q[0] for q in pts], [q[1] for q in pts]
+    x0, y0 = min(xs), min(ys)
+    w, h = max(1.0, max(xs) - x0), max(1.0, max(ys) - y0)
+    loc = [{"closed": s.get("closed", False), "nodes": [{k: [nd[k][0] - x0, nd[k][1] - y0] for k in "pio"}
+                                                         for nd in s["nodes"]]} for s in subs]
+    anyclosed = any(s.get("closed") for s in subs)
+    sp = {"fill": fill if (anyclosed and closed_fill) else "#00000000", "d": nodes_to_d(loc),
+          "stroke": stroke, "stroke_w": stroke_w if (stroke_w or not anyclosed) else 0.0}
+    if not anyclosed and not sp["stroke_w"]:
+        sp["stroke_w"] = max(2.0, min(d["w"], d["h"]) * 0.004)
+    return base_el("vector", x0, y0, w, h, viewbox=[w, h], paths=[sp])
+
+
+def element_qpath(el: dict):
+    """Silueta del elemento en coordenadas del diseño (para el Buscatrazos y las máscaras)."""
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QPainterPath, QTransform
+    if el["type"] == "vector":
+        vw, vh = el.get("viewbox", [1, 1])
+        p = QPainterPath()
+        p.setFillRule(Qt_OddEven())
+        for sp in el.get("paths", []):
+            if (sp.get("fill") or "").endswith("00") and len(sp.get("fill", "")) == 9:
+                continue
+            p.addPath(_qpath(sp["d"]))
+        p = QTransform.fromScale(el["w"] / max(vw, 1e-6), el["h"] / max(vh, 1e-6)).map(p)
+    elif el["type"] == "shape":
+        p = _shape_path(el)
+    elif el["type"] == "text":
+        p = text_outline(el)
+    else:
+        p = QPainterPath()
+        p.addRect(QRectF(0, 0, el["w"], el["h"]))
+    return element_transform(el).map(p)
+
+
+def text_outline(el: dict):
+    """Texto → contornos (como «Crear contornos» de Illustrator): la imprenta no necesita la fuente."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPainterPath, QTransform
+    p = QPainterPath()
+    p.setFillRule(Qt.WindingFill)
+    lays, _ = _text_layout(el)
+    for lay in lays:
+        for run in lay.glyphRuns():
+            raw = run.rawFont()
+            for gi, pos in zip(run.glyphIndexes(), run.positions()):
+                p.addPath(QTransform.fromTranslate(pos.x(), pos.y()).map(raw.pathForGlyph(gi)))
+    return p
+
+
+def outline_text_el(el: dict) -> dict:
+    """Elemento de texto → vector con las mismas medidas y color."""
+    from PySide6.QtCore import Qt
+    path = text_outline(el)
+    path.setFillRule(Qt.WindingFill)
+    path = path.simplified()  # resuelve solapes de letras (OddEven no los rellenaría bien)
+    d_ = qpath_to_d(path)
+    paths = []
+    ow = float(el.get("outline_w", 0.0))
+    sh = el.get("shadow")
+    if sh:  # sombra y contorno se conservan, en el mismo orden en que se pintan
+        from PySide6.QtGui import QTransform
+        sd = qpath_to_d(QTransform.fromTranslate(sh.get("dx", 0.0), sh.get("dy", 0.0)).map(path))
+        paths.append({"fill": sh.get("color", "#00000080"), "d": sd, "stroke": sh.get("color", "#00000080"),
+                      "stroke_w": ow})
+    if ow > 0:
+        paths.append({"fill": "#00000000", "d": d_, "stroke": el.get("outline", "#000000"), "stroke_w": ow})
+    paths.append({"fill": el.get("color", "#000000"), "d": d_})
+    v = base_el("vector", el["x"], el["y"], el["w"], el["h"], viewbox=[el["w"], el["h"]], rot=el.get("rot", 0.0),
+                opacity=el.get("opacity", 1.0), paths=paths)
+    v["name"] = "Contornos: " + el.get("text", "").strip().split("\n")[0][:20]
+    return v
+
+
+def Qt_OddEven():
+    from PySide6.QtCore import Qt
+    return Qt.OddEvenFill
+
+
+PATHFINDER = {"union": "Unir", "subtract": "Restar delantero", "intersect": "Intersecar", "exclude": "Excluir"}
+
+
+def pathfinder(els: list[dict], op: str) -> dict | None:
+    """Buscatrazos: combina las siluetas (de abajo arriba) en un único vector con el color del de abajo."""
+    if len(els) < 2:
+        return None
+    paths = [element_qpath(e).simplified() for e in els]
+    res = paths[0]
+    for q in paths[1:]:
+        if op == "union":
+            res = res.united(q)
+        elif op == "subtract":
+            res = res.subtracted(q)
+        elif op == "intersect":
+            res = res.intersected(q)
+        else:
+            res = res.united(q).subtracted(res.intersected(q))
+    r = res.boundingRect()
+    if r.isEmpty():
+        return None
+    from PySide6.QtGui import QTransform
+    res = QTransform.fromTranslate(-r.x(), -r.y()).map(res)
+    base = els[0]
+    fill = base.get("fill") if base["type"] == "shape" else \
+        (base.get("paths") or [{}])[0].get("fill", "#05070F") if base["type"] == "vector" else "#05070F"
+    return base_el("vector", r.x(), r.y(), r.width(), r.height(), viewbox=[r.width(), r.height()],
+                   paths=[{"fill": fill or "#05070F", "d": qpath_to_d(res)}], grad=base.get("grad"))
+
+
 # ------------------------------------------------------------------ pintado (lienzo y exportación)
 
 class ImageCache:
@@ -746,15 +975,20 @@ class ImageCache:
         self.limit = limit
         self.sizes = {}
 
-    def get(self, path: str, max_side: int, bw: bool = False):
+    def get(self, path: str, max_side: int, bw: bool = False, look: str = ""):
         from PySide6.QtGui import QImage
-        key = (path, max_side, bw)
+        key = (path, max_side, bw, look)
         if key in self.d:
             self.d.move_to_end(key)
             return self.d[key]
         a = load_rgb(path, max_side)
         if a is None:
             return None
+        if look and look != "Natural":
+            import engine as E
+            rgb = E.apply_look(a[..., :3].astype(np.float32) / 255, look)
+            rgb = (np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8)
+            a = np.concatenate([rgb, a[..., 3:]], 2) if a.shape[2] == 4 else rgb
         if bw:
             g = cv2.cvtColor(a[..., :3], cv2.COLOR_RGB2GRAY)
             g = np.stack([g] * 3, 2)
@@ -887,12 +1121,28 @@ def _shape_path(el):
     return p
 
 
+def make_brush(fill, grad, rect):
+    """Relleno plano o degradado lineal {"c1", "c2", "angle"} (como en Illustrator/Canva)."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QBrush, QLinearGradient
+    if grad and grad.get("c1") and grad.get("c2"):
+        a = math.radians(grad.get("angle", 90.0))
+        c = rect.center()
+        r = (abs(math.cos(a)) * rect.width() + abs(math.sin(a)) * rect.height()) / 2
+        g = QLinearGradient(QPointF(c.x() - math.cos(a) * r, c.y() - math.sin(a) * r),
+                            QPointF(c.x() + math.cos(a) * r, c.y() + math.sin(a) * r))
+        g.setColorAt(0, qcolor(grad["c1"]))
+        g.setColorAt(1, qcolor(grad["c2"]))
+        return QBrush(g)
+    return QBrush(qcolor(fill or "#00000000"))
+
+
 def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px: float = 1.0,
                   max_img: int = 1600) -> None:
     """Dibuja un elemento en sus coordenadas locales (0, 0, w, h); quien llama pone la posición y el giro.
     `img_px` = píxeles de salida por píxel de diseño (para pedir las fotos a la resolución justa)."""
     from PySide6.QtCore import QPointF, QRectF, Qt
-    from PySide6.QtGui import QBrush, QColor, QFont, QPainterPath, QPen
+    from PySide6.QtGui import QColor, QFont, QPainterPath, QPen
     w, h = el["w"], el["h"]
     if el.get("hidden") or w <= 0 or h <= 0:
         return
@@ -910,24 +1160,45 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
         else:
             p.setPen(QPen(qcolor(el.get("stroke")), sw, Qt.SolidLine, Qt.FlatCap, Qt.MiterJoin) if sw > 0
                      else Qt.NoPen)
-            p.setBrush(QBrush(qcolor(el.get("fill"))))
+            p.setBrush(make_brush(el.get("fill"), el.get("grad"), QRectF(0, 0, w, h)))
         p.drawPath(path)
     elif t == "text":
-        p.setPen(qcolor(el.get("color")))
         lays, _ = _text_layout(el)
+        sh = el.get("shadow")
+        ow = float(el.get("outline_w", 0.0))
+        if sh or ow > 0:
+            path = text_outline(el)
+            if sh:
+                # sombra dura y desplazada (vectorial: se imprime igual que se ve)
+                p.save()
+                p.translate(sh.get("dx", 0.0), sh.get("dy", 0.0))
+                p.setPen(Qt.NoPen)
+                p.setBrush(qcolor(sh.get("color", "#00000080")))
+                p.drawPath(path)
+                if ow > 0:
+                    p.strokePath(path, QPen(qcolor(sh.get("color", "#00000080")), ow, Qt.SolidLine, Qt.RoundCap,
+                                            Qt.RoundJoin))
+                p.restore()
+            if ow > 0:
+                p.strokePath(path, QPen(qcolor(el.get("outline", "#000000")), ow, Qt.SolidLine, Qt.RoundCap,
+                                        Qt.RoundJoin))
+        p.setPen(qcolor(el.get("color")))
         for lay in lays:
             lay.draw(p, QPointF(0, 0))
     elif t == "image":
-        clip = QPainterPath()
-        r = min(el.get("radius", 0.0), w / 2, h / 2)
-        clip.addRoundedRect(QRectF(0, 0, w, h), r, r)
+        if el.get("clip") and el["clip"] != "rect":
+            clip = _shape_path({"shape": el["clip"], "w": w, "h": h})
+        else:
+            clip = QPainterPath()
+            r = min(el.get("radius", 0.0), w / 2, h / 2)
+            clip.addRoundedRect(QRectF(0, 0, w, h), r, r)
         p.setClipPath(clip, Qt.IntersectClip)
         img = None
         if el.get("path") and os.path.exists(el["path"]):
             want = int(min(max_img, max(64, max(w, h) * img_px * max(1.0, el.get("zoom", 1.0)) * 1.15)))
             # pedir por escalones para reutilizar la caché
             step = 1 << max(6, int(math.ceil(math.log2(want))))
-            img = cache.get(el["path"], min(step, max_img), bool(el.get("bw")))
+            img = cache.get(el["path"], min(step, max_img), bool(el.get("bw")), el.get("look", ""))
         if img is not None and not img.isNull():
             x, y, cw, ch = cover_box(img.width(), img.height(), w, h, el.get("zoom", 1.0), el.get("fx", 0.5),
                                      el.get("fy", 0.5))
@@ -948,10 +1219,19 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
     elif t == "vector":
         vw, vh = el.get("viewbox", [1, 1])
         p.scale(w / max(vw, 1e-6), h / max(vh, 1e-6))
-        p.setPen(Qt.NoPen)
         for sp in el.get("paths", []):
-            p.setBrush(QBrush(qcolor(sp["fill"])))
-            p.drawPath(_qpath(sp["d"]))
+            path = _qpath(sp["d"])
+            p.setBrush(make_brush(sp.get("fill"), el.get("grad") if len(el.get("paths", [])) == 1 else None,
+                                  QRectF(0, 0, vw, vh)))
+            sw = float(sp.get("stroke_w", 0.0))
+            if sw > 0:
+                # grosor en unidades del viewbox: escala con el elemento
+                pen = QPen(qcolor(sp.get("stroke", "#000000")), sw, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                pen.setCosmetic(False)
+                p.setPen(pen)
+            else:
+                p.setPen(Qt.NoPen)
+            p.drawPath(path)
     p.restore()
 
 
@@ -1065,13 +1345,10 @@ def export_pdf(d: dict, path: str, cache: ImageCache, bleed_mm: float = 3.0, mar
     CMYK: Qt convierte los colores con la fórmula simple (sin perfil ICC de la imprenta): sirve para imprentas que
     piden CMYK, pero el color exacto depende de su perfil.
     """
-    from PySide6.QtCore import QLineF, QMarginsF, QPointF, QRectF, QSizeF, Qt
-    from PySide6.QtGui import QColor, QPageLayout, QPageSize, QPainter, QPdfWriter, QPen
-    dpi = d.get("dpi", PRINT_DPI)
-    tw, th = px_to_mm(d["w"], dpi), px_to_mm(d["h"], dpi)
+    from PySide6.QtCore import QMarginsF, QSizeF
+    from PySide6.QtGui import QPageLayout, QPageSize, QPainter, QPdfWriter
     bleed = max(0.0, bleed_mm)
-    margin = bleed + (8.0 if marks else 0.0)  # zona para las marcas: empiezan a 3 mm del corte (o al sangrado)
-    pw, ph = tw + 2 * margin, th + 2 * margin
+    pw, ph, _ = print_layout(d, bleed, marks)  # las marcas empiezan a 3 mm del corte (o al sangrado)
     w = QPdfWriter(path)
     w.setResolution(res)
     w.setCreator("PhootFlow Graphics")
@@ -1081,6 +1358,40 @@ def export_pdf(d: dict, path: str, cache: ImageCache, bleed_mm: float = 3.0, mar
     w.setPageLayout(QPageLayout(QPageSize(QSizeF(pw, ph), QPageSize.Millimeter, "", QPageSize.ExactMatch),
                                 QPageLayout.Portrait, QMarginsF(0, 0, 0, 0), QPageLayout.Millimeter))
     p = QPainter(w)
+    _paint_print(p, d, cache, bleed, marks, cmyk, res)
+    p.end()
+    return path
+
+
+def print_layout(d: dict, bleed_mm: float, marks: bool) -> tuple[float, float, float]:
+    """(ancho, alto, margen) de la hoja del PDF en mm: corte + sangrado + zona de marcas."""
+    dpi = d.get("dpi", PRINT_DPI)
+    bleed = max(0.0, bleed_mm)
+    margin = bleed + (8.0 if marks else 0.0)
+    return px_to_mm(d["w"], dpi) + 2 * margin, px_to_mm(d["h"], dpi) + 2 * margin, margin
+
+
+def print_proof(d: dict, cache: ImageCache, bleed_mm: float = 3.0, marks: bool = True, cmyk: bool = False,
+                res: int = 100):
+    """La hoja del PDF de imprenta como imagen (prueba en pantalla): mismo pintor, otra resolución."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage, QPainter
+    pw, ph, _ = print_layout(d, bleed_mm, marks)
+    img = QImage(round(pw / MM_PER_IN * res), round(ph / MM_PER_IN * res), QImage.Format_RGB32)
+    img.fill(Qt.white)
+    p = QPainter(img)
+    _paint_print(p, d, cache, max(0.0, bleed_mm), marks, cmyk, res)
+    p.end()
+    return img
+
+
+def _paint_print(p, d, cache, bleed, marks, cmyk, res):
+    """Pinta la hoja de imprenta en un dispositivo de `res` puntos por pulgada."""
+    from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
+    from PySide6.QtGui import QColor, QPainter, QPen
+    dpi = d.get("dpi", PRINT_DPI)
+    tw, th = px_to_mm(d["w"], dpi), px_to_mm(d["h"], dpi)
+    pw, ph, margin = print_layout(d, bleed, marks)
     p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
     dev_per_mm = res / MM_PER_IN
     k = res / dpi  # píxeles del PDF por píxel del diseño
@@ -1112,8 +1423,6 @@ def export_pdf(d: dict, path: str, cache: ImageCache, bleed_mm: float = 3.0, mar
         info = f"{d.get('name', '')} · {tw:.0f}×{th:.0f} mm · sangrado {bleed:g} mm · {'CMYK' if cmyk else 'RGB'}"
         p.drawText(QRectF((margin + 6) * dev_per_mm, 0.5 * dev_per_mm, (pw - 2 * margin) * dev_per_mm,
                           (margin - bleed - 1) * dev_per_mm), Qt.AlignLeft | Qt.AlignVCenter, info)
-    p.end()
-    return path
 
 
 def thumbnail(d: dict, cache: ImageCache, side: int = 240):

@@ -1711,6 +1711,7 @@ class Main(QMainWindow):
 # ------------------------------------------------------------------ entornos: Events y Studio
 
 ENV_EVENTS, ENV_STUDIO = "events", "studio"
+ENV_GRAPHICS = "graphics"
 
 
 class ModeDialog(QDialog):
@@ -1735,7 +1736,9 @@ class ModeDialog(QDialog):
                 (ENV_EVENTS, "Events", "Edición automática de la sesión completa: selección, revelado uniforme, "
                                        "formatos y exportación de cientos de fotos de una vez."),
                 (ENV_STUDIO, "Studio", "Edición foto a foto, como Lightroom: sliders de revelado, curva, color, "
-                                       "antes/después, presets y LUT.")):
+                                       "antes/después, presets y LUT."),
+                (ENV_GRAPHICS, "Graphics", "Diseño como Canva e Illustrator: posts, flyers, invitaciones y "
+                                           "tarjetas con tus fotos; vectorizar y PDF para imprenta.")):
             b = QPushButton(f"{title}\n\n{text}")
             b.setObjectName("primary" if key == ENV_EVENTS else "")
             b.setMinimumSize(250, 140)
@@ -1787,7 +1790,9 @@ class Shell(QMainWindow):
         self.env_btn = {}
         group = QButtonGroup(self)
         for i, (key, text, tip) in enumerate(((ENV_EVENTS, "Events", "Edición automática de sesiones completas (Ctrl+Tab)"),
-                                              (ENV_STUDIO, "Studio", "Edición foto a foto, como Lightroom (Ctrl+Tab)"))):
+                                              (ENV_STUDIO, "Studio", "Edición foto a foto, como Lightroom (Ctrl+Tab)"),
+                                              (ENV_GRAPHICS, "Graphics", "Diseño tipo Canva e Illustrator: "
+                                                                         "posts, flyers, imprenta (Ctrl+Tab)"))):
             if i:
                 sep = QLabel("|")
                 sep.setObjectName("moduleSep")
@@ -1807,11 +1812,15 @@ class Shell(QMainWindow):
         self.studio = studio.StudioView(CFG_DIR, self.events_photo)
         self.stack.addWidget(self.events)
         self.stack.addWidget(self.studio)
+        import graphics
+        self.graphics = graphics.GraphicsView(CFG_DIR)
+        self.stack.addWidget(self.graphics)
         self.events.request_studio.connect(self.edit_in_studio)
         v.addWidget(self.stack, 1)
         QShortcut(QKeySequence("Ctrl+O"), self, self.open_folder)
+        envs = [ENV_EVENTS, ENV_STUDIO, ENV_GRAPHICS]
         QShortcut(QKeySequence("Ctrl+Tab"), self, lambda: self.switch(
-            ENV_STUDIO if self.env == ENV_EVENTS else ENV_EVENTS))
+            envs[(envs.index(self.env) + 1) % len(envs)] if self.env in envs else ENV_EVENTS))
         self.folder = self.events.src.text().strip()
         self.env = ""
         self.switch(self.s.value("env", ENV_EVENTS))
@@ -1839,14 +1848,17 @@ class Shell(QMainWindow):
 
     def switch(self, env: str):
         """Cambia de entorno conservando la carpeta: lo de un lado se ve en el otro."""
-        env = env if env in (ENV_EVENTS, ENV_STUDIO) else ENV_EVENTS
+        env = env if env in (ENV_EVENTS, ENV_STUDIO, ENV_GRAPHICS) else ENV_EVENTS
         folder = self.events.src.text().strip() or self.folder
         if env == ENV_STUDIO and folder and os.path.isdir(folder):
             self.studio.open_folder(folder)  # no hace nada si ya está abierta
         if env == ENV_EVENTS and self.studio.folder and not self.events.src.text().strip():
             self.events.src.setText(self.studio.folder)
         self.env = env
-        self.stack.setCurrentWidget(self.events if env == ENV_EVENTS else self.studio)
+        if env == ENV_GRAPHICS and folder and os.path.isdir(folder):
+            self.graphics.set_folder(folder)
+        self.stack.setCurrentWidget({ENV_EVENTS: self.events, ENV_STUDIO: self.studio,
+                                     ENV_GRAPHICS: self.graphics}[env])
         self.env_btn[env].setChecked(True)
         self.folder = folder
         self.folder_lbl.setText(os.path.basename(folder) if folder else "")
@@ -1876,6 +1888,7 @@ class Shell(QMainWindow):
         self.events.closeEvent(e)
         if e.isAccepted():
             self.studio.shutdown()
+            self.graphics.shutdown()
 
 
 # ------------------------------------------------------------------ arranque
@@ -1956,6 +1969,23 @@ def selftest() -> int:
         import studio_engine as SE
         lin = E.load_linear(sh.studio.items[0].path, half=True)
         assert SE.render(lin, SE.new_settings(exposure=0.5, clarity=20, hsl_orange_s=10)).shape[2] == 3
+        # Graphics: plantilla con foto, vectorizar, quitar fondo y PDF de imprenta (CMYK)
+        import graphics_engine as GE
+        sh.switch(ENV_GRAPHICS)
+        assert sh.stack.currentWidget() is sh.graphics
+        gd = GE.design_from_preset("A5 (flyer)")
+        GE.apply_template(gd, "Flyer de servicios")
+        next(e for e in gd["elements"] if e["type"] == "image")["path"] = os.path.join(d, "t0.jpg")
+        logo = np.full((120, 160, 3), 255, np.uint8)
+        cv2.circle(logo, (80, 60), 40, (245, 13, 138), -1)
+        vec = GE.vectorize(logo, "color", 3)
+        assert any(p["fill"].startswith("#F") for p in vec["paths"]), vec["paths"]
+        assert GE.remove_background(logo, "color")[0][5, 5, 3] == 0
+        gd["elements"].append(GE.vector_el(vec, 10, 10, 300, 225))
+        pdf = os.path.join(d, "diseño.pdf")
+        GE.export_pdf(gd, pdf, sh.graphics.canvas.cache, 3.0, True, True)
+        with open(pdf, "rb") as f:
+            assert b"DeviceCMYK" in f.read(), "el PDF no salió en CMYK"
         sh.switch(ENV_EVENTS)
         assert sh.stack.currentWidget() is sh.events
         # licencias: sin red ni licencia (el build no tiene clave); solo que el módulo y sus diálogos cargan
