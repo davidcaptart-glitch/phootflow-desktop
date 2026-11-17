@@ -51,7 +51,7 @@ SENS = {"Baja": 0.30, "Normal": 0.45, "Alta": 0.60}
 SHARP_ABS_MIN = 0.008  # por debajo de esto no hay nada nítido en la imagen
 EV_MAX = 5.0            # tope de subida de exposición
 EV_HOPELESS = 7.5       # a partir de aquí la foto se considera irrecuperable
-FACE_TARGET = 0.32      # luminancia lineal a la que se lleva la piel de las caras
+FACE_TARGET = 0.21      # luminancia lineal a la que se lleva la piel de las caras (antes 0,32: caras planas)
 EYES_CLOSED = 0.35      # por debajo, ojos cerrados (escala 0..1 de Photo.eyes_open)
 
 # Salidas propias (DSC0001_4x5_max.jpg, DSC0001_original_1080.jpg…) y copias editadas: no se reeditan
@@ -248,12 +248,41 @@ def estimate_ev(lin: np.ndarray) -> tuple[float, float, float]:
     return float(np.clip(ev, -1.5, EV_MAX)), ev_raw, clipped
 
 
+def _filmic_table(contrast: float = 0.25, n: int = 4096):
+    """Curva base filmic (Reinhard extendido con rodilla, de LightCraft `tone.rs`, Apache-2.0) sobre
+    ev = log2(Y/0.18). Luces que se apagan suavemente hacia el blanco (sin piel «quemada» ni plana)."""
+    ev = np.linspace(-14, 10, n)
+    slope = 1 + 0.55 * contrast
+    wl = 0.18 * 2 ** 2.9
+    pre = 1 + 0.18 / wl
+    y = 0.18 * 2 ** (ev * slope) * pre
+    rh = lambda v: v * (1 + v / wl ** 2) / (1 + v)  # noqa: E731
+    knee = wl * 2 ** -0.5
+    ok = rh(knee)
+    ks = (1 + knee * (2 + knee) / wl ** 2) / (1 + knee) ** 2
+    cr = ks * knee / (1 - ok)
+    o = np.where(y <= knee, rh(y), 1 - (1 - ok) / (1 + cr * (y / knee - 1)))
+    return np.clip(o, 0, 1).astype(np.float32)
+
+
+_FILMIC = _filmic_table()
+
+
 def tone(lin: np.ndarray, ev: float) -> np.ndarray:
-    """Exposición + hombro suave en altas luces + curva sRGB. Devuelve 0..1."""
+    """Exposición + curva filmic sobre la luminancia (conserva el color) + codificación sRGB. Devuelve 0..1.
+
+    Las proporciones RGB se mantienen; lo que se sale por arriba se desatura hacia el blanco, como en los
+    reveladores profesionales (así la piel muy iluminada no se vuelve naranja ni rosa plana)."""
     x = lin * np.float32(2.0 ** ev)
-    a = 0.6
-    x = np.where(x < a, x, a + (1 - a) * (1 - np.exp(-(x - a) / (1 - a))))
-    g = np.where(x <= 0.0031308, 12.92 * x, 1.055 * np.power(np.maximum(x, 1e-9), 1 / 2.4) - 0.055)
+    Y = np.maximum(_luma(x), 1e-9)
+    idx = np.clip((np.log2(Y / 0.18) + 14.0) * ((len(_FILMIC) - 1) / 24.0), 0, len(_FILMIC) - 1)
+    o = _FILMIC[(idx + 0.5).astype(np.int32)]
+    d = x * (o / Y)[..., None]
+    mx = d.max(-1)
+    t = np.where(mx > 1, np.clip((mx - 1) / np.maximum(mx - o, 1e-6), 0, 1), 0)[..., None]
+    d = d + (o[..., None] - d) * t
+    d = np.clip(d, 0, 1)
+    g = np.where(d <= 0.0031308, 12.92 * d, 1.055 * np.power(np.maximum(d, 1e-9), 1 / 2.4) - 0.055)
     return np.clip(g, 0, 1).astype(np.float32)
 
 
@@ -915,6 +944,73 @@ def _nlm(ch: np.ndarray, h: float, search: int) -> np.ndarray:
     return d.astype(np.float32) / 65535.0
 
 
+def _gf(p: np.ndarray, guide: np.ndarray, r: float, eps: float) -> np.ndarray:
+    """Filtro guiado (He et al.) con ventanas gaussianas: suaviza `p` siguiendo los bordes de `guide`."""
+    G = lambda x: cv2.GaussianBlur(x, (0, 0), r)  # noqa: E731
+    mg, mp = G(guide), G(p)
+    a = (G(guide * p) - mg * mp) / (np.maximum(G(guide * guide) - mg * mg, 0) + eps)
+    b = mp - a * mg
+    return G(a) * guide + G(b)
+
+
+def denoise_ycc(ycc: np.ndarray, hl: float, hc: float) -> np.ndarray:
+    """Reducción de ruido en dos escalas (modifica el croma de `ycc` y devuelve la luminancia limpia).
+
+    - Color: NLM a media resolución y, encima, un filtro guiado por la luminancia de radio grande: quita
+      las manchas de color (moradas/verdes) de baja frecuencia sin desteñir los bordes.
+    - Luminancia: NLM a resolución completa (grano fino) y otra pasada a media resolución que limpia el
+      grano grueso, que es el que da aspecto «sucio» aunque el ruido fino sea bajo.
+    """
+    y0 = ycc[..., 0]
+    h, w = y0.shape
+    hw = (w // 2, h // 2)
+    y_half = cv2.resize(y0, hw, interpolation=cv2.INTER_AREA)
+    r_c = max(3.0, 0.0035 * max(hw))
+    for i in (1, 2):
+        c = cv2.resize(ycc[..., i], hw, interpolation=cv2.INTER_AREA)
+        c = _nlm(c, hc, 15)
+        c = _gf(c, y_half, r_c, 4e-3)
+        ycc[..., i] = cv2.resize(c, (w, h), interpolation=cv2.INTER_CUBIC)
+    if hl < 1.2:
+        return y0.copy()
+    y = _nlm(y0, hl, 15)
+    # grano grueso: se sustituye la banda media de `y` por su versión limpia a media resolución
+    d = cv2.resize(y, hw, interpolation=cv2.INTER_AREA)
+    d_clean = _nlm(d, 0.55 * hl, 11)
+    band = cv2.resize(d_clean - d, (w, h), interpolation=cv2.INTER_CUBIC)
+    # un poco del grano más fino del original (1 px): textura orgánica, como película; sin él la piel queda cerosa
+    fine = y0 - cv2.GaussianBlur(y0, (0, 0), 0.8)
+    return np.clip(y + band + 0.22 * fine, 0, 1).astype(np.float32)
+
+
+def sharpen_edges(y: np.ndarray, amount: float, hl: float) -> np.ndarray:
+    """Nitidez solo en bordes reales (no en el grano) y más suave cuanto más ruido hay."""
+    y = np.ascontiguousarray(y, dtype=np.float32)
+    if amount <= 0:
+        return y
+    blur = cv2.GaussianBlur(y, (0, 0), 1.2)
+    det = y - blur
+    gx = cv2.Sobel(blur, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(blur, cv2.CV_32F, 0, 1)
+    thr = max(0.01, 3.0 * hl / 255.0)
+    edges = np.clip(np.hypot(gx, gy) / (4 * thr) - 0.5, 0, 1)
+    k = amount / (1 + hl / 4.0)
+    return y + det * k * edges * np.clip((y - 0.08) / 0.25, 0, 1)
+
+
+SKIN_CR, SKIN_CB = 0.585, 0.435  # tono de piel natural en YCrCb (0..1), medio entre pieles claras y oscuras
+
+
+def skin_mask(ycc: np.ndarray) -> np.ndarray:
+    """Probabilidad de piel por color (elipse en Cr/Cb), suavizada. Incluye pieles algo magentas/moradas."""
+    cr, cb = ycc[..., 1] - SKIN_CR, ycc[..., 2] - SKIN_CB
+    d = (cr / 0.065) ** 2 + (cb / 0.075) ** 2
+    m = np.clip(1.5 - d, 0, 1) * np.clip((ycc[..., 0] - 0.12) / 0.15, 0, 1)
+    small = cv2.resize(m.astype(np.float32), None, fx=0.125, fy=0.125, interpolation=cv2.INTER_AREA)
+    return cv2.resize(cv2.GaussianBlur(small, (0, 0), 2), (m.shape[1], m.shape[0]),
+                      interpolation=cv2.INTER_LINEAR)
+
+
 def develop(ph: Photo, st: Settings) -> np.ndarray:
     """Revelado a resolución completa: exposición, grano, contraste, nitidez, estilo y giro. RGB 0..1."""
     sty = dict(styles.BASE, **(st.style or {}))
@@ -926,7 +1022,7 @@ def develop(ph: Photo, st: Settings) -> np.ndarray:
     # (half_size de LibRaw toma un píxel por celda, no promedia: el ruido medido ya es el de resolución completa)
     scale = 2 ** (ph.ev - ph.ev_auto) * 255
     if ph.noise_y > 0:
-        hl = float(np.clip(0.9 * ph.noise_y * scale, 0.6, 12.0)) * mult
+        hl = float(np.clip(0.8 * ph.noise_y * scale, 0.6, 12.0)) * mult
         hc = float(np.clip(max(2.4 * hl, 1.8 * ph.noise_c * scale * mult), 1.0, 16.0))
     else:
         hl = (0.8 + 0.35 * (math.log2(max(ph.iso, 100) / 100) + max(ph.ev, 0))) * mult
@@ -934,23 +1030,27 @@ def develop(ph: Photo, st: Settings) -> np.ndarray:
     ycc = cv2.cvtColor(g, cv2.COLOR_RGB2YCrCb)
     del g
     y0 = ycc[..., 0].copy()
-    h, w = y0.shape
-    # color: el ruido cromático se limpia a media resolución (el ojo no lo nota y es 4x más rápido)
-    for i in (1, 2):
-        c = cv2.resize(ycc[..., i], (w // 2, h // 2), interpolation=cv2.INTER_AREA)
-        c = cv2.bilateralFilter(_nlm(c, hc, 15), 7, 0.03, 4)
-        ycc[..., i] = cv2.resize(c, (w, h), interpolation=cv2.INTER_CUBIC)
-    y = _nlm(y0, hl, 15) if hl >= 1.4 else y0
-    m = np.clip((y - 0.25) / 0.35, 0, 1) * 0.22  # devuelve textura fina solo en zonas claras
+    y = denoise_ycc(ycc, hl, hc)
+    # textura fina devuelta solo en zonas claras, y menos cuanto más ruido (si no, vuelve el grano)
+    m = np.clip((y - 0.25) / 0.35, 0, 1) * 0.22 * (1 - np.clip((hl - 2.5) / 5.0, 0, 1))
     y = y * (1 - m) + y0 * m
-    y = y + (y - cv2.GaussianBlur(y, (0, 0), 1.2)) * float(sty["sharpen"]) * np.clip((y - 0.12) / 0.25, 0, 1)
-    blk = float(sty["black"])
+    del y0
+    y = sharpen_edges(y, float(sty["sharpen"]), hl)
+    # la curva base filmic ya da contraste: el de los presets (pensado para la curva plana antigua) se modera
+    blk = float(sty["black"]) * 0.6
     y = np.clip((np.clip(y, 0, 1) - blk) / (1 - blk), 0, 1)
-    k = float(sty["contrast"])
+    k = float(sty["contrast"]) * 0.6
     y = y * (1 - k) + (y * y * (3 - 2 * y)) * k
     ycc[..., 0] = y
+    skin = skin_mask(ycc)
+    sat = float(sty["saturation"])
     for i in (1, 2):
-        ycc[..., i] = 0.5 + (ycc[..., i] - 0.5) * float(sty["saturation"])
+        # la piel no se satura como el resto (los focos de colores la vuelven magenta o morada)
+        k_sat = sat - (sat - 1.0) * 0.7 * skin if sat > 1 else sat
+        ycc[..., i] = 0.5 + (ycc[..., i] - 0.5) * k_sat
+    # tonos de piel limpios: lo que se sale del tono natural hacia magenta/morado se acerca a él
+    ycc[..., 1] += (SKIN_CR - ycc[..., 1]) * 0.25 * skin * (ycc[..., 1] > SKIN_CR)
+    ycc[..., 2] += (SKIN_CB - ycc[..., 2]) * 0.30 * skin * (ycc[..., 2] > SKIN_CB)
     out = np.clip(cv2.cvtColor(ycc, cv2.COLOR_YCrCb2RGB), 0, 1)
     del ycc
     out = styles.apply_color(out, sty)
@@ -1241,7 +1341,7 @@ _CACHE_SKIP = {"thumb", "preview", "keep", "reason"}
 def _sig(ph: Photo, st: Settings) -> str:
     try:
         stt = os.stat(ph.path)
-        base = f"{os.path.basename(ph.path)}|{stt.st_size}|{stt.st_mtime_ns}|{st.straighten}|{st.ev_comp:.2f}|v3"
+        base = f"{os.path.basename(ph.path)}|{stt.st_size}|{stt.st_mtime_ns}|{st.straighten}|{st.ev_comp:.2f}|v4"
     except OSError:
         return ""
     return hashlib.sha1(base.encode()).hexdigest()[:16]
