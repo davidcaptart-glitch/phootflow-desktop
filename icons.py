@@ -44,6 +44,7 @@ _P = {
     "undo": '<path d="M4 9h11a5 5 0 0 1 0 10H8"/><path d="M8 5L4 9l4 4"/>',
     "sync": '<path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3"/><path d="M18 3v4h-4M6 21v-4h4"/>',
     "menu": '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    "save": '<path d="M5 3h11l3 3v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M7 3v5h8V3M7 21v-7h10v7"/>',
     # módulos
     "events": '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/>'
               '<rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M16.5 13l1.2 2.3 2.3 1.2-2.3 1.2-1.2 2.3'

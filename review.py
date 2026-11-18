@@ -440,6 +440,7 @@ class ReviewDialog(QDialog):
         if not ph:
             return
         self.title.setText(f"Revisión · {self.strip.currentRow() + 1}/{len(self.photos)}")
+        self.main._review_pos = self.strip.currentRow()  # para volver a esta foto al recuperar la sesión
         self.name.setText(ph.name)
         studio = self.is_studio(ph)
         st = ("✓ Aprobada" if ph.keep else "✕ Rechazada") + ("" if getattr(ph, "reviewed", False) else " (propuesta)")

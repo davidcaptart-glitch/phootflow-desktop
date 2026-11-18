@@ -516,6 +516,8 @@ class ThumbDelegate(QStyledItemDelegate):
         tags = []
         if ph.error:
             tags.append(("Error", T.DANGER))
+        elif ph.reviewed:  # decidida por ti en la revisión (no una propuesta)
+            tags.append(("✓ Aprobada" if ph.keep else "✕ Rechazada", T.OK if ph.keep else T.DANGER))
         elif not ph.keep and ph.thumb:
             tags.append(("Descartada", T.DANGER))
         if ph.warn:
@@ -987,6 +989,10 @@ class Main(QMainWindow):
         self.b_auto.clicked.connect(lambda: self.start_analyze(True))
         self.b_ca.clicked.connect(self.do_cancel)
         self.b_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.out_dir())))
+        self.b_save = UI.icon_button("save", "Guardar el trabajo (Ctrl+S)", checkable=True)
+        self.b_save.clicked.connect(lambda: (self.save_now(), self._save_hint()))
+        QShortcut(QKeySequence("Ctrl+S"), self, self.save_now)
+        head.addWidget(self.b_save)
         head.addWidget(self.b_open)
         head.addWidget(self.b_ca)
         head.addSpacing(6)
@@ -1161,8 +1167,13 @@ class Main(QMainWindow):
     # ---------------------------------------------------------- ajustes
     def load(self):
         g = self.s.value
-        self.src.setText(g("src", ""))
-        self.out.setText(g("out", ""))
+        # el programa arranca en blanco: la sesión se abre con «Abrir carpeta» y se recupera tal como se dejó
+        self.src.setText("")
+        self.out.setText("")
+        self.autosave = str(g("autosave", True)).lower() in ("true", "1")
+        self.dirty = False
+        self._review_pos = None
+        self._resume = False
         self.nr.setCurrentText(g("nr", "Normal"))
         self.sens.setCurrentText(g("sens", "Normal"))
         ratios = (g("ratios", "4:5") or "").split(",")
@@ -1192,6 +1203,7 @@ class Main(QMainWindow):
 
     def save(self):
         st = self.settings()
+        self.s.setValue("autosave", getattr(self, "autosave", True))
         for k, v in [("src", self.src.text()), ("out", self.out.text()), ("nr", st.nr), ("sens", st.sensitivity),
                      ("ratios", ",".join(st.ratios)), ("sizes", ",".join(st.sizes)),
                      ("orig", st.export_original_ratio), ("exif", st.keep_exif), ("xmp", st.write_xmp), ("bw", st.bw), ("bw_style", st.bw_style), ("look", st.look),
@@ -1665,12 +1677,74 @@ class Main(QMainWindow):
         self.run(w)
 
     # ----------------------------------------------------- revisión
-    def save_review(self):
-        """La revisión se guarda sola (cada decisión): se puede cerrar y seguir otro día."""
+    def save_review(self, force: bool = False):
+        """Con el autoguardado, cada decisión se guarda al momento; si está apagado, queda pendiente hasta
+        «Guardar» (Ctrl+S) o hasta cerrar la revisión."""
+        if not any(p.thumb for p in self.photos):
+            return
+        if not (force or self.autosave):
+            self.dirty = True
+            return self._save_hint()
         try:
-            E.save_review(self.photos, work_dir(self.out_dir()))
-        except OSError:
-            pass
+            stage = "revisando" if any(p.reviewed for p in self.photos) else "analizada"
+            E.save_review(self.photos, work_dir(self.out_dir()), {"stage": stage, "last": self._review_pos})
+            self.dirty = False
+        except OSError as e:
+            self.status.setText(f"No se pudo guardar el trabajo: {e}")
+        self._save_hint()
+
+    def save_now(self):
+        if not any(p.thumb for p in self.photos):
+            return self.status.setText("No hay ningún trabajo que guardar todavía.")
+        self.save_review(force=True)
+        self.status.setText("Trabajo guardado: al volver a abrir la carpeta, sigue donde lo has dejado.")
+
+    def set_autosave(self, on: bool):
+        self.autosave = bool(on)
+        self.s.setValue("autosave", self.autosave)
+        if on and self.dirty:
+            self.save_review(force=True)
+        self._save_hint()
+
+    def _save_hint(self):
+        if hasattr(self, "b_save"):
+            self.b_save.setChecked(self.dirty)
+            self.b_save.setToolTip(("Hay cambios sin guardar. " if self.dirty else "") +
+                                   "Guardar el trabajo (Ctrl+S). Autoguardado: " +
+                                   ("activado" if self.autosave else "desactivado (menú ⚙)"))
+
+    def open_session(self, folder: str):
+        """Abre una carpeta. Si ya tiene trabajo guardado lo recupera tal cual, sin pulsar «Analizar»: tus
+        aprobadas y rechazadas, recortes y looks; y si estabas revisando, vuelve a esa foto."""
+        if not self.ask_save():
+            return
+        self.src.setText(folder)
+        self.out.setText("")
+        self.photos, self.cur, self.dirty = [], None, False
+        self.fill_grid()
+        self.refresh_counts()
+        self.h1.setText(os.path.basename(os.path.normpath(folder)))
+        self.sub.setText(folder)
+        if E.has_saved_work(work_dir(self.out_dir())):
+            self._resume = True
+            self.status.setText("Recuperando el trabajo guardado de esta sesión…")
+            self.start_analyze(False)
+        else:
+            self.status.setText("Sesión nueva: pulsa «1 Analizar» para empezar.")
+        self._save_hint()
+
+    def ask_save(self) -> bool:
+        """Antes de cambiar de sesión o cerrar con el autoguardado apagado. False = cancelar."""
+        if not self.dirty:
+            return True
+        r = QMessageBox.question(self, APP, "Hay cambios de la revisión sin guardar. ¿Guardarlos?",
+                                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel, QMessageBox.Save)
+        if r == QMessageBox.Cancel:
+            return False
+        if r == QMessageBox.Save:
+            self.save_review(force=True)
+        self.dirty = False
+        return True
 
     def open_review(self, start: int | None = None):
         import propagate
@@ -1703,7 +1777,7 @@ class Main(QMainWindow):
                                   look=self.look_cb.currentText(), before_fn=render_before,
                                   tile_fn=self.zone_tile, on_change=self.save_review, prop=prop)
         dlg.exec()
-        self.save_review()
+        self.save_review(force=True)  # cerrar la revisión siempre deja guardado lo hecho
         self.refresh_counts()
         self.apply_filter()
         self.grid.viewport().update()
@@ -1757,6 +1831,7 @@ class Main(QMainWindow):
 
     def on_done(self, msg, link):
         self.worker = None
+        resume, self._resume = self._resume, False
         if getattr(self, "_review_after", False):
             self._review_after = False
             self.busy(False)
@@ -1778,6 +1853,19 @@ class Main(QMainWindow):
             QMessageBox.information(self, APP, f"{msg}\n\nEnlace para compartir (ya copiado al portapapeles):\n{link}")
         if self.pending_update and not self.worker:
             self.on_update_found(self.pending_update, False)
+        if resume:
+            self._after_resume()
+
+    def _after_resume(self):
+        meta = E.review_meta(work_dir(self.out_dir()))
+        shown = [p for p in self.photos if p.thumb and not p.error]
+        n = sum(1 for p in shown if p.reviewed)
+        when = (meta.get("saved_at") or "").replace("T", " a las ")[:-3]
+        self.status.setText(f"Trabajo recuperado: {n} de {len(shown)} fotos revisadas por ti"
+                            + (f" (guardado el {when})." if when else "."))
+        if 0 < n < len(shown):  # estaba revisando: volver a la revisión, en la foto en la que se quedó
+            last = meta.get("last")
+            QTimer.singleShot(150, lambda: self.open_review(last if isinstance(last, int) else None))
 
     # ----------------------------------------------------- actualización
     def check_update(self, manual: bool):
@@ -1830,6 +1918,8 @@ class Main(QMainWindow):
             QMessageBox.warning(self, APP, f"No se pudo actualizar: {e}")
 
     def closeEvent(self, e):
+        if not self.ask_save():
+            return e.ignore()
         if self.worker and QMessageBox.question(
                 self, APP, "Hay un trabajo en curso. ¿Salir igualmente? Lo ya exportado se conserva.") != \
                 QMessageBox.Yes:
@@ -1950,6 +2040,11 @@ class Shell(QMainWindow):
         menu = QMenu(b_menu)
         menu.addAction(I.icon("sliders", 16), "Ajustes de la sesión…", lambda: (self.switch(ENV_EVENTS),
                                                                              self.events.open_settings()))
+        menu.addAction(I.icon("save", 16), "Guardar el trabajo  (Ctrl+S)", lambda: self.events.save_now())
+        self.a_autosave = menu.addAction("Autoguardado (cada decisión se guarda al momento)")
+        self.a_autosave.setCheckable(True)
+        self.a_autosave.toggled.connect(lambda on: self.events.set_autosave(on))
+        menu.addSeparator()
         menu.addAction(I.icon("key", 16), "Licencia…", lambda: LIC.show_status(self))
         menu.addAction(I.icon("refresh", 16), "Buscar actualizaciones", lambda: (self.switch(ENV_EVENTS),
                                                                               self.events.check_update(True)))
@@ -1965,6 +2060,9 @@ class Shell(QMainWindow):
         self.stack = QStackedWidget()
         self.events = Main()
         self.events.brand.hide()  # la marca ya está en la cabecera
+        self.a_autosave.blockSignals(True)
+        self.a_autosave.setChecked(self.events.autosave)
+        self.a_autosave.blockSignals(False)
         self.studio = studio.StudioView(CFG_DIR, self.events_photo)
         self.stack.addWidget(self.events)
         self.stack.addWidget(self.studio)
@@ -1984,7 +2082,7 @@ class Shell(QMainWindow):
             ENVS[(ENVS.index(self.env) + 1) % len(ENVS)] if self.env in ENVS else ENV_EVENTS))
         self.folder = self.events.src.text().strip()
         self.env = ""
-        self.switch(self.s.value("env", ENV_EVENTS))
+        self.switch(ENV_EVENTS)  # se arranca en blanco, en Events
 
     def command_palette(self):
         """Ctrl+K: todas las acciones a mano escribiendo lo que se quiere hacer."""
@@ -2030,7 +2128,10 @@ class Shell(QMainWindow):
         if dlg.exec() != QDialog.Accepted or not dlg.choice:
             return
         self.folder = d
-        self.events.src.setText(d)
+        if dlg.choice == ENV_EVENTS:
+            self.events.open_session(d)  # recupera el trabajo guardado, si lo hay
+        else:
+            self.events.src.setText(d)
         self.events.save()
         if dlg.choice == ENV_STUDIO:
             self.studio.open_folder(d)

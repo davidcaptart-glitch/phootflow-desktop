@@ -47,7 +47,43 @@ PRESETS = [
     ("Copias de foto", "13 × 18 cm", 130, 180, "mm"),
     ("Copias de foto", "15 × 20 cm", 150, 200, "mm"),
     ("Copias de foto", "20 × 30 cm", 200, 300, "mm"),
+    ("Redes sociales", "Pinterest", 1000, 1500, "px"),
+    ("Redes sociales", "Banner de LinkedIn", 1584, 396, "px"),
+    ("Redes sociales", "Post de LinkedIn", 1200, 1200, "px"),
+    ("Presentaciones", "Presentación 16:9", 1920, 1080, "px"),
+    ("Presentaciones", "Presentación 4:3", 1024, 768, "px"),
+    ("Documentos", "Documento A4", 210, 297, "mm"),
+    ("Documentos", "Currículum A4", 210, 297, "mm"),
+    ("Documentos", "Certificado A4 horizontal", 297, 210, "mm"),
+    ("Marketing", "Logo", 500, 500, "px"),
+    ("Marketing", "Cabecera de email", 600, 200, "px"),
+    ("Marketing", "Banner web", 1920, 600, "px"),
+    ("Impresión", "Roll up 85 × 200", 850, 2000, "mm"),
+    ("Impresión", "Póster A2", 420, 594, "mm"),
 ]
+# categorías del diálogo «Crear un diseño» (las de PRESETS, en este orden)
+PRESET_GROUPS = ["Redes sociales", "Impresión", "Copias de foto", "Presentaciones", "Documentos", "Marketing"]
+# tamaños que se ofrecen primero cuando aún no hay historial
+POPULAR = ["Instagram vertical 4:5", "Story / Reel", "Presentación 16:9", "A4 vertical", "A5 (flyer)", "Logo",
+           "Tarjeta de visita", "Miniatura de YouTube"]
+
+
+def preset_info(name: str):
+    """(grupo, nombre, ancho, alto, unidad) del tamaño `name`, o None."""
+    return next((p for p in PRESETS if p[1] == name), None)
+
+
+def edited_ago(ts: float, now: float | None = None) -> str:
+    """«Editado hace 5 min», «hace 3 días»… (como el texto de las tarjetas de diseño)."""
+    s = max(0.0, (now if now is not None else time.time()) - float(ts or 0))
+    for lim, div, one, many in ((60, 1, "unos segundos", "unos segundos"), (3600, 60, "1 min", "{} min"),
+                                (86400, 3600, "1 hora", "{} horas"), (86400 * 30, 86400, "1 día", "{} días"),
+                                (86400 * 365, 86400 * 30, "1 mes", "{} meses")):
+        if s < lim:
+            n = int(s // div)
+            return "Editado hace " + (one if n <= 1 else many.format(n))
+    n = int(s // (86400 * 365))
+    return "Editado hace " + ("1 año" if n <= 1 else f"{n} años")
 
 SHAPES = ("rect", "ellipse", "triangle", "star", "line")
 PALETTE = ["#05070F", "#FFFFFF", "#F50D8A", "#1F2A44", "#C9A86A", "#E9E4DC", "#8A9A86", "#D94F3D", "#2E86AB", "#F2C14E"]
@@ -466,12 +502,52 @@ def tpl_flyer(d):
                color="#FFFFFF")]
 
 
+def tpl_presentacion(d):
+    W, H = d["w"], d["h"]
+    d["bg"] = "#05070F"
+    return [_ph(d, W * 0.52, 0, W * 0.48, H),
+            shape_el(d, "rect", x=W * 0.07, y=H * 0.30, w=W * 0.06, h=max(3.0, H * 0.008), fill="#F50D8A",
+                     stroke_w=0.0),
+            _t(d, "Título de la presentación", "title", W * 0.07, H * 0.34, W * 0.40, fit=H * 0.30,
+               color="#FFFFFF", align="left", font="Georgia"),
+            _t(d, "Subtítulo o nombre de quien presenta", "body", W * 0.07, H * 0.68, W * 0.40, fit=H * 0.12,
+               color="#B9BDC9", align="left"),
+            _t(d, "2026", "body", W * 0.07, H * 0.86, W * 0.2, fit=H * 0.06, color="#7B2FF7", align="left",
+               upper=True, spacing=2.0)]
+
+
+def tpl_historia(d):
+    W, H = d["w"], d["h"]
+    d["bg"] = "#F7F3EE"
+    m = W * 0.07
+    return [_ph(d, m, H * 0.08, W - 2 * m, H * 0.58, radius=W * 0.04),
+            _t(d, "Hoy celebramos", "subtitle", m, H * 0.70, W - 2 * m, fit=H * 0.05, color="#F50D8A",
+               italic=True, font="Georgia"),
+            _t(d, "Ana & Pablo", "title", m, H * 0.75, W - 2 * m, fit=H * 0.09, color="#05070F", font="Georgia"),
+            _t(d, "Desliza para ver más", "body", m, H * 0.88, W - 2 * m, fit=H * 0.04, color="#6B6B6B",
+               upper=True, spacing=2.0)]
+
+
+def tpl_banner(d):
+    W, H = d["w"], d["h"]
+    d["bg"] = "#1F2A44"
+    return [shape_el(d, "rect", x=0, y=0, w=W * 0.012, h=H, fill="#F50D8A", stroke_w=0.0),
+            _t(d, "Fotografía de eventos", "title", W * 0.05, H * 0.22, W * 0.55, fit=H * 0.34, color="#FFFFFF",
+               align="left"),
+            _t(d, "Bodas · Deporte · Empresa", "body", W * 0.05, H * 0.62, W * 0.55, fit=H * 0.18,
+               color="#C9A86A", align="left", upper=True, spacing=2.0),
+            _ph(d, W * 0.70, H * 0.12, H * 0.76, H * 0.76, radius=H * 0.38)]
+
+
 TEMPLATES = {"Post de evento": tpl_post_evento, "Invitación": tpl_invitacion, "Tarjeta de visita": tpl_tarjeta,
-             "Collage de 3 fotos": tpl_collage, "Cita": tpl_cita, "Flyer de servicios": tpl_flyer}
+             "Collage de 3 fotos": tpl_collage, "Cita": tpl_cita, "Flyer de servicios": tpl_flyer,
+             "Presentación": tpl_presentacion, "Historia de boda": tpl_historia, "Banner profesional": tpl_banner}
 # tamaño recomendado para cada plantilla (si el diseño está vacío se usa este)
 TEMPLATE_SIZE = {"Post de evento": "Instagram vertical 4:5", "Invitación": "A5 (flyer)",
                  "Tarjeta de visita": "Tarjeta de visita", "Collage de 3 fotos": "Instagram cuadrado",
-                 "Cita": "Instagram cuadrado", "Flyer de servicios": "A5 (flyer)"}
+                 "Cita": "Instagram cuadrado", "Flyer de servicios": "A5 (flyer)",
+                 "Presentación": "Presentación 16:9", "Historia de boda": "Story / Reel",
+                 "Banner profesional": "Banner de LinkedIn"}
 # grupo de cada plantilla en la biblioteca (lo rellena graphics_templates.register)
 TEMPLATE_GROUP: dict = {}
 
@@ -1097,9 +1173,23 @@ def text_outline(el: dict):
     return p
 
 
+def _textfx_active(el: dict) -> bool:
+    """Efecto de texto o degradado: lo pinta graphics_textfx (el texto liso sigue por el camino rápido)."""
+    t = (el.get("tfx") or {}).get("type", "none")
+    return (t not in ("", "none")) or bool(el.get("grad"))
+
+
 def outline_text_el(el: dict) -> dict:
     """Elemento de texto → vector con las mismas medidas y color."""
     from PySide6.QtCore import Qt
+    if _textfx_active(el):
+        import graphics_textfx as TFX
+        v = base_el("vector", el["x"], el["y"], el["w"], el["h"], viewbox=[el["w"], el["h"]],
+                    rot=el.get("rot", 0.0), opacity=el.get("opacity", 1.0), paths=TFX.vector_paths(el))
+        if el.get("grad") and len(v["paths"]) == 1:
+            v["grad"] = dict(el["grad"])
+        v["name"] = "Contornos: " + el.get("text", "").strip().split("\n")[0][:20]
+        return v
     path = text_outline(el)
     path.setFillRule(Qt.WindingFill)
     path = path.simplified()  # resuelve solapes de letras (OddEven no los rellenaría bien)
@@ -1357,6 +1447,9 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
                      else Qt.NoPen)
             p.setBrush(make_brush(el.get("fill"), el.get("grad"), QRectF(0, 0, w, h)))
         p.drawPath(path)
+    elif t == "text" and _textfx_active(el):
+        import graphics_textfx as TFX
+        TFX.paint(p, el)
     elif t == "text":
         curved = abs(float(el.get("curve", 0.0))) >= 1
         lays = [] if curved else _text_layout(el)[0]

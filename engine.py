@@ -1488,9 +1488,25 @@ CUSTOM_CROP = "Personalizado"  # recorte dibujado a mano en la revisión
 _REVIEW_FIELDS = ("keep", "reviewed", "reason", "best", "look", "bw_style", "lut_strength")
 
 
-def save_review(photos: list[Photo], work_dir: str) -> None:
-    """Guarda lo decidido en la revisión (aprobar/rechazar, recorte, look, B/N) para seguir otro día."""
-    rows = {}
+def has_saved_work(work_dir: str) -> bool:
+    """¿Hay un trabajo guardado de esta sesión (análisis en caché) que se pueda recuperar sin analizar?"""
+    return os.path.exists(os.path.join(work_dir, "analisis.json"))
+
+
+def review_meta(work_dir: str) -> dict:
+    """Dónde se quedó el trabajo: {"stage": analizada|revisando|exportada, "last": índice, "saved_at": fecha}."""
+    try:
+        with open(os.path.join(work_dir, "revision.json"), encoding="utf-8") as f:
+            return dict(json.load(f).get("_meta") or {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def save_review(photos: list[Photo], work_dir: str, meta: dict | None = None) -> None:
+    """Guarda lo decidido en la revisión (aprobar/rechazar, recorte, look, B/N) para seguir otro día.
+    `meta`: dónde se quedó (etapa y última foto vista), para volver ahí al abrir la carpeta."""
+    rows = {"_meta": dict(meta or {}, saved_at=dt.datetime.now().isoformat(timespec="seconds"),
+                          reviewed=sum(1 for p in photos if p.reviewed))}
     for ph in photos:
         if not ph.thumb or ph.error:
             continue

@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QByteArray, QMimeData, QPointF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGlyphRun, QIcon, QImage, QPainter, QPixmap,
-                           QRawFont)
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+from PySide6.QtCore import QByteArray, QFileSystemWatcher, QMimeData, QPointF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontDatabase, QFontMetricsF, QGlyphRun, QIcon, QImage,
+                           QPainter, QPixmap, QRawFont)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMenu, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 import graphics_engine as G
@@ -108,6 +109,16 @@ class ElementsPanel(QWidget):
         self._catalog_loading = False
         self._samples: dict[str, QPixmap] = {}
         self._sample_pending: set[str] = set()
+        self._watch_since = time.time()
+        self.watcher = QFileSystemWatcher(self)
+        dl = O.downloads_dir()
+        if os.path.isdir(dl):
+            self.watcher.addPath(dl)
+        self.dl_timer = QTimer(self)
+        self.dl_timer.setSingleShot(True)
+        self.dl_timer.setInterval(1500)      # los navegadores escriben .crdownload y luego renombran
+        self.dl_timer.timeout.connect(self._check_downloads)
+        self.watcher.directoryChanged.connect(lambda _: self.dl_timer.start())
         self.results.connect(self._on_results)
         self.thumb.connect(self._on_thumb)
         self.failed.connect(self._on_failed)
@@ -161,16 +172,33 @@ class ElementsPanel(QWidget):
         fr.setContentsMargins(0, 0, 0, 0)
         add = QPushButton("Añadir fuentes…")
         add.setCursor(Qt.PointingHandCursor)
-        add.setToolTip("Tus .ttf / .otf o un .zip (DaFont, Fontshare…). Solo los usa PhootFlow: no se instalan "
-                       "en Windows. Revisa la licencia si es para un cliente.")
+        add.setToolTip("Tus .ttf / .otf o un .zip. Se copian a PhootFlow (el original no se toca) y, si está "
+                       "marcado, se instalan también en Windows.")
         add.clicked.connect(self.add_fonts)
         fr.addWidget(add, 1)
-        upd = QPushButton("Actualizar lista")
-        upd.setToolTip("Vuelve a pedir el catálogo de Google Fonts y Fontsource")
+        daf = QPushButton("DaFont ↗")
+        daf.setCursor(Qt.PointingHandCursor)
+        daf.setToolTip("Abre DaFont en el navegador. Pulsa «Descargar» en la fuente que quieras: PhootFlow la ve "
+                       "llegar a Descargas y la añade sola (y la instala en Windows).")
+        daf.clicked.connect(self.open_dafont)
+        fr.addWidget(daf)
+        upd = QPushButton("⟳")
+        upd.setFixedWidth(30)
+        upd.setToolTip("Vuelve a pedir el catálogo (Google Fonts, Fontsource y Fontshare)")
         upd.clicked.connect(lambda: self.load_catalog(refresh=True))
         fr.addWidget(upd)
-        self.font_row = QWidget()
-        self.font_row.setLayout(fr)
+        fw = QWidget()
+        fv = QVBoxLayout(fw)
+        fv.setContentsMargins(0, 0, 0, 0)
+        fv.setSpacing(2)
+        fv.addLayout(fr)
+        self.win_install = QCheckBox("Instalar también en Windows (Word, Photoshop…)")
+        self.win_install.setChecked(bool(self.store.settings().get("instalar_windows", True)))
+        self.win_install.setToolTip("Solo para tu usuario, sin permisos de administrador (como «Instalar» del "
+                                    "Explorador). Afecta a las fuentes que añadas desde ahora.")
+        self.win_install.toggled.connect(lambda on: self.store.set_setting("instalar_windows", on))
+        fv.addWidget(self.win_install)
+        self.font_row = fw
         v.addWidget(self.font_row)
 
         self.chips_area = QScrollArea()
@@ -207,7 +235,7 @@ class ElementsPanel(QWidget):
         self.more_btn.clicked.connect(self.load_more)
         v.addWidget(self.more_btn)
         self.credit = QLabel("Gráficos: Iconify (colecciones MIT, Apache, OFL, CC BY…) · Fotos: Openverse y Pexels · "
-                             "Fuentes: Google Fonts. Doble clic o arrastra al lienzo.")
+                             "Fuentes: Google Fonts, Fontshare y las tuyas. Doble clic o arrastra al lienzo.")
         self.credit.setObjectName("faint")
         self.credit.setWordWrap(True)
         v.addWidget(self.credit)
@@ -473,13 +501,22 @@ class ElementsPanel(QWidget):
         n = 0
         cat = self.font_cat
         if cat == "Mías":
+            meta = O.font_meta(self.store)
             for path in O.user_font_files(self.store):
+                info = meta.get(os.path.basename(path), {})
+                lic = info.get("lic", "?")
                 for fam in register_fonts(self.store, [path]):
                     if q and q not in O._ascii(fam):
                         continue
-                    it = QListWidgetItem(QIcon(_name_pixmap(fam, QFont(fam))), "✓")
+                    mark = {"libre": "✓", "personal": "⚠ personal"}.get(lic, "? licencia")
+                    it = QListWidgetItem(QIcon(_name_pixmap(fam, QFont(fam))), mark)
                     it.setData(Qt.UserRole, {"kind": "font", "family": fam, "user": path})
-                    it.setToolTip(f"{fam}\n{os.path.basename(path)} · tuya\nDoble clic: aplicar · clic derecho: quitar")
+                    it.setToolTip(f"{fam}\n{os.path.basename(path)} · de {info.get('src') or 'tus archivos'}\n"
+                                  + {"libre": "Licencia libre según su léeme: vale para clientes.",
+                                     "personal": "Solo uso personal según su léeme: para un cliente hay que comprar "
+                                                 "la licencia al autor."}.get(
+                                      lic, "Licencia sin confirmar: revisa el léeme o la página de la fuente.")
+                                  + "\nDoble clic: aplicar · clic derecho: licencia o quitar")
                     self.list.addItem(it)
                     n += 1
             self.info.setText(f"{n} fuentes tuyas." if n else
@@ -511,7 +548,7 @@ class ElementsPanel(QWidget):
             if n >= 2500:
                 break
         total = len(self._font_items())
-        self.info.setText(f"{n} de {total} fuentes libres (Google Fonts y Fontsource; OFL/Apache: valen para "
+        self.info.setText(f"{n} de {total} fuentes libres (Google Fonts, Fontsource y Fontshare: valen para "
                           "clientes). ✓ = descargada." + ("" if self.catalog else " Cargando el catálogo…"))
         self.sample_timer.start()
 
@@ -555,17 +592,74 @@ class ElementsPanel(QWidget):
                                                 "Fuentes (*.ttf *.otf *.zip);;Todos los archivos (*.*)")
         if not files:
             return
+        self._import(files)
+
+    def _import(self, files, src=""):
+        """Copia, registra, (si toca) instala en Windows y enseña «Mías». Devuelve las familias añadidas."""
         try:
-            copied = O.import_fonts(self.store, files)
+            copied = O.import_fonts(self.store, files, src)
         except Exception as ex:
             self.info.setText(f"No se pudieron añadir: {ex}")
-            return
+            return []
         fams = register_fonts(self.store, copied)
+        installed = 0
+        if self.win_install.isChecked():
+            for c in copied:
+                try:
+                    installed += bool(O.windows_install(c))
+                except Exception:
+                    pass
+        meta = O.font_meta(self.store)
+        personal = any(meta.get(os.path.basename(c), {}).get("lic") == "personal" for c in copied)
         self.font_cat = "Mías"
-        self._layout_for_mode()
-        self.show_fonts()
-        self.info.setText(f"Añadidas {len(fams)} familia(s): " + ", ".join(fams[:6]) + ("…" if len(fams) > 6 else "")
-                          if fams else "No había ninguna fuente válida (.ttf / .otf) en lo elegido.")
+        if self.mode != "fonts":
+            self.set_mode("fonts")
+        else:
+            self._layout_for_mode()
+            self.show_fonts()
+        if fams:
+            msg = ("Añadida(s): " + ", ".join(fams[:5]) + ("…" if len(fams) > 5 else "") + "."
+                   + (f" Instalada(s) en Windows: {installed}." if installed else "")
+                   + (" ⚠ Su léeme dice «uso personal»: para un cliente compra la licencia." if personal else ""))
+        else:
+            msg = "No había ninguna fuente válida (.ttf / .otf) en lo elegido."
+        self.info.setText(msg)
+        return fams
+
+    def open_dafont(self):
+        QDesktopServices.openUrl(QUrl("https://www.dafont.com/es/"))
+        self.set_mode("fonts")
+        self.info.setText("Elige una fuente en DaFont y pulsa «Descargar»: se añadirá aquí sola. Para trabajos de "
+                          "clientes busca las marcadas «100% Gratis» o «Dominio público».")
+
+    def _check_downloads(self):
+        files = O.new_font_downloads(self.store, self._watch_since - 2)
+        if not files:
+            return
+        for f in files:
+            try:
+                O.mark_imported(self.store, f)
+            except OSError:
+                pass
+        fams = self._import(files, "Descargas")
+        if fams:
+            sel = [e for e in self.owner.selected() if e["type"] == "text" and not e.get("locked")]
+            for e in sel:
+                self.owner.set_prop(e, "font", fams[0])
+            if sel:
+                self.owner.build_props()
+            win = self.window()
+            win.raise_()
+            win.activateWindow()
+
+    def personal_families(self) -> set[str]:
+        """Familias de fuentes propias marcadas «uso personal» (para avisar al exportar)."""
+        meta = O.font_meta(self.store)
+        out = set()
+        for p in O.user_font_files(self.store):
+            if meta.get(os.path.basename(p), {}).get("lic") == "personal":
+                out.update(register_fonts(self.store, [p]))
+        return out
 
     def _font_menu(self, pos):
         it = self.list.itemAt(pos)
@@ -575,7 +669,13 @@ class ElementsPanel(QWidget):
         m = QMenu(self)
         m.addAction("Aplicar al texto seleccionado").triggered.connect(lambda: self.place(data))
         if data.get("user"):
-            m.addAction("Quitar de PhootFlow").triggered.connect(lambda: self._remove_user_font(data["user"]))
+            up = data["user"]
+            for lic, txt in (("libre", "Marcar: licencia libre (vale para clientes)"),
+                             ("personal", "Marcar: solo uso personal")):
+                m.addAction(txt).triggered.connect(lambda _=False, lic=lic: (
+                    O.set_font_meta(self.store, up, lic=lic), self.show_fonts(self.search.text())))
+            m.addSeparator()
+            m.addAction("Quitar de PhootFlow").triggered.connect(lambda: self._remove_user_font(up))
         m.exec(self.list.viewport().mapToGlobal(pos))
 
     def _remove_user_font(self, path):

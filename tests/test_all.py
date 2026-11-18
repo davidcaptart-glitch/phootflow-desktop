@@ -1026,6 +1026,82 @@ class Graphics(unittest.TestCase):
             with open(pdf, "rb") as f:
                 self.assertEqual(len(re.findall(rb"/Type\s*/Page[^s]", f.read())), 2)
 
+    def test_sizes_groups_and_edited_ago(self):
+        import graphics_engine as G
+        self.assertEqual(G.edited_ago(1000, 1030), "Editado hace unos segundos")
+        self.assertEqual(G.edited_ago(1000, 1000 + 5 * 60), "Editado hace 5 min")
+        self.assertEqual(G.edited_ago(1000, 1000 + 3600), "Editado hace 1 hora")
+        self.assertEqual(G.edited_ago(0, 86400 * 3), "Editado hace 3 días")
+        self.assertEqual(G.edited_ago(0, 86400 * 400), "Editado hace 1 año")
+        self.assertEqual(len({p[1] for p in G.PRESETS}), len(G.PRESETS), "tamaños con el mismo nombre")
+        self.assertTrue(all(p[0] in G.PRESET_GROUPS for p in G.PRESETS))
+        self.assertTrue(all(G.preset_info(n) for n in G.POPULAR))
+        for name, size in G.TEMPLATE_SIZE.items():
+            self.assertIsNotNone(G.preset_info(size), f"{name}: tamaño {size} no existe")
+            self.assertIn(name, G.TEMPLATE_GROUP, name)
+
+    def test_home_create_and_editor_flow(self):
+        """Inicio → Crear (tamaño, plantilla, imagen subida) → editor con paneles, páginas y zoom; Proyectos
+        lista lo guardado; duplicar, renombrar y eliminar desde la tarjeta. Sin red."""
+        from PySide6.QtWidgets import QApplication
+        import graphics
+        import graphics_engine as G
+        import graphics_home as GH
+        app = QApplication.instance()
+        with tempfile.TemporaryDirectory() as cfg:
+            v = graphics.GraphicsView(cfg)
+            v.resize(1400, 900)
+            self.assertIs(v.root_stack.currentWidget(), v.home)
+            v.new_from_template("Save the date")
+            self.assertIs(v.root_stack.currentWidget(), v.editor)
+            self.assertEqual(G.size_label(v.d), "1080 × 1350 px")
+            v.new_from_preset("Presentación 16:9")
+            self.assertEqual((v.d["w"], v.d["h"], v.d["name"]), (1920, 1080, "Diseño sin título"))
+            v.add_text_pair(graphics.TEXT_PAIRS[0][3], "Georgia", "Segoe UI")
+            self.assertEqual([e["font"] for e in v.d["elements"]], ["Georgia", "Segoe UI"])
+            v.page_op("add")
+            self.assertEqual((v.page_strip.count(), v.page_count.text()), (2, "2 de 2"))
+            for i in range(7):
+                v.show_library(i)
+                self.assertEqual(v.tabs.currentIndex(), i)
+                self.assertTrue(v.rail_btn[i].isChecked())
+            v.toggle_panel(6)
+            self.assertFalse(v.flyout.isVisibleTo(v))
+            img = os.path.join(cfg, "foto.png")
+            cv2.imwrite(img, np.full((600, 900, 3), 120, np.uint8))
+            v.upload_new(img)
+            self.assertEqual((v.d["w"], v.d["h"]), (900, 600))
+            self.assertEqual(v.d["elements"][0]["path"], img)
+            v.copy_resized("Instagram cuadrado")
+            self.assertEqual((v.d["w"], v.d["h"]), (1080, 1080))
+            v.open_home()
+            app.processEvents()
+            designs = G.list_designs(v.ddir)
+            self.assertGreaterEqual(len(designs), 4)
+            self.assertIn("Instagram cuadrado", v.used_presets())
+            path = next(p for p, d in designs if d["name"] == "Save the date")
+            v.duplicate_path(path)
+            v.rename_path(path, "Boda de Ana")
+            names = [d["name"] for _, d in G.list_designs(v.ddir)]
+            self.assertIn("Boda de Ana", names)
+            self.assertIn("Save the date (copia)", names)
+            v.home.search.setText("boda")
+            v.home.refresh()
+            cards = [g.item(i).text() for g in v.home.content.findChildren(GH.CardGrid) for i in range(g.count())]
+            self.assertIn("Boda de Ana", cards)
+            self.assertTrue(any(G.TEMPLATE_GROUP.get(c) == "Bodas" for c in cards))
+            v.home.search.setText("")
+            v.home.set_mode("templates")
+            n_tpl = sum(g.count() for g in v.home.content.findChildren(GH.CardGrid))
+            self.assertEqual(n_tpl, len(G.TEMPLATES))
+            self.assertFalse(GH.template_thumb("Polaroid", 120).isNull())
+            dlg = GH.CreateDialog(v, v.used_presets(), "Documentos")
+            self.assertEqual(dlg.cat, "Documentos")
+            dlg.search.setText("story")
+            dlg._pick(("preset", "Story / Reel"))
+            self.assertEqual(dlg.choice, ("preset", "Story / Reel"))
+            v.shutdown()
+
     def test_templates_fit_long_texts_without_overlap(self):
         import graphics_engine as G
         for name in G.TEMPLATES:

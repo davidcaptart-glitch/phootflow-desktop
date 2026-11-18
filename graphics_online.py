@@ -994,7 +994,17 @@ def font_catalog(store: Store, refresh: bool = False) -> list[dict]:
             fonts.append({"family": x["family"], "id": x["id"], "cat": FONT_CATS.get(x.get("category"), "Display"),
                           "type": x.get("type", "google"), "weights": x.get("weights") or [400],
                           "styles": x.get("styles") or ["normal"], "license": x.get("license", "")})
-        fonts.sort(key=lambda f: f["family"].lower())
+        try:
+            fonts += fontshare_fonts()
+        except Exception:
+            pass
+        seen, uniq = set(), []
+        for f in fonts:
+            k = f["family"].lower()
+            if k not in seen:
+                seen.add(k)
+                uniq.append(f)
+        fonts = sorted(uniq, key=lambda f: f["family"].lower())
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"t": time.time(), "fonts": fonts}, f, ensure_ascii=False)
@@ -1006,6 +1016,41 @@ def font_catalog(store: Store, refresh: bool = False) -> list[dict]:
         return [{"family": fam, "id": re.sub(r"[^a-z0-9]+", "-", fam.lower()).strip("-"), "cat": cat,
                  "type": "google", "weights": [400, 700], "styles": ["normal"], "license": "OFL-1.1"}
                 for fam, cat in FONTS]
+
+
+FONTSHARE_API = "https://api.fontshare.com/v2"
+FONTSHARE_CATS = {"Sans": "Sans", "Serif": "Serif", "Display": "Display", "Handwritten": "Manuscrita",
+                  "Script": "Manuscrita", "Mono": "Mono", "Monospace": "Mono", "Slab": "Serif"}
+
+
+def fontshare_fonts() -> list[dict]:
+    """Fontshare (Indian Type Foundry): ~100 familias con la ITF Free Font License, que permite uso comercial."""
+    out, page = [], 1
+    while page < 6:
+        d = http_json(f"{FONTSHARE_API}/fonts?limit=100&page={page}")
+        for x in d.get("fonts", []):
+            if x.get("script", "latin") != "latin":
+                continue
+            st = x.get("styles") or []
+            ws = sorted({s["weight"]["number"] for s in st if not s.get("is_variable")}) or [400]
+            out.append({"family": x["name"], "id": x["slug"], "cat": FONTSHARE_CATS.get(x.get("category"), "Sans"),
+                        "type": "fontshare", "weights": ws,
+                        "styles": ["normal"] + (["italic"] if any(s.get("is_italic") for s in st) else []),
+                        "license": "ITF FFL (uso comercial)"})
+        if not d.get("has_more"):
+            break
+        page += 1
+    return out
+
+
+def _fontshare_ttf(item: dict, weight: int, italic: bool) -> str:
+    """URL del TTF de un peso de Fontshare (su CSS da woff2, woff y ttf; el peso cursivo es número + 1)."""
+    w = weight + (1 if italic else 0)
+    css = http_get(f"{FONTSHARE_API}/css?f[]={item['id']}@{w}").decode("utf-8")
+    u = re.findall(r"url\('?(//cdn\.fontshare\.com/[^)']+\.ttf)", css)
+    if not u:
+        raise ValueError(f"Fontshare no tiene «{item['family']}» en {w}")
+    return "https:" + u[0]
 
 
 def _sample_variant(item: dict) -> str:
@@ -1023,7 +1068,12 @@ def font_sample(store: Store, item: dict) -> bytes:
     if os.path.exists(path):
         with open(path, "rb") as f:
             return f.read()
-    data = http_get(f"{FONTSOURCE_CDN}/{item['id']}@latest/{_sample_variant(item)}.ttf", timeout=30, limit=8 << 20)
+    if item.get("type") == "fontshare":
+        ws = item.get("weights") or [400]
+        url = _fontshare_ttf(item, min(ws, key=lambda v: abs(v - 400)), False)
+    else:
+        url = f"{FONTSOURCE_CDN}/{item['id']}@latest/{_sample_variant(item)}.ttf"
+    data = http_get(url, timeout=30, limit=8 << 20)
     with open(path + ".part", "wb") as f:
         f.write(data)
     os.replace(path + ".part", path)
@@ -1032,7 +1082,7 @@ def font_sample(store: Store, item: dict) -> bytes:
 
 def download_font_any(store: Store, item: dict) -> list[str]:
     """Descarga una fuente del catálogo: las de Google con todos sus alfabetos (CSS de Google Fonts); las demás de
-    Fontsource (latín), en normal, negrita y sus cursivas si existen."""
+    Fontsource o Fontshare (latín), en normal, negrita y sus cursivas si existen."""
     if item.get("type", "google") == "google":
         try:
             return download_font(store, item["family"])
@@ -1051,7 +1101,11 @@ def download_font_any(store: Store, item: dict) -> list[str]:
         for st in styles:
             path = os.path.join(d, f"{w}{'i' if st == 'italic' else ''}.ttf")
             if not os.path.exists(path):
-                data = http_get(f"{FONTSOURCE_CDN}/{item['id']}@latest/latin-{w}-{st}.ttf", timeout=60)
+                if item.get("type") == "fontshare":
+                    url = _fontshare_ttf(item, w, st == "italic")
+                else:
+                    url = f"{FONTSOURCE_CDN}/{item['id']}@latest/latin-{w}-{st}.ttf"
+                data = http_get(url, timeout=60)
                 with open(path + ".part", "wb") as f:
                     f.write(data)
                 os.replace(path + ".part", path)
@@ -1059,9 +1113,64 @@ def download_font_any(store: Store, item: dict) -> list[str]:
     return out
 
 
-def import_fonts(store: Store, paths: list[str]) -> list[str]:
-    """Copia fuentes propias (.ttf/.otf, o un .zip como los de DaFont o Fontshare) a `fuentes/_mias`.
-    No las instala en Windows: solo las usa PhootFlow. Devuelve los archivos copiados."""
+# licencias de fuentes propias: «libre» (vale para clientes), «personal» (solo uso personal) o «?» (sin saber)
+_PERSONAL = ("personal use", "personal-use", "non-commercial", "noncommercial", "non commercial",
+             "not for commercial", "uso personal", "no comercial", "demo version", "demo font", "free for personal",
+             "shareware", "donationware", "commercial license", "commercial use please", "purchase")
+_FREE = ("100% free", "public domain", "dominio público", "free for commercial", "commercial use is allowed",
+         "free for personal and commercial", "sil open font license", "open font license", "cc0",
+         "apache license", "mit license", "free for both personal and commercial")
+
+
+def detect_license(texts: list[str], names: list[str] | None = None) -> str:
+    """Lo que dicen los «léeme» de un zip (DaFont los trae casi siempre) y los nombres de archivo."""
+    t = " ".join(texts).lower()
+    n = " ".join(names or []).lower()
+    if any(k in t for k in _FREE[:7]) and not any(k in t for k in _PERSONAL[:9]):
+        return "libre"
+    if any(k in t for k in _PERSONAL) or re.search(r"\b(demo|personal|trial)\b", n):
+        return "personal"
+    if any(k in t for k in _FREE):
+        return "libre"
+    return "?"
+
+
+def _meta_path(store: Store) -> str:
+    return os.path.join(store.fonts, USER_FONTS, "licencias.json")
+
+
+def font_meta(store: Store) -> dict:
+    """{archivo: {"lic": libre|personal|?, "src": origen}} de las fuentes propias."""
+    try:
+        with open(_meta_path(store), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def set_font_meta(store: Store, path: str, **kw) -> None:
+    with store._lock:
+        m = font_meta(store)
+        m.setdefault(os.path.basename(path), {}).update(kw)
+        os.makedirs(os.path.dirname(_meta_path(store)), exist_ok=True)
+        tmp = _meta_path(store) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(m, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, _meta_path(store))
+
+
+def zip_has_fonts(path: str) -> bool:
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as z:
+            return any(n.lower().endswith(FONT_EXT) and "__MACOSX" not in n for n in z.namelist())
+    except Exception:
+        return False
+
+
+def import_fonts(store: Store, paths: list[str], src: str = "") -> list[str]:
+    """Copia fuentes propias (.ttf/.otf, o un .zip como los de DaFont o Fontshare) a `fuentes/_mias` y anota su
+    licencia según el «léeme». El original no se toca. Devuelve los archivos copiados."""
     import shutil
     import zipfile
     d = os.path.join(store.fonts, USER_FONTS)
@@ -1073,24 +1182,119 @@ def import_fonts(store: Store, paths: list[str]) -> list[str]:
         return os.path.join(d, base)
     for p in paths:
         low = p.lower()
+        got, texts = [], []
         if low.endswith(FONT_EXT):
             t = dest(p)
             if os.path.abspath(t) != os.path.abspath(p):
                 shutil.copyfile(p, t)
-            out.append(t)
+            got.append(t)
+            folder = os.path.dirname(p)
+            for f in os.listdir(folder) if os.path.isdir(folder) else []:
+                if f.lower().endswith((".txt", ".md")) and os.path.getsize(os.path.join(folder, f)) < 200_000 \
+                        and os.path.splitext(f)[0].lower() in ("readme", "leeme", "license", "licence", "info"):
+                    with open(os.path.join(folder, f), encoding="utf-8", errors="replace") as fh:
+                        texts.append(fh.read())
         elif low.endswith(".zip"):
             with zipfile.ZipFile(p) as z:
                 for info in z.infolist():
                     n = info.filename
-                    if info.is_dir() or not n.lower().endswith(FONT_EXT) or "__MACOSX" in n:
+                    if info.is_dir() or "__MACOSX" in n or info.file_size > 40 << 20:
                         continue
-                    if info.file_size > 40 << 20:
+                    if n.lower().endswith((".txt", ".md", ".rtf", ".html", ".htm")) and info.file_size < 200_000:
+                        texts.append(z.read(info).decode("utf-8", "replace"))
+                        continue
+                    if not n.lower().endswith(FONT_EXT):
                         continue
                     t = dest(n)
-                    with z.open(info) as src, open(t, "wb") as f:
-                        shutil.copyfileobj(src, f)
-                    out.append(t)
+                    with z.open(info) as s_, open(t, "wb") as f:
+                        shutil.copyfileobj(s_, f)
+                    got.append(t)
+        lic = detect_license(texts, [os.path.basename(x) for x in got] + [os.path.basename(p)])
+        for t in got:
+            set_font_meta(store, t, lic=lic, src=src or os.path.basename(p))
+        out += got
     return out
+
+
+# --------------------------------------------------------------- instalar en Windows (solo este usuario)
+
+def windows_install(path: str) -> str:
+    """Instala una fuente para el usuario actual (sin administrador), como «Instalar» del Explorador: copia en
+    %LOCALAPPDATA%\\Microsoft\\Windows\\Fonts y la apunta en HKCU. Así sirve también en Word, Photoshop…
+    Devuelve la ruta instalada ("" si no es Windows o ya estaba)."""
+    import shutil
+    import sys
+    if sys.platform != "win32":
+        return ""
+    import ctypes
+    import winreg
+    d = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")
+    os.makedirs(d, exist_ok=True)
+    t = os.path.join(d, os.path.basename(path))
+    if os.path.exists(t):
+        return ""
+    shutil.copyfile(path, t)
+    name = os.path.splitext(os.path.basename(path))[0] + (" (OpenType)" if path.lower().endswith(".otf")
+                                                          else " (TrueType)")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\Fonts") as k:
+        winreg.SetValueEx(k, name, 0, winreg.REG_SZ, t)
+    try:
+        ctypes.windll.gdi32.AddFontResourceW(t)
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001D, 0, 0, 0x0002, 1000, None)  # WM_FONTCHANGE
+    except Exception:
+        pass
+    return t
+
+
+# --------------------------------------------------------------- vigilar Descargas (DaFont y otras webs)
+
+def downloads_dir() -> str:
+    """Carpeta Descargas real (puede estar movida a otro disco)."""
+    import sys
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as k:
+                v = winreg.QueryValueEx(k, "{374DE290-123F-4565-9164-39C4925E467B}")[0]
+                return os.path.expandvars(v)
+        except Exception:
+            pass
+    return os.path.join(os.path.expanduser("~"), "Downloads")
+
+
+def new_font_downloads(store: Store, since: float) -> list[str]:
+    """Zips con fuentes y .ttf/.otf llegados a Descargas desde `since` que aún no se han importado."""
+    d = downloads_dir()
+    done = set(store.settings().get("descargas_importadas", []))
+    out = []
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    for f in names:
+        p = os.path.join(d, f)
+        low = f.lower()
+        if not low.endswith(FONT_EXT + (".zip",)) or low.endswith((".crdownload", ".part", ".tmp")):
+            continue
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        key = f"{f}|{int(st.st_mtime)}|{st.st_size}"
+        if st.st_mtime < since or key in done or st.st_size == 0:
+            continue
+        if low.endswith(".zip") and not zip_has_fonts(p):
+            continue
+        out.append(p)
+    return out
+
+
+def mark_imported(store: Store, path: str) -> None:
+    st = os.stat(path)
+    key = f"{os.path.basename(path)}|{int(st.st_mtime)}|{st.st_size}"
+    done = store.settings().get("descargas_importadas", [])
+    store.set_setting("descargas_importadas", (done + [key])[-500:])
 
 
 def user_font_files(store: Store) -> list[str]:

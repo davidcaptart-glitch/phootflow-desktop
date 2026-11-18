@@ -65,6 +65,14 @@ python -m unittest discover -s tests   # 55 pruebas, sin fotos reales ni red
   colecciones de licencia comercial; GPL y animadas fuera), convertidos a vector editable con `svg_to_vector`
   (degradados/máscaras → PNG), fotos de Openverse (CC comercial) y Pexels (clave del usuario), fuentes de Google
   Fonts (TTF); caché en `%APPDATA%\PhootFlow\online`, crédito de autor y licencia en `el["credit"]`.
+  Fuentes: catálogo completo de Fontsource (~2 000, Google y otras libres) + Fontshare (ITF FFL), cada nombre
+  pintado con una muestra TTF que se baja al verse; «Mías» (`online\fuentes\_mias`, licencia «libre/personal/?»
+  sacada del léeme en `licencias.json`) por «Añadir fuentes…» o vigilando Descargas (`QFileSystemWatcher`: el
+  zip que bajas de DaFont entra solo; DaFont prohíbe buscar/descargar por programa en su robots.txt, no se
+  raspa). Opción de instalar en Windows por usuario (HKCU, sin admin). Exportar avisa si hay fuente «personal».
+  Efectos de texto (`graphics_textfx.py`, `el["tfx"]`; panel en `graphics_textfx_ui.py`): sombra, elevar, eco,
+  contorno, fondo, desalineado, hueco, neón, distorsión, resplandor y 3D, más 18 estilos (fuente + color + efecto).
+  Los desenfocados no pasan a contornos en el PDF.
 - `cropview.py` — marco de recorte interactivo común (Studio con R; revisión de Events con C: recorte «Personalizado»).
 - `propagate.py` — propagar la edición de Studio/Edits de una foto a otras de Events (`Propagator`: grupos de ajustes y capas de Edits).
   La revisión de Events se guarda sola en `<salida>/.phootflow/revision.json` (`save_review`/`load_review`) y sigue por la primera sin revisar.
