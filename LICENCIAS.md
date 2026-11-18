@@ -42,7 +42,20 @@ Lo que acordamos:
    `python admin_licencias.py crear "David" --notas "mi PC"`.
 3. **Repo de releases** (ver más abajo).
 
-## Herramienta de administración
+## Ventana de licencias (lo más cómodo)
+
+Acceso directo **«Licencias PhootFlow»** en el escritorio (o `pythonw admin_licencias_gui.py`). Usa la misma
+clave secreta de `admin.env`.
+
+- **＋ Nueva licencia**: escribes el nombre (email y notas opcionales) y eliges la duración: *sin fin* (la cortas
+  tú), 1, 3 o 6 meses, 1 año o hasta una fecha. La clave se genera sola, vale para **un PC**, y aparece con un
+  mensaje listo para copiar y mandar por WhatsApp o email (clave, enlace de descarga y cómo activarla).
+- **Terminar licencia** / **Reactivar**: corta o devuelve el acceso cuando quieras.
+- **Editar / cambiar duración…** (o doble clic): alarga, acorta o quita la fecha de fin, cambia nombre y notas.
+- **Cambiar de PC**: desvincula su PC para que active la misma clave en uno nuevo.
+- La tabla muestra el estado (activa, terminada, caducada), hasta cuándo vale, en qué PC está y el último uso.
+
+## Herramienta de administración (consola)
 
 Se ejecuta desde la carpeta del código (`python admin_licencias.py …`). Donde se pide una licencia, vale la clave
 o un trozo del nombre del titular, siempre que solo coincida una.

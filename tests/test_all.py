@@ -1306,6 +1306,31 @@ class Licencias(unittest.TestCase):
         self.assertIn(body["clave"], out.getvalue())
         self.assertIn("PORTATIL", out.getvalue())
 
+        # ventana de administración: duraciones, estado y alta con 1 PC
+        import datetime as dt
+        import admin_licencias_gui as G
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        self.assertEqual(G.add_months(dt.date(2026, 11, 30), 3), dt.date(2027, 2, 28))
+        self.assertEqual(G.add_months(dt.date(2026, 1, 31), 13), dt.date(2027, 2, 28))
+        ahora = dt.datetime(2027, 1, 1, tzinfo=dt.timezone.utc)
+        self.assertEqual(G.estado({"estado": "activa", "caduca": "2026-12-31T23:59:00+00:00"}, ahora), "caducada")
+        self.assertEqual(G.estado({"estado": "revocada", "caduca": None}, ahora), "terminada")
+        self.assertEqual(G.estado({"estado": "activa", "caduca": None}, ahora), "activa")
+        self.assertIn("PF-X", G.mensaje(row))
+        calls.clear()
+        w = G.AdminWindow(adm)
+        w.reload()
+        self.assertEqual(w.tabla.rowCount(), 1)
+        G.LicenciaDialog.exec = lambda self: (self.titular.setText("Eva"), self.dura.setCurrentIndex(2), 1)[-1]
+        G.ClaveDialog.exec = lambda self: 0
+        w.nueva()
+        post = [c for c in calls if c[0] == "POST"][0][2]
+        self.assertEqual((post["titular"], post["max_equipos"]), ("Eva", 1))
+        fin = dt.date.fromisoformat(post["caduca"][:10])
+        self.assertEqual(fin, G.add_months(dt.date.today(), 3))
+        w.close()
+
 
 if __name__ == "__main__":
     unittest.main()

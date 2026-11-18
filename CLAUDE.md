@@ -62,7 +62,7 @@ python -m unittest discover -s tests   # 51 pruebas, sin fotos reales ni red
 - `license.py` — licencias: `ensure()` en `main()` (pide clave, valida en la Edge Function `licencias` de
   Supabase, token Ed25519 verificado en Python puro, 7 días sin conexión, huella del equipo), `watch()` cada 6 h,
   `show_status()` (botón «Licencia» del pie de la barra lateral). Servidor en `servidor_licencias/`,
-  administración con `admin_licencias.py` (no va en el paquete). Ver `LICENCIAS.md`. El selftest no usa licencia.
+  administración con `admin_licencias_gui.py` (ventana) o `admin_licencias.py` (consola); ninguno va en el paquete. Ver `LICENCIAS.md`. El selftest no usa licencia.
 - `.github/workflows/build.yml` — en etiquetas `v*`: pruebas, PyInstaller, selftest del .exe, zip de código,
   sumas y release.
 
