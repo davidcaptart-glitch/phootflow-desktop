@@ -1142,7 +1142,8 @@ class Main(QMainWindow):
         flab = QLabel("Formato")
         flab.setObjectName("meta")
         cv.addWidget(flab)
-        cv.addWidget(UI.ComboChips(self.p_fmt))
+        self.p_fmt_chips = UI.ComboChips(self.p_fmt)
+        cv.addWidget(self.p_fmt_chips)
         self.p_lut = QSpinBox()
         self.p_lut.setRange(0, 100)
         self.p_lut.setSuffix(" %")
@@ -1526,6 +1527,7 @@ class Main(QMainWindow):
         self.p_fmt.clear()
         self.p_fmt.addItems(list(ph.crops) or ["Original"])
         self.p_fmt.setCurrentText(ph.best)
+        self.p_fmt_chips.rebuild()  # (con las señales bloqueadas, los chips no se enteran solos)
         for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut, self.p_bw, self.p_look):
             w.blockSignals(False)
         self.p_card.setEnabled(bool(ph.thumb) and not ph.error and not self.worker)
@@ -2060,6 +2062,7 @@ class Shell(QMainWindow):
         self.stack = QStackedWidget()
         self.events = Main()
         self.events.brand.hide()  # la marca ya está en la cabecera
+        self.events.src.textChanged.connect(self._folder_chip)
         self.a_autosave.blockSignals(True)
         self.a_autosave.setChecked(self.events.autosave)
         self.a_autosave.blockSignals(False)
@@ -2160,9 +2163,13 @@ class Shell(QMainWindow):
         self.env_btn[env].setChecked(True)
         self.folder = folder
         self.folder_lbl.setText(os.path.basename(folder) if folder else "")
+        self._folder_chip(folder)
+        self.s.setValue("env", env)
+
+    def _folder_chip(self, folder: str):
+        folder = (folder or "").strip()
         self.b_folder.setText("  " + (os.path.basename(folder.rstrip("\\/")) if folder else "Abrir carpeta…"))
         self.b_folder.setToolTip((folder + "\n" if folder else "") + "Elegir otra sesión (Ctrl+O)")
-        self.s.setValue("env", env)
 
     def events_settings(self, ph) -> dict:
         """Ajustes de Studio equivalentes a la edición de Events de esta foto."""
