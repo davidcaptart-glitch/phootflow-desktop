@@ -22,6 +22,11 @@ import license as LIC  # noqa: E402
 import updater  # noqa: E402
 
 
+def re_cmds(d):
+    import re
+    return re.findall(r"[A-Za-z]", d)
+
+
 def scene(tilt=0.0, blur=0.0, gain=1.0, seed=1):
     rng = np.random.default_rng(seed)
     a = np.full((1200, 800, 3), 14, np.float32)
@@ -1044,6 +1049,45 @@ class Graphics(unittest.TestCase):
                 for e in texts:
                     e["text"] = "Hola"
                     self.assertEqual(G.fit_text(e)["size"], e["size_max"], name)
+
+    def test_online_svg_icons_become_editable_vectors(self):
+        """Iconos SVG (relativos, arcos con banderas pegadas, H/V/S/Q, formas, transformaciones, solo trazo y
+        currentColor) → vector de Graphics que se ve igual que el SVG; degradados → se rasterizan."""
+        from PySide6.QtGui import QImage, QPainter
+        import graphics_engine as G
+        import graphics_online as O
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="currentColor">'
+               '<path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.27 2 8.5C2 5.41 4.42 3 7.5 3c1.74 0 3.41.81 4.5 '
+               '2.08z"/><path fill-rule="evenodd" d="M14 3h6v6h-6zM16 5h2v2h-2z"/>'
+               '<path d="M3 20a2 2 0 104 0 2 2 0 10-4 0zm6-2q2-3 4 0t4 0s2 2 3 0"/></g>'
+               '<rect x="15" y="12" width="6" height="5" rx="1.5" fill="#F50D8A" transform="rotate(10 18 14)"/>'
+               '<circle cx="18" cy="20" r="2" fill="none" stroke="currentColor" stroke-width="1.2"/>'
+               '<polygon points="9,10 11,14 7,14" fill="rgb(46,134,171)" opacity="0.8"/></svg>')
+        vec = O.svg_to_vector(svg, "#05070F")
+        self.assertEqual(vec["viewbox"], [24.0, 24.0])
+        self.assertTrue(all(set(re_cmds(p["d"])) <= set("MLCZ") for p in vec["paths"]))
+        self.assertIn("#F50D8A", [p["fill"] for p in vec["paths"]])
+        self.assertTrue(any(p.get("stroke_w") and p["fill"] == "#00000000" for p in vec["paths"]))
+
+        def alpha(img):
+            img = img.convertToFormat(QImage.Format_RGBA8888)
+            return np.frombuffer(img.constBits(), np.uint8).reshape(img.height(), img.width(), 4)[..., 3].copy()
+        ref = O.svg_thumb(svg, 96)
+        img = QImage(96, 96, QImage.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        k = 96 * 0.76 / 24
+        el = G.vector_el(vec, 96 * 0.12, 96 * 0.12, 24 * k, 24 * k)
+        p.setTransform(G.element_transform(el))
+        G.paint_element(p, el, G.ImageCache())
+        p.end()
+        self.assertLess(np.abs(alpha(ref).astype(int) - alpha(img)).mean(), 4.0)
+        with self.assertRaises(O.Unsupported):
+            O.svg_to_vector('<svg viewBox="0 0 10 10"><defs><linearGradient id="g"/></defs>'
+                            '<rect width="10" height="10" fill="url(#g)"/></svg>')
+        self.assertEqual(O.to_query("Corazón"), "heart")
+        self.assertEqual(O.to_query("balón de fútbol"), "ball de soccer")
 
     def test_snap_align_and_save(self):
         import graphics_engine as G

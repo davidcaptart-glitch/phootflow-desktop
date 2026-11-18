@@ -959,19 +959,28 @@ class Canvas(QGraphicsView):
 
     # ---------------------------------------------------------- soltar fotos
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
+        if e.mimeData().hasUrls() or e.mimeData().hasFormat(GE_MIME):
             e.acceptProposedAction()
 
     def dragMoveEvent(self, e):
-        if e.mimeData().hasUrls():
+        if e.mimeData().hasUrls() or e.mimeData().hasFormat(GE_MIME):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
+        if e.mimeData().hasFormat(GE_MIME):
+            import json as _json
+            data = _json.loads(bytes(e.mimeData().data(GE_MIME)).decode("utf-8"))
+            self.owner.elements.drop(data, self.mapToScene(e.position().toPoint()))
+            e.acceptProposedAction()
+            return
         paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
         sp = self.mapToScene(e.position().toPoint())
         for i, p in enumerate(paths):
             self.owner.place_photo(p, QPointF(sp.x() + i * 30, sp.y() + i * 30))
         e.acceptProposedAction()
+
+
+GE_MIME = "application/x-phootflow-online"
 
 
 class TaskBar(QFrame):
@@ -1452,9 +1461,17 @@ class GraphicsView(QWidget):
         hint = QLabel("Doble clic en un tamaño para empezar.")
         hint.setObjectName("faint")
         pv.addWidget(hint)
-        t = QLabel("PLANTILLAS")
+        trow = QHBoxLayout()
+        t = QLabel(f"PLANTILLAS ({len(G.TEMPLATES)})")
         t.setObjectName("cardTitle")
-        pv.addWidget(t)
+        trow.addWidget(t)
+        trow.addStretch(1)
+        self.tpl_group = QComboBox()
+        import graphics_templates as GT
+        self.tpl_group.addItems(["Todas"] + GT.GROUPS)
+        self.tpl_group.currentTextChanged.connect(self._filter_templates)
+        trow.addWidget(self.tpl_group)
+        pv.addLayout(trow)
         self.templates = QListWidget()
         self.templates.setViewMode(QListWidget.IconMode)
         self.templates.setIconSize(QSize(110, 110))
@@ -1462,15 +1479,29 @@ class GraphicsView(QWidget):
         self.templates.setResizeMode(QListWidget.Adjust)
         self.templates.setMovement(QListWidget.Static)
         self.templates.setWordWrap(True)
-        for name in G.TEMPLATES:
-            it = QListWidgetItem(self._template_icon(name), name)
+        import graphics_templates as GT
+        order = {g: i for i, g in enumerate(GT.GROUPS)}
+        blank = QPixmap(110, 110)
+        blank.fill(QColor(255, 255, 255, 14))
+        self._tpl_todo = []
+        for name in sorted(G.TEMPLATES, key=lambda n: order.get(G.TEMPLATE_GROUP.get(n, ""), 99)):
+            it = QListWidgetItem(QIcon(blank), name)
             it.setData(Qt.UserRole, name)
+            it.setToolTip(f"{G.TEMPLATE_GROUP.get(name, '')} · {G.TEMPLATE_SIZE[name]}")
             self.templates.addItem(it)
+            self._tpl_todo.append(it)
+        QTimer.singleShot(200, self._next_template_icon)  # miniaturas poco a poco: no frenan el arranque
         self.templates.itemDoubleClicked.connect(lambda it: self.use_template(it.data(Qt.UserRole)))
         self.templates.setToolTip("Doble clic: aplicar al diseño actual (o crear uno nuevo con su tamaño si está "
                                   "vacío)")
         pv.addWidget(self.templates, 3)
         tabs.addTab(pg, "Diseño")
+
+        # Elementos de internet (Iconify, Openverse/Pexels, Google Fonts)
+        import graphics_elements as GEL
+        self.elements = GEL.ElementsPanel(self)
+        GEL.register_fonts(self.elements.store)
+        tabs.addTab(self.elements, "Elementos")
 
         # Fotos
         ph = QWidget()
@@ -1543,8 +1574,23 @@ class GraphicsView(QWidget):
         mv.addLayout(row)
         tabs.addTab(md, "Míos")
         tabs.addTab(self._build_brand(), "Marca")
-        tabs.currentChanged.connect(lambda i: i == 3 and self.refresh_mine())
+        tabs.currentChanged.connect(lambda i: tabs.widget(i) is md and self.refresh_mine())
         return tabs
+
+    def _next_template_icon(self):
+        if self._closing or not self._tpl_todo:
+            return
+        it = self._tpl_todo.pop(0)
+        try:
+            it.setIcon(self._template_icon(it.data(Qt.UserRole)))
+        except RuntimeError:  # la lista ya no existe
+            return
+        QTimer.singleShot(0, self._next_template_icon)
+
+    def _filter_templates(self, group):
+        for i in range(self.templates.count()):
+            it = self.templates.item(i)
+            it.setHidden(group != "Todas" and G.TEMPLATE_GROUP.get(it.data(Qt.UserRole)) != group)
 
     def _template_icon(self, name):
         d = G.design_from_preset(G.TEMPLATE_SIZE[name])
@@ -1656,7 +1702,7 @@ class GraphicsView(QWidget):
 
         menu("Archivo", [
             ("Nuevo diseño…", lambda: self.show_library(0)),
-            ("Abrir de «Míos»…", lambda: self.show_library(3)),
+            ("Abrir de «Míos»…", lambda: self.show_library(4)),
             ("Duplicar diseño", self.duplicate_design), None,
             ("Añadir imagen o logo…", self.add_file), None,
             ("Guardar", self.save_now, "Ctrl+S"),
@@ -1698,10 +1744,11 @@ class GraphicsView(QWidget):
         menu("Ventana", [("Propiedades", lambda: self.right_tabs.setCurrentIndex(0)),
                          ("Capas", lambda: self.right_tabs.setCurrentIndex(1)), None,
                          ("Bibliotecas: diseño y plantillas", lambda: self.show_library(0)),
-                         ("Bibliotecas: fotos", lambda: self.show_library(1)),
-                         ("Bibliotecas: añadir", lambda: self.show_library(2)),
-                         ("Bibliotecas: mis diseños", lambda: self.show_library(3)),
-                         ("Bibliotecas: marca", lambda: self.show_library(4))])
+                         ("Bibliotecas: elementos de internet", lambda: self.show_library(1)),
+                         ("Bibliotecas: fotos", lambda: self.show_library(2)),
+                         ("Bibliotecas: añadir", lambda: self.show_library(3)),
+                         ("Bibliotecas: mis diseños", lambda: self.show_library(4)),
+                         ("Bibliotecas: marca", lambda: self.show_library(5))])
         menu("Ayuda", [("Atajos de teclado", self.show_shortcuts)])
         return mb
 
@@ -2419,6 +2466,12 @@ class GraphicsView(QWidget):
             hint.setObjectName("faint")
             hint.setWordWrap(True)
             self.props.addWidget(hint)
+        if el.get("credit"):
+            cr = QLabel("Origen: " + el["credit"])
+            cr.setObjectName("faint")
+            cr.setWordWrap(True)
+            cr.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.props.addWidget(cr)
         self._title("Apariencia")
         op = QSlider(Qt.Horizontal)
         op.setRange(0, 100)
@@ -2714,11 +2767,11 @@ class GraphicsView(QWidget):
             self.canvas.sc.clearSelection()
             self.items[target["id"]].setSelected(True)
             self.commit()
-            return
+            return target
         el = G.image_el(self.d, path, self._aspect(path))
         if at is not None:
             el["x"], el["y"] = at.x() - el["w"] / 2, at.y() - el["h"] / 2
-        self._add(el)
+        return self._add(el)
 
     def add_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Añadir imagen", self.folder,
@@ -3198,6 +3251,8 @@ class GraphicsView(QWidget):
         self.build_props()
 
     def shutdown(self):
+        if hasattr(self, "elements"):
+            self.elements.shutdown()
         self._closing = True  # para el hilo de miniaturas antes de que se destruya la vista
         self.save_timer.stop()
         self.save_now()

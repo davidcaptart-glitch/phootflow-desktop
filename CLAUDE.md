@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 54 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 55 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -59,6 +59,12 @@ python -m unittest discover -s tests   # 54 pruebas, sin fotos reales ni red
   grupos, imán, texto curvo, pluma y nodos, Buscatrazos, QR, quitar fondo
   (PNG aparte en `diseños\recortes`), vectorizar (OpenCV) y PDF de imprenta (sangrado, marcas, CMYK simple).
   Un solo pintor (`paint_element`) para lienzo y exportación.
+  `graphics_templates.py`: 47 plantillas propias por grupos (bodas, comunión, fiestas, deporte, negocio, redes,
+  impresión, copias) con fuentes de Windows; se registran en `G.TEMPLATES`/`TEMPLATE_SIZE`/`TEMPLATE_GROUP`.
+  Pestaña **Elementos** (`graphics_elements.py` + `graphics_online.py`): gráficos y stickers de Iconify (solo
+  colecciones de licencia comercial; GPL y animadas fuera), convertidos a vector editable con `svg_to_vector`
+  (degradados/máscaras → PNG), fotos de Openverse (CC comercial) y Pexels (clave del usuario), fuentes de Google
+  Fonts (TTF); caché en `%APPDATA%\PhootFlow\online`, crédito de autor y licencia en `el["credit"]`.
 - `cropview.py` — marco de recorte interactivo común (Studio con R; revisión de Events con C: recorte «Personalizado»).
 - `propagate.py` — propagar la edición de Studio/Edits de una foto a otras de Events (`Propagator`: grupos de ajustes y capas de Edits).
   La revisión de Events se guarda sola en `<salida>/.phootflow/revision.json` (`save_review`/`load_review`) y sigue por la primera sin revisar.

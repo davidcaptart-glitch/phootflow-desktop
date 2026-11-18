@@ -472,6 +472,8 @@ TEMPLATES = {"Post de evento": tpl_post_evento, "Invitación": tpl_invitacion, "
 TEMPLATE_SIZE = {"Post de evento": "Instagram vertical 4:5", "Invitación": "A5 (flyer)",
                  "Tarjeta de visita": "Tarjeta de visita", "Collage de 3 fotos": "Instagram cuadrado",
                  "Cita": "Instagram cuadrado", "Flyer de servicios": "A5 (flyer)"}
+# grupo de cada plantilla en la biblioteca (lo rellena graphics_templates.register)
+TEMPLATE_GROUP: dict = {}
 
 
 def tpl_tarjeta_reverso(d):
@@ -893,12 +895,13 @@ def vector_svg(vec: dict, width: str = "", height: str = "") -> str:
 _TOK = re.compile(r"[MLCZ]|-?\d+(?:\.\d+)?")
 
 
-def parse_path(d: str):
-    """«M x y C … L … Z» (lo que escribe `vectorize`) → QPainterPath con relleno par-impar."""
+def parse_path(d: str, rule: str = "evenodd"):
+    """«M x y C … L … Z» (lo que escribe `vectorize`) → QPainterPath con relleno par-impar (o «nonzero», el de
+    los SVG importados de Iconify)."""
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QPainterPath
     p = QPainterPath()
-    p.setFillRule(Qt.OddEvenFill)
+    p.setFillRule(Qt.WindingFill if rule == "nonzero" else Qt.OddEvenFill)
     toks = _TOK.findall(d)
     i, cmd = 0, "M"
     while i < len(toks):
@@ -1035,7 +1038,7 @@ def element_qpath(el: dict):
         for sp in el.get("paths", []):
             if (sp.get("fill") or "").endswith("00") and len(sp.get("fill", "")) == 9:
                 continue
-            p.addPath(_qpath(sp["d"]))
+            p.addPath(_qpath(sp["d"], sp.get("rule", "evenodd")))
         p = QTransform.fromScale(el["w"] / max(vw, 1e-6), el["h"] / max(vh, 1e-6)).map(p)
     elif el["type"] == "shape":
         p = _shape_path(el)
@@ -1205,12 +1208,13 @@ class ImageCache:
 _PATHS: dict = {}
 
 
-def _qpath(d: str):
-    p = _PATHS.get(d)
+def _qpath(d: str, rule: str = "evenodd"):
+    key = (d, rule)
+    p = _PATHS.get(key)
     if p is None:
-        if len(_PATHS) > 400:
+        if len(_PATHS) > 600:
             _PATHS.clear()
-        p = _PATHS[d] = parse_path(d)
+        p = _PATHS[key] = parse_path(d, rule)
     return p
 
 
@@ -1416,7 +1420,7 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
         vw, vh = el.get("viewbox", [1, 1])
         p.scale(w / max(vw, 1e-6), h / max(vh, 1e-6))
         for sp in el.get("paths", []):
-            path = _qpath(sp["d"])
+            path = _qpath(sp["d"], sp.get("rule", "evenodd"))
             p.setBrush(make_brush(sp.get("fill"), el.get("grad") if len(el.get("paths", [])) == 1 else None,
                                   QRectF(0, 0, vw, vh)))
             sw = float(sp.get("stroke_w", 0.0))
@@ -1637,3 +1641,9 @@ def thumbnail(d: dict, cache: ImageCache, side: int = 240):
     paint_design(p, d, cache, img_px=s, max_img=512)
     p.end()
     return img
+
+
+# lote de plantillas propias (bodas, comunión, fiestas, deporte, negocio, redes, impresión y copias)
+import graphics_templates as _GT  # noqa: E402
+
+_GT.register()
