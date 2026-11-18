@@ -172,6 +172,14 @@ class LayersDelegate(QStyledItemDelegate):
             p.setBrush(Qt.NoBrush)
         # miniatura (y máscara)
         x = r.x() + EYE_W
+        if d.get("clip"):  # recortada a la imagen de debajo: sangría y flecha, como en Photoshop
+            p.setPen(QPen(QColor("#bdbdbd"), 1.4))
+            cy = r.y() + r.height() / 2
+            p.drawLine(QPointF(x + 3, cy - 8), QPointF(x + 3, cy + 3))
+            p.drawLine(QPointF(x + 3, cy + 3), QPointF(x + 11, cy + 3))
+            p.drawLine(QPointF(x + 8, cy), QPointF(x + 11, cy + 3))
+            p.drawLine(QPointF(x + 8, cy + 6), QPointF(x + 11, cy + 3))
+            x += 16
         tr = QRect(int(x), r.y() + (r.height() - THUMB) // 2, THUMB, THUMB)
         thumb = d.get("thumb")
         if isinstance(thumb, QPixmap):

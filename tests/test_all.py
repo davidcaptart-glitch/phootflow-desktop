@@ -595,6 +595,80 @@ class Edits(unittest.TestCase):
         lay["path"] = os.path.join(d, "no_existe.png")
         self.assertTrue(np.allclose(EE.compose(photo, doc, [0.0, 0.0, 1.0, 1.0])[0], photo))
 
+    def test_compositing_clipping_masks_free_transform_and_blank_canvas(self):
+        EE = self.EE
+        d = tempfile.mkdtemp()
+        u = np.zeros((100, 200, 3), np.uint8)
+        u[:] = (200, 40, 20)  # rojo
+        src = os.path.join(d, "rojo.png")
+        Image.fromarray(u).save(src)
+        photo = np.full((400, 600, 3), 0.2, np.float32)
+        full = [0.0, 0.0, 1.0, 1.0]
+        doc = EE.new_doc()
+        img = EE.add_layer(doc, "image", path=src, width=50, x=0.5, y=0.5, anchor="mm")
+        # un ajuste encima de la imagen la afecta (antes las imágenes iban siempre encima de todo)
+        inv = EE.add_layer(doc, "adjust", above=img["id"], adj="invert")
+        self.assertEqual([l["kind"] for l in doc["layers"]], ["image", "adjust"])
+        out, _ = EE.compose(photo, doc, full)
+        self.assertLess(float(out[200, 300, 0]), 0.3)  # el rojo invertido
+        self.assertGreater(float(out[10, 10, 0]), 0.7)  # y la foto también
+        # máscara de recorte: el ajuste solo cambia la imagen
+        inv["clip"] = True
+        out, _ = EE.compose(photo, doc, full)
+        self.assertLess(float(out[200, 300, 0]), 0.3)
+        self.assertTrue(np.allclose(out[10, 10], photo[10, 10]))
+        # una imagen recortada a otra solo se ve dentro de ella
+        u2 = np.zeros((50, 50, 3), np.uint8)
+        u2[:] = (10, 220, 10)
+        src2 = os.path.join(d, "verde.png")
+        Image.fromarray(u2).save(src2)
+        inv["visible"] = False
+        top = EE.add_layer(doc, "image", path=src2, width=100, x=0.5, y=0.5, anchor="mm", clip=True)
+        out, _ = EE.compose(photo, doc, full)
+        self.assertGreater(float(out[200, 300, 1]), 0.8)  # verde dentro del rojo
+        self.assertTrue(np.allclose(out[10, 10], photo[10, 10]))  # fuera no se ve
+        img["visible"] = False  # ocultar la base oculta lo recortado a ella
+        self.assertTrue(np.allclose(EE.compose(photo, doc, full)[0], photo))
+        img["visible"], top["visible"] = True, False
+        # máscara de capa en una imagen: la mitad izquierda oculta
+        img["mask"] = {"shapes": [{"type": "rect", "box": [0.5, 0.0, 1.0, 1.0], "op": "add"}]}
+        out, _ = EE.compose(photo, doc, full)
+        self.assertTrue(np.allclose(out[200, 250], photo[200, 250]))
+        self.assertGreater(float(out[200, 350, 0]), 0.7)
+        img.pop("mask")
+        # la caché por prefijo da lo mismo que componer desde cero
+        c = EE.Compositor()
+        self.assertTrue(np.allclose(c.render(photo, doc, full)[0], EE.compose(photo, doc, full)[0]))
+        # con recorte, la imagen se coloca sobre el encuadre (como el texto)
+        box = [0.5, 0.0, 1.0, 1.0]
+        out, _ = EE.compose(photo, doc, box)
+        self.assertEqual(out.shape[:2], (400, 300))
+        self.assertGreater(float(out[200, 150, 0]), 0.7)
+        bx = EE.layer_boxes(doc, photo.shape, box)[img["id"]]
+        self.assertAlmostEqual((bx[0] + bx[2]) / 2, 0.5, delta=0.01)
+        self.assertAlmostEqual(bx[2] - bx[0], 0.5, delta=0.01)
+        # transformación libre: las esquinas de partida son las de la caja; luego, en perspectiva
+        q = EE.image_quad(photo.shape, img)
+        self.assertTrue(np.allclose(q, [[0.25, 0.3125], [0.75, 0.3125], [0.75, 0.6875], [0.25, 0.6875]], atol=0.01))
+        img["angle"] = 90  # girada: las esquinas también
+        q90 = EE.image_quad(photo.shape, img)
+        self.assertAlmostEqual(abs(q90[1][1] - q90[0][1]) * 400, 300, delta=3)
+        img["angle"] = 0
+        img["quad"] = [[0.1, 0.1], [0.5, 0.2], [0.5, 0.8], [0.1, 0.9]]
+        out, _ = EE.compose(photo, doc, full)
+        self.assertGreater(float(out[200, 150, 0]), 0.7)  # dentro del cuadrilátero
+        self.assertTrue(np.allclose(out[30, 290], photo[30, 290], atol=1e-3))  # fuera (arriba a la derecha)
+        self.assertTrue(np.allclose(out[200, 450], photo[200, 450]))
+        # los documentos antiguos (imagen entre texto) se ordenan al abrir
+        old = {"layers": [EE.new_layer("text"), EE.new_layer("image", path=src)]}
+        self.assertEqual([l["kind"] for l in EE.normalize(old)["layers"]], ["image", "text"])
+        # lienzo en blanco: un PNG del tamaño pedido, fuera de la lista de fotos de Events
+        p = EE.new_canvas(d, 1080, 1350, "#000000", "Boda")
+        self.assertEqual(Image.open(p).size, (1080, 1350))
+        self.assertEqual(EE.new_canvas(d, 100, 100, name="Boda"), os.path.join(EE.canvases_dir(d), "Boda 2.png"))
+        self.assertEqual(len(EE.list_canvases(d)), 2)
+        self.assertTrue(all(not ph.path.startswith(EE.canvases_dir(d)) for ph in E.list_photos(d)))
+
     def test_ai_fill_uses_lama_restores_grain_and_falls_back(self):
         EE = self.EE
         rng = np.random.default_rng(3)
