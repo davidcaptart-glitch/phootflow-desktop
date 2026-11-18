@@ -31,7 +31,9 @@ python -m unittest discover -s tests   # 51 pruebas, sin fotos reales ni red
   distribución objetivo). Estilos en `%APPDATA%\PhootFlow\estilos\*.json`.
 - `app.py` — ventana `Main` (barra lateral + rejilla con `ThumbDelegate` + vista previa), `Worker`
   (`analyze`/`export`/`auto`), `LearnDialog`, banner de actualización, `selftest()`.
-- `theme.py` — QSS con los colores del logo (`#05070F`, magenta `#F50D8A`, blanco).
+- `theme.py` — QSS: interfaz negro azulado del logo (`#05070F`), lienzo neutro, chips y degradado magenta→violeta.
+- `icons.py` (iconos SVG propios, `icon(nombre)`) y `ui.py` (chips, `ComboChips` ligado a un QComboBox, `SideSheet` ⚙,
+  `CommandPalette` Ctrl+K, `FlowLayout`). En Events los controles de siempre guardan el estado; los chips son su cara visible.
 - `updater.py` — modos `exe` (sustituye el .exe con un .bat), `source` (descarga `PhootFlow-src.zip`,
   verifica SHA-256, copia encima, pip si cambió `requirements.txt`, reinicia) y `dev` (clon git: solo avisa).
 - `studio.py` / `studio_engine.py` — entorno **Studio** (tipo Lightroom): `StudioView` (biblioteca, lienzo con

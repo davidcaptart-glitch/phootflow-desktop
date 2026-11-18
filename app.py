@@ -17,7 +17,7 @@ from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QImage, QKeyS
                            QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                                QFileDialog,
-                               QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
+                               QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
                                QSizePolicy, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
 
@@ -29,6 +29,8 @@ import license as LIC
 import luts as L
 import styles as S
 import theme as T
+import icons as I
+import ui as UI
 import updater
 from version import __version__
 
@@ -689,7 +691,7 @@ class Main(QMainWindow):
     def build_sidebar(self) -> QWidget:
         side = QWidget()
         side.setObjectName("sidebar")
-        side.setFixedWidth(360)
+        side.setFixedWidth(330)
         outer = QVBoxLayout(side)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -718,33 +720,16 @@ class Main(QMainWindow):
         scroll.setWidget(inner)
         outer.addWidget(scroll, 1)
 
-        # --- sesión
-        c, cv = card("Sesión")
+        # Todos los controles de siempre siguen existiendo (guardan los ajustes: cargar, guardar y procesar no
+        # cambian); a la vista solo queda lo de cada sesión, en chips. El resto, en el panel ⚙ «Ajustes».
         self.src, self.out = QLineEdit(), QLineEdit()
         self.src.setPlaceholderText("Carpeta con los RAW o JPG")
         self.out.setPlaceholderText("Salida: «Editadas» dentro de la sesión")
-        for edit in (self.src, self.out):
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            b = button("…", "small", "Elegir carpeta")
-            b.setFixedWidth(36)
-            b.clicked.connect(lambda _, e=edit: self.pick(e))
-            row.addWidget(edit, 1)
-            row.addWidget(b)
-            cv.addLayout(row)
-        v.addWidget(c)
-
-        # --- tipo de sesión / estilo
-        c, cv = card("Tipo de sesión")
         self.style_cb = QComboBox()
         self.style_cb.currentTextChanged.connect(self.on_style_changed)
         self.style_info = QLabel("")
         self.style_info.setObjectName("muted")
         self.style_info.setWordWrap(True)
-        b_learn = button("Aprender mi estilo…", "small", "Crea un preset a partir de tus sesiones ya editadas")
-        b_learn.clicked.connect(self.learn_style)
-        cv.addWidget(self.style_cb)
-        cv.addWidget(self.style_info)
         self.lut_cb = QComboBox()
         self.lut_cb.setToolTip("LUT (.cube) asociados a este tipo de sesión, más los comunes.\n"
                                "Con un LUT elegido, el programa iguala la sesión y aplica el mismo LUT a todas.")
@@ -752,151 +737,201 @@ class Main(QMainWindow):
         self.lut_k.setRange(0, 100)
         self.lut_k.setSuffix(" %")
         self.lut_k.setValue(100)
-        b_lut = button("Importar LUT…", "small", "Añade uno o varios .cube a este tipo de sesión")
-        b_lut.clicked.connect(self.import_luts)
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        row.addWidget(self.lut_cb, 1)
-        row.addWidget(self.lut_k)
-        cv.addLayout(row)
-        cv.addWidget(b_lut)
-        cv.addWidget(b_learn)
-        v.addWidget(c)
         self.detected: tuple[str, dict] | None = None
         self.session_extra: dict = {}
         self._lut_loading = False
         self.lut_cb.currentIndexChanged.connect(self.on_lut_changed)
         self.lut_k.valueChanged.connect(self.on_lut_changed)
         self.reload_styles()
-
-        # --- edición
-        c, cv = card("Revelado")
         self.nr = QComboBox()
         self.nr.addItems(list(E.NR_LEVELS))
         self.evc = QDoubleSpinBox()
         self.evc.setRange(-1.5, 1.5)
         self.evc.setSingleStep(0.1)
         self.evc.setSuffix(" EV")
-        self.straight = QCheckBox("Enderezar automáticamente")
+        self.straight = QCheckBox("Enderezar")
         self.straight.setChecked(True)
-        self.c_uniform = QCheckBox("Edición uniforme en toda la sesión")
+        self.c_uniform = QCheckBox("Edición uniforme")
         self.c_uniform.setToolTip("Una sola curva y un solo color para todas las fotos, y el mismo brillo\n"
                                   "(sobre todo en las caras) entre fotos del mismo momento.")
-        self.c_cam = QCheckBox("Partir del look de la cámara")
+        self.c_cam = QCheckBox("Look de la cámara")
         self.c_cam.setToolTip("Toma el contraste y el color del JPEG que lleva el RAW (mediana de la sesión).\n"
                               "No se usa con los estilos aprendidos, que ya llevan tu aspecto.")
-        cv.addWidget(labeled("Reducción de grano", self.nr))
-        cv.addWidget(labeled("Compensar exposición", self.evc))
         self.look_cb = QComboBox()
         self.look_cb.addItems(list(E.COLOR_LOOKS))
-        self.look_cb.setToolTip("Look de color de la sesión. En cada foto se puede elegir otro (panel de la foto\n"
-                                "o revisión).")
         self.look_cb.currentTextChanged.connect(lambda _: self.show_preview() if hasattr(self, "preview") else None)
-        cv.addWidget(labeled("Look de color", self.look_cb))
-        cv.addWidget(self.straight)
-        cv.addWidget(self.c_uniform)
-        cv.addWidget(self.c_cam)
-        v.addWidget(c)
-
-        # --- descarte
-        c, cv = card("Selección automática")
-        self.c_focus = QCheckBox("Desenfocadas o movidas")
-        self.c_exp = QCheckBox("Exposición irrecuperable")
-        self.c_dup = QCheckBox("Casi duplicadas (deja la más nítida)")
-        self.c_move = QCheckBox("Al exportar, mover descartes a «Descartadas»")
-        self.c_eyes = QCheckBox("Ojos cerrados (descartar; si no, solo avisa)")
-        for w in (self.c_focus, self.c_exp, self.c_dup, self.c_eyes, self.c_move):
-            w.setChecked(True)
-            cv.addWidget(w)
+        self.c_focus = QCheckBox("Desenfocadas")
+        self.c_exp = QCheckBox("Mal expuestas")
+        self.c_dup = QCheckBox("Repetidas")
+        self.c_eyes = QCheckBox("Ojos cerrados")
+        self.c_move = QCheckBox("Mover descartes")
+        for w_, ic, tip in ((self.c_focus, "blur", "Descartar las desenfocadas o movidas (mira la nitidez de las caras)"),
+                            (self.c_exp, "sun", "Descartar las de exposición irrecuperable"),
+                            (self.c_dup, "dupes", "Casi duplicadas: deja solo la más nítida de cada ráfaga"),
+                            (self.c_eyes, "eyes", "Descartar las de ojos cerrados (apagado: solo avisa)"),
+                            (self.c_move, "move", "Al exportar, mover los descartes a «Descartadas» (nunca se borran)")):
+            w_.setChecked(True)
+            UI.as_chip(w_, ic, tip)
+        for w_, ic in ((self.straight, "crop"), (self.c_uniform, "sliders"), (self.c_cam, "studio_photo")):
+            UI.as_chip(w_, ic)
         self.sens = QComboBox()
         self.sens.addItems(list(E.SENS))
-        cv.addWidget(labeled("Exigencia", self.sens))
-        v.addWidget(c)
-
-        # --- formatos
-        c, cv = card("Formatos y tamaños")
-        hint = QLabel("El formato sugerido se exporta siempre. Además:")
-        hint.setObjectName("muted")
-        hint.setWordWrap(True)
-        cv.addWidget(hint)
-        g = QGridLayout()
-        g.setSpacing(6)
-        self.r_orig = QCheckBox("Original")
-        g.addWidget(self.r_orig, 0, 0)
+        self.r_orig = UI.as_chip(QCheckBox("Original"), tip="Exportar también con la proporción de la cámara")
         self.ratio_cb = {}
-        for i, name in enumerate(E.RATIOS, start=1):
-            cb = QCheckBox(name)
-            self.ratio_cb[name] = cb
-            g.addWidget(cb, i // 4, i % 4)
-        cv.addLayout(g)
+        for name in E.RATIOS:
+            self.ratio_cb[name] = UI.as_chip(QCheckBox(name), tip=f"Exportar también en {name}")
         self.size_cb = {}
-        for k, label in [("max", "Máxima resolución"), ("2048", "2048 px lado largo"), ("1080", "1080 px de ancho")]:
-            cb = QCheckBox(label)
-            self.size_cb[k] = cb
-            cv.addWidget(cb)
-        self.c_bw = QCheckBox("Versión en blanco y negro editorial")
-        self.c_bw.setToolTip("Además del color, una versión B/N de catálogo en «ByN/»: mezcla pensada para la piel,\n"
-                             "contraste local, negros densos sin empastar, blancos limpios y grano fino.")
-        cv.addWidget(self.c_bw)
+        for k, label, tip in [("max", "Máxima", "Máxima resolución"), ("2048", "2048 px", "2048 px de lado largo"),
+                              ("1080", "1080 px", "1080 px de ancho (redes)")]:
+            self.size_cb[k] = UI.as_chip(QCheckBox(label), tip=tip)
+        self.c_bw = UI.as_chip(QCheckBox("Versión B/N"), "bw",
+                               "Además del color, una versión B/N de catálogo en «ByN/»: mezcla pensada para la piel,\n"
+                               "contraste local, negros densos sin empastar, blancos limpios y grano fino.")
         self.bw_style_cb = QComboBox()
         self.bw_style_cb.addItems(list(E.BW_STYLES))
-        self.bw_style_cb.setToolTip("Estilo de blanco y negro de la sesión. En cada foto se puede elegir otro\n"
-                                    "(panel de la foto o revisión), o quitarle la versión B/N.")
-        cv.addWidget(labeled("Estilo B/N", self.bw_style_cb))
         self.q = QSpinBox()
         self.q.setRange(70, 100)
-        cv.addWidget(labeled("Calidad JPG", self.q))
-        v.addWidget(c)
-
-        # --- salida
-        c, cv = card("Archivo y Lightroom")
-        self.c_exif = QCheckBox("Conservar EXIF (cámara, objetivo, fecha)")
-        self.c_xmp = QCheckBox("Crear XMP para Lightroom junto a los RAW")
-        self.c_xmp.setToolTip("Exposición, giro, recorte y reducción de ruido; los descartes como «rechazadas».\n"
-                              "Nunca sobrescribe un XMP que ya exista.")
-        self.c_zip = QCheckBox("Guardar los originales en un ZIP sin pérdida")
-        self.c_review = QCheckBox("Revisar antes de exportar (una a una)")
-        self.c_review.setToolTip("Antes de exportar se abre la revisión: aprobar/rechazar, ver B/N, probar\n"
-                                 "otros recortes y retocar en Studio las que no convenzan.")
-        for w in (self.c_review, self.c_exif, self.c_xmp, self.c_zip):
-            cv.addWidget(w)
+        self.c_exif = UI.as_chip(QCheckBox("EXIF"), "info", "Conservar EXIF (cámara, objetivo, fecha)")
+        self.c_xmp = UI.as_chip(QCheckBox("XMP para Lightroom"), "sliders",
+                                "Exposición, giro, recorte y reducción de ruido; los descartes como «rechazadas».\n"
+                                "Nunca sobrescribe un XMP que ya exista.")
+        self.c_zip = UI.as_chip(QCheckBox("ZIP de originales"), "archive", "Guardar los originales en un ZIP sin pérdida")
+        self.c_review = UI.as_chip(QCheckBox("Revisar antes de exportar"), "review",
+                                   "Antes de exportar se abre la revisión: aprobar/rechazar, ver B/N, recortes y\n"
+                                   "retocar en Studio las que no convenzan.")
         self.workers = QSpinBox()
         self.workers.setRange(1, max(1, min(8, (os.cpu_count() or 2))))
         self.workers.setToolTip("Más fotos a la vez es más rápido pero usa más memoria (≈1,5 GB por foto).")
-        cv.addWidget(labeled("Fotos a la vez", self.workers))
-        v.addWidget(c)
-
-        # --- nube
-        c, cv = card("Nube")
         self.cloud = QComboBox()
         self.cloud.addItems(CLOUDS)
         self.cloud_folder = QLineEdit()
         self.cloud_btn = button("", "small")
         self.cloud_btn.clicked.connect(self.cloud_action)
-        self.c_up_orig = QCheckBox("Subir también el ZIP de originales (privado)")
+        self.c_up_orig = UI.as_chip(QCheckBox("Subir también el ZIP (privado)"), "cloud")
         self.cloud.currentIndexChanged.connect(self.cloud_ui)
-        cv.addWidget(self.cloud)
-        cv.addWidget(self.cloud_folder)
-        cv.addWidget(self.cloud_btn)
-        cv.addWidget(self.c_up_orig)
-        v.addWidget(c)
+        self.b_upd = button("Buscar actualizaciones", "ghost")  # la acción está en el menú ⚙ de la cabecera
+        self.b_upd.clicked.connect(lambda: self.check_update(True))
+        self.b_upd.hide()
+
+        # --- a la vista: sesión
+        blk, bv = UI.section("Sesión")
+        sess = QFrame()
+        sess.setObjectName("sessionChip")
+        sh = QHBoxLayout(sess)
+        sh.setContentsMargins(10, 8, 6, 8)
+        ic = QLabel()
+        ic.setPixmap(I.pixmap("folder", 18, T.ACCENT_HOVER))
+        names = QVBoxLayout()
+        names.setSpacing(0)
+        self.sess_name = QLabel("Sin carpeta")
+        self.sess_name.setObjectName("h1")
+        self.sess_meta = QLabel("Elige la carpeta de la sesión")
+        self.sess_meta.setObjectName("meta")
+        names.addWidget(self.sess_name)
+        names.addWidget(self.sess_meta)
+        b_pick = UI.icon_button("folder", "Elegir la carpeta de la sesión")
+        b_pick.clicked.connect(lambda: self.pick(self.src))
+        sh.addWidget(ic)
+        sh.addSpacing(6)
+        sh.addLayout(names, 1)
+        sh.addWidget(b_pick)
+        bv.addWidget(sess)
+        self.src.textChanged.connect(self._session_label)
+        v.addWidget(blk)
+        blk.hide()  # la sesión ya se ve en el chip de la cabecera y en el título
+
+        # --- tipo de evento (detectado solo o elegido) y look
+        blk, bv = UI.section("Tipo de evento")
+        self.style_chips = UI.ComboChips(self.style_cb, icon_for=I.for_style, labels={S.AUTO: "Auto"},
+                                         tips={S.AUTO: "Detectarlo solo (IA local)"},
+                                         label_fn=lambda t: t.replace("Mi estilo: ", "") + " ✦"
+                                         if t.startswith("Mi estilo") else t.split(" / ")[0],
+                                         tip_fn=lambda t: "Tu estilo aprendido" if t.startswith("Mi estilo") else t)
+        bv.addWidget(self.style_chips)
+        bv.addWidget(self.style_info)
+        v.addWidget(blk)
+        blk, bv = UI.section("Look")
+        bv.addWidget(UI.ComboChips(self.look_cb))
+        bv.addWidget(UI.flow([self.c_bw]))
+        v.addWidget(blk)
+
+        # --- descartar solo
+        blk, bv = UI.section("Descartar automáticamente")
+        bv.addWidget(UI.flow([self.c_focus, self.c_exp, self.c_dup, self.c_eyes]))
+        sens = UI.ComboChips(self.sens, tips={k: f"Exigencia: {k}" for k in E.SENS})
+        lab = QLabel("Exigencia")
+        lab.setObjectName("meta")
+        bv.addWidget(lab)
+        bv.addWidget(sens)
+        v.addWidget(blk)
+
+        # --- formatos
+        blk, bv = UI.section("Formatos además del sugerido")
+        bv.addWidget(UI.flow([self.r_orig] + list(self.ratio_cb.values())))
+        lab = QLabel("Tamaños")
+        lab.setObjectName("meta")
+        bv.addWidget(lab)
+        bv.addWidget(UI.flow(list(self.size_cb.values())))
+        v.addWidget(blk)
         v.addStretch(1)
 
         foot = QWidget()
         fh = QHBoxLayout(foot)
-        fh.setContentsMargins(18, 8, 14, 12)
-        ver = QLabel(f"v{__version__}")
-        ver.setObjectName("version")
-        self.b_upd = button("Buscar actualizaciones", "ghost")
-        self.b_upd.setObjectName("ghost")
-        self.b_upd.clicked.connect(lambda: self.check_update(True))
-        fh.addWidget(ver)
-        fh.addStretch(1)
-        b_lic = button("Licencia", "ghost", "Estado de la licencia de este equipo")
-        b_lic.clicked.connect(lambda: LIC.show_status(self))
-        fh.addWidget(b_lic)
-        fh.addWidget(self.b_upd)
+        fh.setContentsMargins(14, 8, 14, 12)
+        b_set = button("  Ajustes de la sesión", "ghost", "LUT, aprender estilo, grano, exposición, B/N, calidad, "
+                                                          "Lightroom, nube… (Ctrl+,)")
+        b_set.setIcon(I.icon("gear", 16))
+        b_set.clicked.connect(self.open_settings)
+        fh.addWidget(b_set, 1)
         outer.addWidget(foot)
+        QShortcut(QKeySequence("Ctrl+,"), self, self.open_settings)
+
+        # --- panel ⚙: lo que no se toca en cada sesión
+        self.sheet = UI.SideSheet(self, "Ajustes de la sesión", 420)
+        c, cv = card("Carpetas")
+        for label, edit in (("Sesión", self.src), ("Salida", self.out)):
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            b = UI.icon_button("folder", "Elegir carpeta")
+            b.clicked.connect(lambda _, e=edit: self.pick(e))
+            row.addWidget(edit, 1)
+            row.addWidget(b)
+            cv.addWidget(QLabel(label))
+            cv.addLayout(row)
+        self.sheet.add(c)
+        c, cv = card("LUT y estilo propio")
+        row = QHBoxLayout()
+        row.addWidget(self.lut_cb, 1)
+        row.addWidget(self.lut_k)
+        cv.addLayout(row)
+        b_lut = button("  Importar LUT…", "ghost", "Añade uno o varios .cube a este tipo de sesión")
+        b_lut.setIcon(I.icon("lut", 16))
+        b_lut.clicked.connect(self.import_luts)
+        b_learn = button("  Aprender mi estilo…", "ghost", "Crea un preset a partir de tus sesiones ya editadas")
+        b_learn.setIcon(I.icon("wand", 16))
+        b_learn.clicked.connect(self.learn_style)
+        cv.addWidget(UI.flow([b_lut, b_learn]))
+        self.sheet.add(c)
+        c, cv = card("Revelado")
+        cv.addWidget(labeled("Reducción de grano", self.nr))
+        cv.addWidget(labeled("Compensar exposición", self.evc))
+        cv.addWidget(UI.flow([self.straight, self.c_uniform, self.c_cam]))
+        self.sheet.add(c)
+        c, cv = card("Blanco y negro y calidad")
+        cv.addWidget(labeled("Estilo B/N", self.bw_style_cb))
+        cv.addWidget(labeled("Calidad JPG", self.q))
+        cv.addWidget(labeled("Fotos a la vez", self.workers))
+        self.sheet.add(c)
+        c, cv = card("Al exportar")
+        cv.addWidget(UI.flow([self.c_review, self.c_move, self.c_exif, self.c_xmp, self.c_zip]))
+        self.sheet.add(c)
+        c, cv = card("Nube")
+        cv.addWidget(self.cloud)
+        cv.addWidget(self.cloud_folder)
+        cv.addWidget(self.cloud_btn)
+        cv.addWidget(UI.flow([self.c_up_orig]))
+        self.sheet.add(c)
+        self.sheet.lay.addStretch(1)
         return side
 
     def build_content(self) -> QWidget:
@@ -936,22 +971,33 @@ class Main(QMainWindow):
         titles.addWidget(self.h1)
         titles.addWidget(self.sub)
         head.addLayout(titles, 1)
-        self.b_open = button("Abrir salida", "ghost")
-        self.b_ca = button("Cancelar", "ghost")
-        self.b_an = button("Analizar", "", "Pasada rápida para revisar antes de exportar: no mueve ni borra nada")
-        self.b_ex = button("Exportar", "", "Revela a resolución completa las fotos conservadas")
-        self.b_auto = button("Procesar todo", "primary",
-                             "Analiza, selecciona y exporta toda la sesión sin parar.\n"
-                             "Si se corta, al volver a pulsarlo sigue donde se quedó.")
+        self.b_open = UI.icon_button("open", "Abrir la carpeta de salida")
+        self.b_ca = button("  Cancelar", "ghost")
+        self.b_ca.setIcon(I.icon("stop", 16))
+        self.b_an = button("  1  Analizar", "step", "Pasada rápida para revisar antes de exportar: no mueve ni borra nada")
+        self.b_ex = button("  3  Exportar", "step", "Revela a resolución completa las fotos conservadas")
+        self.b_auto = UI.icon_button("zap", "Procesar todo: analiza, selecciona y exporta la sesión sin parar.\n"
+                                            "Si se corta, al volver a pulsarlo sigue donde se quedó.")
         self.b_an.clicked.connect(lambda: self.start_analyze(False))
         self.b_ex.clicked.connect(self.start_export)
-        self.b_rev = button("Revisar", "", "Revisión una a una antes de exportar")
+        self.b_rev = button("  2  Revisar", "step", "Revisión una a una antes de exportar (se guarda sola)")
+        for b_, ic in ((self.b_an, "scan"), (self.b_rev, "review"), (self.b_ex, "export")):
+            b_.setIcon(I.icon(ic, 16))
         self.b_rev.clicked.connect(lambda: self.open_review())
         self.b_auto.clicked.connect(lambda: self.start_analyze(True))
         self.b_ca.clicked.connect(self.do_cancel)
         self.b_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.out_dir())))
-        for b in (self.b_open, self.b_ca, self.b_an, self.b_rev, self.b_ex, self.b_auto):
+        head.addWidget(self.b_open)
+        head.addWidget(self.b_ca)
+        head.addSpacing(6)
+        for i_, b in enumerate((self.b_an, self.b_rev, self.b_ex)):
+            if i_:
+                ln = QLabel("—")
+                ln.setObjectName("stepLine")
+                head.addWidget(ln)
             head.addWidget(b)
+        head.addSpacing(6)
+        head.addWidget(self.b_auto)
         v.addLayout(head)
 
         # filtros + contadores
@@ -974,7 +1020,7 @@ class Main(QMainWindow):
         self.seg_btn["all"].setChecked(True)
         bar.addWidget(seg)
         bar.addStretch(1)
-        self.chip_keep, self.chip_drop, self.chip_warn = QLabel(), QLabel(), QLabel()
+        self.chip_keep, self.chip_drop, self.chip_warn = QLabel(), QLabel(), QLabel()  # (ocultos: ya van en los filtros)
         self.chip_keep.setObjectName("chipAccent")
         self.chip_drop.setObjectName("chip")
         self.chip_warn.setObjectName("chip")
@@ -1050,6 +1096,17 @@ class Main(QMainWindow):
         c, cv = card("Ajustes de esta foto")
         self.p_keep = QCheckBox("Conservar y editar   (P / X / espacio)")
         self.p_keep.toggled.connect(lambda on: self.set_keep(on))
+        self.p_keep.hide()  # la cara visible son los dos botones de abajo
+        krow = QHBoxLayout()
+        self.b_keep = button("  Conservar", "chip", "Conservar y editar (P)")
+        self.b_drop = button("  Descartar", "chip", "Descartar (X)")
+        for b_, ic, val in ((self.b_keep, "check", True), (self.b_drop, "x", False)):
+            b_.setCheckable(True)
+            b_.setIcon(I.icon(ic, 16))
+            b_.clicked.connect(lambda _, v_=val: self.set_keep(v_))
+            krow.addWidget(b_, 1)
+        self.p_keep.toggled.connect(self._keep_buttons)
+        cv.addLayout(krow)
         self.p_ev = QDoubleSpinBox()
         self.p_ev.setRange(-3.0, E.EV_MAX + 1.0)
         self.p_ev.setSingleStep(0.1)
@@ -1379,11 +1436,41 @@ class Main(QMainWindow):
     def refresh_counts(self):
         done = [p for p in self.photos if p.thumb or p.error]
         keep = sum(p.keep for p in done)
-        self.chip_keep.setText(f"{keep} para editar")
-        self.chip_drop.setText(f"{len(done) - keep} descartadas")
-        self.chip_warn.setText(f"{sum(1 for p in done if p.warn)} avisos")
+        warn = sum(1 for p in done if p.warn)
         for c in (self.chip_keep, self.chip_drop, self.chip_warn):
-            c.setVisible(bool(done))
+            c.hide()
+        n = {"all": len(self.photos), "keep": keep, "drop": len(done) - keep, "warn": warn}
+        for k, t in (("all", "Todas"), ("keep", "Para editar"), ("drop", "Descartadas"), ("warn", "Avisos")):
+            self.seg_btn[k].setText(f"{t}  {n[k]}" if self.photos else t)
+        self.update_steps()
+
+    def update_steps(self):
+        """Pasos de la sesión: el siguiente se ilumina; los hechos, en verde."""
+        analyzed = any(p.thumb for p in self.photos)
+        reviewed = analyzed and any(p.reviewed for p in self.photos)
+        state = {self.b_an: "stepDone" if analyzed else "stepNext",
+                 self.b_rev: "stepDone" if reviewed else ("stepNext" if analyzed else "step"),
+                 self.b_ex: "stepNext" if reviewed else "step"}
+        for b_, name in state.items():
+            if b_.objectName() != name:
+                b_.setObjectName(name)
+                b_.style().unpolish(b_)
+                b_.style().polish(b_)
+
+    def _session_label(self, path):
+        path = (path or "").strip()
+        self.sess_name.setText(os.path.basename(path.rstrip("\\/")) or "Sin carpeta")
+        n = len(self.photos)
+        self.sess_meta.setText((f"{n} fotos · " if n else "") + (path if len(path) < 42 else "…" + path[-40:])
+                               if path else "Elige la carpeta de la sesión")
+        self.sess_name.setToolTip(path)
+
+    def _keep_buttons(self, on):
+        self.b_keep.setChecked(bool(on))
+        self.b_drop.setChecked(not on)
+
+    def open_settings(self):
+        self.sheet.open_at(self, "left")
 
     def on_select(self, row):
         if row < 0 or row >= self.grid.count():
@@ -1409,6 +1496,7 @@ class Main(QMainWindow):
         self.p_lut.setValue(int(round(100 * (ph.lut_strength if ph.lut_strength is not None
                                              else self.lut_k.value() / 100))))
         self.p_keep.setChecked(ph.keep)
+        self._keep_buttons(ph.keep)
         self.p_ev.setValue(ph.ev)
         self.p_ang.setValue(ph.angle)
         self.p_fmt.clear()
@@ -1498,6 +1586,7 @@ class Main(QMainWindow):
         self.p_keep.blockSignals(True)
         self.p_keep.setChecked(on)
         self.p_keep.blockSignals(False)
+        self._keep_buttons(on)
         self.refresh_counts()
         self.on_select(self.grid.currentRow())
         self.grid.viewport().update()
@@ -1813,36 +1902,51 @@ class Shell(QMainWindow):
         hh.addWidget(mark)
         hh.addSpacing(8)
         hh.addWidget(word)
-        hh.addSpacing(22)
-        self.folder_lbl = QLabel("")
-        self.folder_lbl.setObjectName("meta")
-        hh.addWidget(self.folder_lbl, 1)
-        b_open = button("Abrir carpeta…", "ghost", "Elige la sesión y en qué entorno trabajarla (Ctrl+O)")
-        b_open.clicked.connect(self.open_folder)
-        hh.addWidget(b_open)
         hh.addSpacing(18)
+        self.folder_lbl = QLabel("")  # (compatibilidad: el nombre se ve en el chip de la carpeta)
+        self.folder_lbl.hide()
+        self.b_folder = button("  Abrir carpeta…", "chip", "Elige la sesión y en qué entorno trabajarla (Ctrl+O)")
+        self.b_folder.setIcon(I.icon("folder", 16))
+        self.b_folder.clicked.connect(self.open_folder)
+        hh.addWidget(self.b_folder)
+        hh.addStretch(1)
+        pill = QFrame()
+        pill.setObjectName("modulePill")
+        ph = QHBoxLayout(pill)
+        ph.setContentsMargins(3, 3, 3, 3)
+        ph.setSpacing(2)
         self.env_btn = {}
         group = QButtonGroup(self)
-        for i, (key, text, tip) in enumerate(((ENV_EVENTS, "Events", "Edición automática de sesiones completas (Ctrl+Tab)"),
-                                              (ENV_STUDIO, "Studio", "Edición foto a foto, como Lightroom (Ctrl+Tab)"),
-                                              (ENV_EDITS, "Edits", "Retoque tipo Photoshop (Ctrl+Tab)"),
-                                              (ENV_GRAPHICS, "Graphics", "Diseño tipo Canva e Illustrator: "
-                                                                         "posts, flyers, imprenta (Ctrl+Tab)"))):
-            if i:
-                sep = QLabel("|")
-                sep.setObjectName("moduleSep")
-                hh.addWidget(sep)
-            b = button(text, "module", tip)
+        for key, text, ic, tip in ((ENV_EVENTS, "Events", "events", "Edición automática de sesiones completas"),
+                                   (ENV_STUDIO, "Studio", "studio", "Edición foto a foto, como Lightroom"),
+                                   (ENV_EDITS, "Edits", "edits", "Retoque: piel, objetos, fondos"),
+                                   (ENV_GRAPHICS, "Graphics", "graphics", "Diseño: posts, flyers, imprenta")):
+            b = button("  " + text, "pill", tip + " (Ctrl+Tab)")
             b.setCheckable(True)
-            from PySide6.QtGui import QFontMetrics
-            fb = QFont(b.font())
-            fb.setPointSizeF(12)
-            fb.setWeight(QFont.DemiBold)
-            b.setMinimumWidth(QFontMetrics(fb).horizontalAdvance(text) + 26)  # en negrita (activo) no se corta
+            b.setIcon(I.icon(ic, 16))
             b.clicked.connect(lambda _, k=key: self.switch(k))
             group.addButton(b)
-            hh.addWidget(b)
+            ph.addWidget(b)
             self.env_btn[key] = b
+        hh.addWidget(pill)
+        hh.addStretch(1)
+        b_cmd = UI.icon_button("search", "Buscar una acción (Ctrl+K)")
+        b_cmd.clicked.connect(self.command_palette)
+        from PySide6.QtWidgets import QMenu, QToolButton
+        b_menu = UI.icon_button("gear", "Ajustes, licencia y actualizaciones")
+        b_menu.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(b_menu)
+        menu.addAction(I.icon("sliders", 16), "Ajustes de la sesión…", lambda: (self.switch(ENV_EVENTS),
+                                                                             self.events.open_settings()))
+        menu.addAction(I.icon("key", 16), "Licencia…", lambda: LIC.show_status(self))
+        menu.addAction(I.icon("refresh", 16), "Buscar actualizaciones", lambda: (self.switch(ENV_EVENTS),
+                                                                              self.events.check_update(True)))
+        menu.addSeparator()
+        menu.addAction(I.icon("info", 16), f"PhootFlow {__version__}").setEnabled(False)
+        b_menu.setMenu(menu)
+        b_menu.setStyleSheet("QToolButton::menu-indicator { image: none; }")
+        hh.addWidget(b_cmd)
+        hh.addWidget(b_menu)
         v.addWidget(head)
 
         from PySide6.QtWidgets import QStackedWidget
@@ -1863,11 +1967,41 @@ class Shell(QMainWindow):
         self.events.request_edits.connect(self.edit_in_edits)
         v.addWidget(self.stack, 1)
         QShortcut(QKeySequence("Ctrl+O"), self, self.open_folder)
+        QShortcut(QKeySequence("Ctrl+K"), self, self.command_palette)
         QShortcut(QKeySequence("Ctrl+Tab"), self, lambda: self.switch(
             ENVS[(ENVS.index(self.env) + 1) % len(ENVS)] if self.env in ENVS else ENV_EVENTS))
         self.folder = self.events.src.text().strip()
         self.env = ""
         self.switch(self.s.value("env", ENV_EVENTS))
+
+    def command_palette(self):
+        """Ctrl+K: todas las acciones a mano escribiendo lo que se quiere hacer."""
+        ev = self.events
+
+        def in_events(fn):
+            return lambda: (self.switch(ENV_EVENTS), fn())
+
+        acts = [("events", "Ir a Events", "modulo sesiones automatico", lambda: self.switch(ENV_EVENTS)),
+                ("studio", "Ir a Studio", "modulo lightroom revelado", lambda: self.switch(ENV_STUDIO)),
+                ("edits", "Ir a Edits", "modulo retoque photoshop piel", lambda: self.switch(ENV_EDITS)),
+                ("graphics", "Ir a Graphics", "modulo diseno canva flyer post", lambda: self.switch(ENV_GRAPHICS)),
+                ("folder", "Abrir carpeta…", "sesion elegir", self.open_folder),
+                ("scan", "Analizar la sesión", "analisis empezar", in_events(lambda: ev.start_analyze(False))),
+                ("review", "Revisar una a una", "revision aprobar rechazar seguir", in_events(ev.open_review)),
+                ("export", "Exportar", "guardar jpg", in_events(ev.start_export)),
+                ("zap", "Procesar todo", "automatico desatendido", in_events(lambda: ev.start_analyze(True))),
+                ("open", "Abrir la carpeta de salida", "editadas resultado",
+                 lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(ev.out_dir()))),
+                ("sliders", "Ajustes de la sesión", "configuracion grano exposicion calidad lightroom xmp zip nube",
+                 in_events(ev.open_settings)),
+                ("bw", "Versión en blanco y negro (activar / desactivar)", "b/n byn bn", in_events(ev.c_bw.toggle)),
+                ("lut", "Importar LUT…", "cube color", in_events(ev.import_luts)),
+                ("wand", "Aprender mi estilo…", "preset aprender", in_events(ev.learn_style)),
+                ("crop", "Recortar en Studio", "recorte encuadre", lambda: (self.switch(ENV_STUDIO),
+                                                                            self.studio.b_crop.setChecked(True))),
+                ("key", "Licencia", "clave activar", lambda: LIC.show_status(self)),
+                ("refresh", "Buscar actualizaciones", "actualizar version", in_events(lambda: ev.check_update(True)))]
+        UI.CommandPalette(self, acts).show_centered()
 
     def events_photo(self, path: str):
         for p in self.events.photos:
@@ -1913,6 +2047,8 @@ class Shell(QMainWindow):
         self.env_btn[env].setChecked(True)
         self.folder = folder
         self.folder_lbl.setText(os.path.basename(folder) if folder else "")
+        self.b_folder.setText("  " + (os.path.basename(folder.rstrip("\\/")) if folder else "Abrir carpeta…"))
+        self.b_folder.setToolTip((folder + "\n" if folder else "") + "Elegir otra sesión (Ctrl+O)")
         self.s.setValue("env", env)
 
     def events_settings(self, ph) -> dict:
