@@ -33,11 +33,11 @@ import engine as E
 import graphics_engine as G
 import theme as T
 
-# Entorno VectorCraft (github.com/storytold/vectorcraft, MIT o Apache-2.0): gris azulado, herramienta activa en
-# terracota, selección azul y guías inteligentes en magenta, como en Illustrator.
-VC = dict(app="#1B1E24", panel="#23262E", panel2="#2B2F38", field="#1A1C22", canvas="#1E2026", border="#343842",
-          text="#D9DCE3", muted="#9AA0AB", faint="#6B717C", tool="#6A2E22", tool_line="#A9452E",
-          accent="#C2502F", accent_hi="#D8623F", select="#4C82F7", guide="#E8489A")
+# Distribución de VectorCraft (github.com/storytold/vectorcraft, MIT o Apache-2.0) con los colores de PhootFlow:
+# negro azulado de la interfaz, herramienta activa en magenta, selección azul y guías inteligentes en magenta.
+VC = dict(app=T.CHROME, panel=T.SURFACE, panel2=T.SURFACE_2, field=T.SURFACE_2, canvas="#14161c", border=T.LINE,
+          text=T.TEXT, muted=T.MUTED, faint=T.FAINT, tool="#4a1036", tool_line=T.ACCENT,
+          accent=T.ACCENT, accent_hi=T.ACCENT_HOVER, select="#4C82F7", guide="#E8489A")
 ACCENT = QColor(VC["select"])
 GUIDE = QColor(VC["guide"])
 
@@ -77,8 +77,9 @@ QPushButton {{ background: {VC['panel2']}; border: 1px solid {VC['border']}; bor
 QPushButton:hover {{ background: #343945; }}
 QPushButton:checked {{ background: {VC['tool']}; border-color: {VC['tool_line']}; color: white; }}
 QPushButton:disabled {{ color: {VC['faint']}; }}
-QPushButton#primary {{ background: {VC['accent']}; border-color: {VC['accent']}; color: white; font-weight: 600; }}
-QPushButton#primary:hover {{ background: {VC['accent_hi']}; }}
+QPushButton#primary {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #F50D8A, stop:1 #7B2FF7);
+                       border: none; color: white; font-weight: 600; }}
+QPushButton#primary:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #FF3DA3, stop:1 #9150ff); }}
 QPushButton#ghost, QPushButton#flat {{ background: transparent; }}
 QPushButton#ghost:hover, QPushButton#flat:hover {{ background: {VC['panel2']}; }}
 QPushButton#vcTool {{ background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 0; }}
@@ -1382,12 +1383,16 @@ class GraphicsView(QWidget):
         mid = QVBoxLayout()
         mid.setContentsMargins(0, 0, 0, 0)
         mid.setSpacing(0)
-        mid.addWidget(self._build_doctab())
+        doctab = self._build_doctab()
+        mid.addWidget(doctab)
         mid.addWidget(self.canvas, 1)
         h.addLayout(mid, 1)
         h.addWidget(self._build_right())
-        outer.addWidget(self._build_menubar())
+        menubar = self._build_menubar()
+        outer.addWidget(menubar)
         outer.addLayout(h, 1)
+        import ui as PUI
+        PUI.collapse_menubar(menubar, self, doctab.layout())  # los menús, tras ☰: una fila menos
         outer.addWidget(self._build_hint())
         outer.addWidget(self._build_status())
         self.taskbar = TaskBar(self)

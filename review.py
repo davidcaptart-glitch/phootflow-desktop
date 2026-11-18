@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
 
 import compare as CMP
 import cropview as CV
+import icons as I
 import zoomview as Z
 import engine as E
 import theme as T
@@ -32,6 +33,14 @@ def crop(a: np.ndarray, box) -> np.ndarray:
     h, w = a.shape[:2]
     return a[int(round(y0 * h)):max(int(round(y0 * h)) + 1, int(round(y1 * h))),
              int(round(x0 * w)):max(int(round(x0 * w)) + 1, int(round(x1 * w)))]
+
+
+def _ibtn(icon, tip, checkable=False, text="", kind=""):
+    b = _btn(("  " + text) if text else "", kind or ("iconBtn" if not text else "ghost"), tip)
+    b.setIcon(I.icon(icon, 18))
+    b.setIconSize(QSize(18, 18))
+    b.setCheckable(checkable)
+    return b
 
 
 def _btn(text, kind="", tip=""):
@@ -195,13 +204,14 @@ class ReviewDialog(QDialog):
         self.filter = QComboBox()
         self.filter.addItems(FILTERS)
         self.filter.currentIndexChanged.connect(self.apply_filter)
-        self.b_bw = _btn("Ver B/N", "ghost", "Alternar color / blanco y negro editorial (B)")
-        self.b_bw.setCheckable(True)
+        self.b_bw = _ibtn("bw", "Ver en blanco y negro editorial (B)", True)
         self.b_bw.toggled.connect(self.set_bw)
-        b_close = _btn("Guardar y cerrar", "ghost", "Todo lo decidido se guarda solo: al volver a abrir la carpeta "
+        b_close = _btn("  Guardar y cerrar", "ghost", "Todo lo decidido se guarda solo: al volver a abrir la carpeta "
                                                     "y pulsar «Revisar», sigues por la primera sin revisar")
         b_close.clicked.connect(self.reject)
+        b_close.setIcon(I.icon("check", 16))
         self.b_export = _btn("Exportar aprobadas", "primary")
+        self.b_export.setIcon(I.icon("export", 16, "#ffffff"))
         self.b_export.clicked.connect(self._export)
         top.addWidget(self.title)
         top.addSpacing(12)
@@ -217,7 +227,20 @@ class ReviewDialog(QDialog):
 
         mid = QHBoxLayout()
         self.big = Big()
-        mid.addWidget(self.big, 1)
+        left = QVBoxLayout()
+        left.setSpacing(8)
+        left.addWidget(self.big, 1)
+        self.dock = QFrame()
+        self.dock.setObjectName("modulePill")
+        dk = QHBoxLayout(self.dock)
+        dk.setContentsMargins(6, 5, 6, 5)
+        dk.setSpacing(4)
+        drow = QHBoxLayout()
+        drow.addStretch(1)
+        drow.addWidget(self.dock)
+        drow.addStretch(1)
+        left.addLayout(drow)
+        mid.addLayout(left, 1)
         side = QFrame()
         side.setObjectName("previewPane")
         side.setFixedWidth(330)
@@ -232,24 +255,27 @@ class ReviewDialog(QDialog):
         self.info.setObjectName("muted")
         self.info.setWordWrap(True)
         row = QHBoxLayout()
-        self.b_ok = _btn("✓ Aprobar", "primary", "A")
-        self.b_no = _btn("✕ Rechazar", "", "R")
+        self.b_ok = _ibtn("check", "Aprobar y pasar a la siguiente (A)", text="Aprobar", kind="chip")
+        self.b_no = _ibtn("x", "Rechazar y pasar a la siguiente (R)", text="Rechazar", kind="chip")
+        for b_ in (self.b_ok, self.b_no):
+            b_.setCheckable(True)
+            b_.setMinimumWidth(120)
         self.b_ok.clicked.connect(lambda: self.decide(True))
         self.b_no.clicked.connect(lambda: self.decide(False))
         row.addWidget(self.b_ok)
         row.addWidget(self.b_no)
-        self.b_studio = _btn("Editar en Studio", "ghost", "Retocar esta foto foto a foto en Studio (E)")
+        self.b_studio = _ibtn("studio", "Editar en Studio: revelado foto a foto (E)")
         self.b_studio.clicked.connect(self._studio)
-        self.b_edits = _btn("Editar en Edits", "ghost", "Retocar esta foto en Edits: corrector, piel, licuar, "
-                                                        "texto… (Mayús+E)")
+        self.b_edits = _ibtn("edits", "Editar en Edits: corrector, piel, licuar, texto… (Mayús+E)")
         self.b_edits.clicked.connect(self._edits)
         self.prop_t = QLabel("PROPAGAR LA EDICIÓN")
         self.prop_t.setObjectName("cardTitle")
         prow = QHBoxLayout()
-        self.b_pcopy = _btn("Copiar…", "ghost", "Copiar lo que hiciste en Studio/Edits en esta foto, eligiendo qué (Ctrl+C)")
-        self.b_ppaste = _btn("Pegar aquí", "ghost", "Pegar la edición copiada en esta foto, aprobarla y pasar a la "
-                                                    "siguiente (Ctrl+V)")
-        self.b_papply = _btn("Aplicar a…", "ghost", "Aplicar la edición copiada a varias fotos a la vez")
+        self.b_pcopy = _ibtn("dupes", "Copiar la edición de Studio/Edits de esta foto, eligiendo qué (Ctrl+C)",
+                             text="Copiar")
+        self.b_ppaste = _ibtn("paste", "Pegar la edición copiada aquí, aprobar y pasar a la siguiente (Ctrl+V)",
+                              text="Pegar")
+        self.b_papply = _ibtn("sync", "Aplicar la edición copiada a varias fotos a la vez", text="A varias…")
         self.b_pcopy.clicked.connect(self._copy_edit)
         self.b_ppaste.clicked.connect(self._paste_edit)
         self.b_papply.clicked.connect(self._apply_edit)
@@ -272,19 +298,16 @@ class ReviewDialog(QDialog):
         crops_t = QLabel("RECORTE")
         crops_t.setObjectName("cardTitle")
         crow = QHBoxLayout()
-        self.b_crop = _btn("✂ Ajustar recorte", "ghost", "Marco sobre la foto entera: muévelo y cambia el tamaño (C). "
-                                                       "Intro: listo")
-        self.b_crop.setCheckable(True)
+        self.b_crop = _ibtn("crop", "Ajustar el recorte: marco sobre la foto entera, muévelo y cambia el tamaño (C). "
+                                    "Intro: listo", True)
         self.b_crop.toggled.connect(self.set_crop_mode)
         self.ratio_cb = QComboBox()
         self.ratio_cb.addItems(CV.RATIOS)
         self.ratio_cb.setToolTip("Proporción del marco")
         self.ratio_cb.activated.connect(self._ratio_changed)
-        self.b_flip = _btn("⇄", "ghost", "Vertical / horizontal")
-        self.b_flip.setCheckable(True)
+        self.b_flip = _ibtn("sync", "Vertical / horizontal", True)
         self.b_flip.clicked.connect(self._ratio_changed)
-        crow.addWidget(self.b_crop, 1)
-        crow.addWidget(self.ratio_cb)
+        crow.addWidget(self.ratio_cb, 1)
         crow.addWidget(self.b_flip)
         self.big.crop.on_change = self._on_crop
         self.crops = QListWidget()
@@ -299,9 +322,14 @@ class ReviewDialog(QDialog):
         self.crops.itemClicked.connect(self._pick_crop)
         for w in (self.name, self.state, self.info):
             sv.addWidget(w)
-        sv.addLayout(row)
-        sv.addWidget(self.b_studio)
-        sv.addWidget(self.b_edits)
+        # el dock: aprobar / rechazar, y las acciones de esta foto como iconos
+        dk.addWidget(self.b_ok)
+        dk.addWidget(self.b_no)
+        sep = QLabel("│")
+        sep.setObjectName("stepLine")
+        dk.addWidget(sep)
+        for b_ in (self.b_crop, self.b_studio, self.b_edits):
+            dk.addWidget(b_)
         if self.prop is not None:
             sv.addWidget(self.prop_t)
             sv.addLayout(prow)
@@ -329,6 +357,11 @@ class ReviewDialog(QDialog):
             it.setSizeHint(QSize(120, 96))
             self.strip.addItem(it)
         self.strip.currentRowChanged.connect(self.show_photo)
+        self.strip.currentRowChanged.connect(lambda _: self._state_buttons())
+        from PySide6.QtWidgets import QProgressBar
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        v.addWidget(self.progress)
         v.addWidget(self.strip)
 
         for k, fn in (("A", lambda: self.decide(True)), ("R", lambda: self.decide(False)), ("B", self.b_bw.toggle),
@@ -372,9 +405,19 @@ class ReviewDialog(QDialog):
             show = [True, ph.keep, not ph.keep, not rev][f]
             self.strip.item(row).setHidden(not show)
 
+    def _state_buttons(self):
+        ph = self.cur()
+        rev = bool(ph and ph.reviewed)
+        self.b_ok.setChecked(bool(ph and rev and ph.keep))
+        self.b_no.setChecked(bool(ph and rev and not ph.keep))
+
     def refresh_counts(self):
         ok = sum(p.keep for p in self.photos)
         rev = sum(1 for p in self.photos if getattr(p, "reviewed", False))
+        if hasattr(self, "progress"):
+            self.progress.setMaximum(max(1, len(self.photos)))
+            self.progress.setValue(rev)
+            self.progress.setToolTip(f"{rev} de {len(self.photos)} revisadas")
         self.counts.setText(f"{ok} aprobadas · {len(self.photos) - ok} rechazadas · {len(self.photos) - rev} sin revisar")
         self.b_export.setText(f"Exportar {ok} aprobadas")
         self.b_export.setEnabled(ok > 0)
@@ -539,6 +582,7 @@ class ReviewDialog(QDialog):
         self.refresh_counts()
         self.strip.viewport().update()
         self.step(1)
+        self._state_buttons()
 
     def set_bw(self, on):
         self.bw = on

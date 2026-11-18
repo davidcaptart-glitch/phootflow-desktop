@@ -128,6 +128,10 @@ QToolButton#iconBtn {{ background: transparent; border: 1px solid transparent; b
 QToolButton#iconBtn:hover {{ background: {SURFACE_3}; border-color: {LINE}; }}
 QToolButton#iconBtn:checked {{ background: rgba(245, 13, 138, 0.16); border-color: rgba(245, 13, 138, 0.6); }}
 QToolButton#iconBtn:disabled {{ background: transparent; }}
+QPushButton#iconBtn {{ background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 5px 7px; }}
+QPushButton#iconBtn:hover {{ background: {SURFACE_3}; border-color: {LINE}; }}
+QPushButton#iconBtn:checked {{ background: rgba(245, 13, 138, 0.16); border-color: rgba(245, 13, 138, 0.6); }}
+QPushButton#iconBtn:disabled {{ background: transparent; border-color: transparent; }}
 /* selector de módulos en píldora */
 QFrame#modulePill {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: 17px; }}
 QPushButton#pill {{ background: transparent; border: none; border-radius: 13px; padding: 5px 14px; color: {MUTED};

@@ -260,6 +260,34 @@ class CommandPalette(QDialog):
         self.exec()
 
 
+def collapse_menubar(mb, host: QWidget, layout, index: int = 0) -> QToolButton:
+    """Esconde una barra de menús clásica (Archivo, Edición…) tras un botón ☰ puesto en `layout`. Los atajos
+    de teclado de sus acciones siguen funcionando (se añaden también a `host`)."""
+    from PySide6.QtWidgets import QMenu
+
+    b = icon_button("menu", "Menús: Archivo, Edición, Imagen, Capa… (o busca la acción con Ctrl+K)")
+    b.setPopupMode(QToolButton.InstantPopup)
+    b.setStyleSheet("QToolButton::menu-indicator { image: none; }")
+    m = QMenu(b)
+    stack = []
+    for a in mb.actions():
+        if a.menu() is not None:
+            m.addMenu(a.menu())
+            stack.append(a.menu())
+    while stack:
+        menu = stack.pop()
+        for a in menu.actions():
+            if a.menu() is not None:
+                stack.append(a.menu())
+            elif not a.shortcut().isEmpty():
+                host.addAction(a)  # el atajo vale aunque la barra esté oculta
+    b.setMenu(m)
+    mb.hide()
+    if layout is not None:
+        layout.insertWidget(index, b)
+    return b
+
+
 def section(title: str) -> tuple[QFrame, QVBoxLayout]:
     """Bloque del panel lateral: título pequeño en mayúsculas y contenido, sin cajas ni flechas."""
     f = QFrame()

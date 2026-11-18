@@ -555,11 +555,15 @@ class EditsView(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._build_menubar())
+        menubar = self._build_menubar()
+        root.addWidget(menubar)
         self.canvas = EditCanvas()
         self.canvas.handler = self._mouse
         self.canvas.zoom_changed = self._update_chrome
-        root.addWidget(self._build_options())
+        opts = self._build_options()
+        root.addWidget(opts)
+        import ui as PUI
+        PUI.collapse_menubar(menubar, self, opts.layout())  # los menús, tras ☰: una fila menos
         h = QHBoxLayout()
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(0)
@@ -2611,7 +2615,11 @@ class EditsView(QWidget):
 
 def attach_studio_button(studio_view, on_click) -> QPushButton:
     """Añade «Editar en Edits» a la barra de Studio sin tocar studio.py (junto a «Exportar…»)."""
-    b = _btn("Editar en Edits", "ghost", "Retocar esta foto en Edits: corrector, tampón, piel, licuar, texto…")
+    import icons as I
+    from PySide6.QtCore import QSize
+    b = _btn("", "iconBtn", "Retocar esta foto en Edits: corrector, tampón, piel, licuar, texto…")
+    b.setIcon(I.icon("edits", 17))
+    b.setIconSize(QSize(17, 17))
     bar = studio_view.b_export.parentWidget().layout()
     bar.insertWidget(bar.indexOf(studio_view.b_export), b)
     b.clicked.connect(lambda: on_click(studio_view.cur.path) if studio_view.cur else None)

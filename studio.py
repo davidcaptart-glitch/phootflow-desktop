@@ -25,6 +25,7 @@ import studio_engine as SE
 import compare as CMP
 import zoomview as Z
 import cropview as CV
+import icons as I
 import masks as M
 import theme as T
 
@@ -45,6 +46,15 @@ def _btn(text, kind="", tip=""):
     b.setCursor(Qt.PointingHandCursor)
     if tip:
         b.setToolTip(tip)
+    return b
+
+
+def _ibtn(icon: str, tip: str, checkable: bool = False, text: str = "") -> QPushButton:
+    """Botón de icono (con texto opcional): menos letras en las barras, la explicación en el tooltip."""
+    b = _btn(("  " + text) if text else "", "iconBtn" if not text else "ghost", tip)
+    b.setIcon(I.icon(icon, 17))
+    b.setIconSize(QSize(17, 17))
+    b.setCheckable(checkable)
     return b
 
 
@@ -594,8 +604,7 @@ class StudioView(QWidget):
         self.cmp_bar = CMP.CompareBar()
         self.cmp_bar.changed.connect(self.set_compare)
         hb.addWidget(self.cmp_bar)
-        self.b_crop_bar = _btn("✂ Recortar", "ghost", "Recortar: mover y cambiar el tamaño del marco (R)")
-        self.b_crop_bar.setCheckable(True)
+        self.b_crop_bar = _ibtn("crop", "Recortar: mover y cambiar el tamaño del marco (R)", True)
         self.b_crop_bar.clicked.connect(lambda on: self.b_crop.setChecked(on))
         hb.addWidget(self.b_crop_bar)
         hb.addSpacing(8)
@@ -631,12 +640,13 @@ class StudioView(QWidget):
         self.status.setObjectName("meta")
         hb.addWidget(self.status)
         hb.addWidget(self.pb)
-        self.b_auto = _btn("Auto", "ghost", "Ajuste automático (exposición en caras, giro, recorte)")
-        self.b_copy = _btn("Copiar", "ghost", "Copiar ajustes (Ctrl+Mayús+C)")
-        self.b_paste = _btn("Pegar", "ghost", "Pegar ajustes en las seleccionadas (Ctrl+Mayús+V)")
-        self.b_sync = _btn("Sincronizar…", "ghost", "Aplicar los ajustes de esta foto a todas las seleccionadas")
-        self.b_reset = _btn("Restablecer", "ghost")
-        self.b_export = _btn("Exportar…", "primary", "Ctrl+E")
+        self.b_auto = _ibtn("wand", "Ajuste automático (exposición en caras, giro, recorte)")
+        self.b_copy = _ibtn("dupes", "Copiar ajustes (Ctrl+Mayús+C)")
+        self.b_paste = _ibtn("paste", "Pegar ajustes en las seleccionadas (Ctrl+Mayús+V)")
+        self.b_sync = _ibtn("sync", "Sincronizar: aplicar los ajustes de esta foto a las seleccionadas")
+        self.b_reset = _ibtn("undo", "Restablecer: volver a la foto sin ajustes")
+        self.b_export = _btn("  Exportar", "primary", "Exportar (Ctrl+E)")
+        self.b_export.setIcon(I.icon("export", 16, "#ffffff"))
         self.b_auto.clicked.connect(self.auto)
         self.b_reset.clicked.connect(self.reset)
         self.b_copy.clicked.connect(self.copy_settings)
@@ -703,11 +713,11 @@ class StudioView(QWidget):
                 sec.lay.addWidget(r)
 
         panels = dict(SE.PANELS)
-        layout = [("☀", "Luz", ["Básico", "Presencia", "Curva tonal"]),
-                  ("◐", "Color", ["_color", "_hsl", "Gradación de color"]),
-                  ("◭", "Detalle", ["Detalle", "Efectos"]),
-                  ("◎", "Máscaras", ["_masks"]),
-                  ("⟲", "Geometría", ["_crop", "Geometría"])]
+        layout = [("sun", "Luz", ["Básico", "Presencia", "Curva tonal"]),
+                  ("palette", "Color", ["_color", "_hsl", "Gradación de color"]),
+                  ("detail", "Detalle", ["Detalle", "Efectos"]),
+                  ("mask", "Máscaras", ["_masks"]),
+                  ("crop", "Recorte y geometría", ["_crop", "Geometría"])]
         self._tab_btns = []
         for i, (icon, name, secs) in enumerate(layout):
             bv = page(name)
@@ -760,7 +770,9 @@ class StudioView(QWidget):
                     sliders(sec, panels[t])
                     bv.addWidget(sec)
             bv.addStretch(1)
-            b = QPushButton(icon)
+            b = QPushButton()
+            b.setIcon(I.icon(icon, 20))
+            b.setIconSize(QSize(20, 20))
             b.setObjectName("tooltab")
             b.setCheckable(True)
             b.setToolTip(name)
@@ -818,7 +830,8 @@ class StudioView(QWidget):
     def _build_masks(self):
         sec = Section("Máscaras", open_=True)
         row = QHBoxLayout()
-        add = _btn("＋ Añadir máscara", "small")
+        add = _btn("  Añadir máscara", "ghost")
+        add.setIcon(I.icon("plus", 16))
         menu = QMenu(add)
         groups = [("Manual", M.MANUAL_TYPES), ("Personas (IA)", M.AI_TYPES),
                   ("Cara (IA)", {k: v[0] for k, v in M.FACE_PARTS.items()}), ("Otros", M.OTHER_TYPES)]
@@ -827,16 +840,15 @@ class StudioView(QWidget):
             for k, label in items.items():
                 menu.addAction(label, lambda k=k: self.add_mask(k))
         add.setMenu(menu)
-        self.b_mon = _btn("Activa", "small", "Activar o desactivar el efecto de esta máscara (H)")
-        self.b_mon.setCheckable(True)
+        self.b_mon = _ibtn("power", "Activar o desactivar el efecto de esta máscara (H)", True)
         self.b_mon.clicked.connect(self._toggle_mask_on)
-        self.b_mshow = _btn("Ver zona", "small", "Ver en magenta la zona que coge la máscara (O). Se oculta sola al "
-                                                 "mover un ajuste, para ver el resultado.")
+        self.b_mshow = _ibtn("eye", "Ver en magenta la zona que coge la máscara (O). Se oculta sola al mover un "
+                                    "ajuste, para ver el resultado.")
         self.b_mshow.setCheckable(True)
         self.b_mshow.toggled.connect(self._toggle_mask_view)
-        self.b_minv = _btn("Invertir", "small")
+        self.b_minv = _ibtn("invert", "Invertir la máscara")
         self.b_minv.clicked.connect(self._invert_mask)
-        self.b_mdel = _btn("Borrar", "small")
+        self.b_mdel = _ibtn("trash", "Borrar la máscara")
         self.b_mdel.clicked.connect(self._delete_mask)
         row.addWidget(add, 1)
         for b in (self.b_mon, self.b_mshow, self.b_minv, self.b_mdel):
@@ -985,10 +997,10 @@ class StudioView(QWidget):
     def _build_crop(self):
         sec = Section("Recorte", open_=True)
         row = QHBoxLayout()
-        self.b_crop = _btn("✂ Recortar", "small", "Marco sobre la foto entera (R). Intro: aplicar · Esc: cancelar")
-        self.b_crop.setCheckable(True)
+        self.b_crop = _ibtn("crop", "Marco sobre la foto entera (R). Intro: aplicar · Esc: cancelar", True,
+                            "Recortar")
         self.b_crop.toggled.connect(self.toggle_crop)
-        b_reset = _btn("Sin recorte", "small", "Foto entera (o el mayor marco con la proporción elegida)")
+        b_reset = _ibtn("undo", "Sin recorte: foto entera (o el mayor marco con la proporción elegida)")
         b_reset.clicked.connect(self._crop_reset)
         row.addWidget(self.b_crop, 1)
         row.addWidget(b_reset)
@@ -998,8 +1010,7 @@ class StudioView(QWidget):
         self.ratio_cb = QComboBox()
         self.ratio_cb.addItems(CV.RATIOS)
         self.ratio_cb.activated.connect(self._ratio_changed)
-        self.b_flip = _btn("⇄", "small", "Cambiar entre vertical y horizontal")
-        self.b_flip.setCheckable(True)
+        self.b_flip = _ibtn("sync", "Cambiar entre vertical y horizontal", True)
         self.b_flip.clicked.connect(self._ratio_changed)
         row.addWidget(self.ratio_cb, 1)
         row.addWidget(self.b_flip)
