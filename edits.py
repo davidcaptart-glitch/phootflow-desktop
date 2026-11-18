@@ -59,6 +59,8 @@ TOOLS = [("move", "✥", "Mover: arrastra el texto, el logo o la imagen elegida;
 TOOL_GRID = [("move", None), ("marquee", "lasso"), ("subject", "eyedrop"), ("heal", "skin"), ("clone", "fill"),
              ("light", "liquify"), ("type", None), ("hand", "zoom")]
 SELECT_TOOLS = ("marquee", "lasso", "subject")
+MOVABLE = ("text", "logo", "image")  # capas que se arrastran con Mover y tienen caja en la vista
+HANDLE_PX = 9  # radio de agarre de las esquinas de la transformación libre (píxeles de pantalla)
 TOOL_LAYER = {k: lay for k, _, _, _, lay in TOOLS}
 LIGHT_MODES = [("dodge", "Aclarar (ojeras)"), ("whiten", "Blanquear (dientes, ojos)"), ("burn", "Oscurecer")]
 LIQ_MODES = [("push", "Empujar"), ("bloat", "Inflar"), ("pucker", "Encoger")]
@@ -238,6 +240,8 @@ class EditCanvas(QWidget):
         self.stroke: list = []        # trazo en curso, en 0..1 de la foto mostrada
         self.marker = None            # origen del tampón (0..1)
         self.box = None               # caja de la capa de texto/logo seleccionada (0..1)
+        self.quad = None              # transformación libre: 4 esquinas (0..1) con asas
+        self.on_enter = None          # Intro sobre el lienzo (terminar la transformación)
         self.handler = None           # callback(tipo, x, y, evento) -> ¿consumido?
         self.space = False
         self.zoom_changed = None
@@ -304,6 +308,9 @@ class EditCanvas(QWidget):
         self.toggle_zoom(e.position())
 
     def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter) and self.on_enter:
+            self.on_enter()
+            return
         if e.key() == Qt.Key_Space and not e.isAutoRepeat():
             self.space = True
             self.setCursor(Qt.OpenHandCursor)
@@ -458,7 +465,19 @@ class EditCanvas(QWidget):
             ants.setDashOffset(self._ants)
             p.setPen(ants)
             p.drawPath(path)
-        if self.box:
+        if self.quad:
+            from PySide6.QtGui import QPolygonF
+            pts = [self.to_view(*q) for q in self.quad]
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(0, 0, 0, 150), 3))
+            p.drawPolygon(QPolygonF(pts))
+            p.setPen(QPen(QColor(T.ACCENT), 1.4))
+            p.drawPolygon(QPolygonF(pts))
+            for q in pts:
+                p.setPen(QPen(QColor(0, 0, 0, 200), 1))
+                p.setBrush(QColor(255, 255, 255))
+                p.drawRect(QRectF(q.x() - 5, q.y() - 5, 10, 10))
+        elif self.box:
             x0, y0, x1, y1 = self.box
             p.setPen(QPen(QColor(T.ACCENT), 1, Qt.DashLine))
             p.setBrush(Qt.NoBrush)
@@ -558,6 +577,7 @@ class EditsView(QWidget):
         root.addWidget(self._build_menubar())
         self.canvas = EditCanvas()
         self.canvas.handler = self._mouse
+        self.canvas.on_enter = self.end_transform
         self.canvas.zoom_changed = self._update_chrome
         root.addWidget(self._build_options())
         h = QHBoxLayout()
@@ -597,6 +617,8 @@ class EditsView(QWidget):
                       ("Shift+Del", self.fill_selection), ("Shift+Backspace", self.fill_selection),
                       (Qt.Key_Delete, self._delete_key), ("X", self.swatches.swap), ("D", self.swatches.reset),
                       ("Ctrl+]", lambda: self.move_layer(1)), ("Ctrl+[", lambda: self.move_layer(-1)),
+                      ("Ctrl+T", self.free_transform), ("Ctrl+Alt+G", self.toggle_clip),
+                      ("Ctrl+N", self.new_canvas),
                       ("Escape", self.deselect)):
             QShortcut(QKeySequence(k), self, fn)
         for key, _, _, sc, _ in TOOLS:
@@ -648,7 +670,9 @@ class EditsView(QWidget):
         kw = {"path": path}
         if at:
             kw.update(x=round(min(1.0, max(0.0, at[0])), 4), y=round(min(1.0, max(0.0, at[1])), 4), anchor="mm")
-        lay = EE.add_layer(self.doc, "image", **kw)
+        sel = self._layer()
+        lay = EE.add_layer(self.doc, "image", above=sel["id"] if sel and sel["kind"] not in EE.OVERLAY else None,
+                           **kw)
         lay["name"] = "Imagen: " + os.path.splitext(os.path.basename(src))[0]
         self.layer_id = lay["id"]
         self.set_tool("move")
@@ -826,6 +850,7 @@ class EditsView(QWidget):
                          f"QMenuBar::item {{ padding: 4px 9px; background: transparent; color: {T.TEXT}; }}"
                          f"QMenuBar::item:selected {{ background: {T.SURFACE_3}; border-radius: 3px; }}")
         f = mb.addMenu("Archivo")
+        self._act(f, "Nuevo lienzo en blanco…", self.new_canvas, "Ctrl+N")
         self._act(f, "Colocar imagen…", self._pick_image)
         self._act(f, "Exportar esta foto", self.export_current, "Ctrl+E")
         self._act(f, "Exportar las seleccionadas", self.export_selected)
@@ -834,6 +859,9 @@ class EditsView(QWidget):
         e = mb.addMenu("Edición")
         self._act(e, "Deshacer", self.undo, "Ctrl+Z")
         self._act(e, "Rehacer", self.redo, "Mayús+Ctrl+Z")
+        e.addSeparator()
+        self._act(e, "Transformación libre", self.free_transform, "Ctrl+T")
+        self._act(e, "Quitar la transformación", self.reset_transform)
         e.addSeparator()
         self._act(e, "Rellenar según contenido", self.fill_selection, "Mayús+Supr")
         self._act(e, "Quitar fondo (recortar a PNG)", self.remove_background)
@@ -858,6 +886,7 @@ class EditsView(QWidget):
         self._act(c, "Máscara de capa: de la selección", self.add_mask_from_selection)
         self._act(c, "Máscara de capa: invertir", self.invert_mask)
         self._act(c, "Máscara de capa: eliminar", self.delete_mask)
+        self._act(c, "Crear / soltar máscara de recorte", self.toggle_clip, "Alt+Ctrl+G")
         c.addSeparator()
         self._act(c, "Traer adelante", lambda: self.move_layer(1), "Ctrl+]")
         self._act(c, "Enviar atrás", lambda: self.move_layer(-1), "Ctrl+[")
@@ -1129,6 +1158,11 @@ class EditsView(QWidget):
         row.addWidget(ol)
         row.addWidget(self.opacity)
         lv.addLayout(row)
+        self.clip_chk = QCheckBox("Recortar a la imagen de debajo")
+        self.clip_chk.setToolTip("Máscara de recorte (Alt+Ctrl+G): esta capa solo afecta a la imagen de debajo, "
+                                 "o solo se ve dentro de ella")
+        self.clip_chk.toggled.connect(lambda on: self.toggle_clip(bool(on)))
+        lv.addWidget(self.clip_chk)
         self.layer_list = QListWidget()
         self.layer_list.setObjectName("list")
         self.layer_list.setItemDelegate(UI.LayersDelegate(self))
@@ -1158,6 +1192,7 @@ class EditsView(QWidget):
             mnew.addAction(EE.KINDS[kind], lambda k=kind: self.add_layer(k))
         mnew.addAction("Imagen… (o arrástrala desde el Explorador)", self._pick_image)
         mnew.addSeparator()
+        mnew.addAction("Nuevo lienzo en blanco…", self.new_canvas)
         mnew.addAction("Quitar fondo (recortar a PNG)", self.remove_background)
         b_new.setMenu(mnew)
         b_new.setPopupMode(QToolButton.InstantPopup)
@@ -1405,11 +1440,19 @@ class EditsView(QWidget):
         self.img_tol = SliderRow("tol", "Tolerancia", 1, 80, 1, 12)
         self.img_tol.changed.connect(lambda k, val, f: self._set_prop("tol", int(val), f))
         self.img_pos = self._pos_combo()
-        for x in (self.img_name, b, self.img_w, self.img_angle, self.img_flip, self._label("Quitar el fondo"),
-                  self.img_cut, self.img_tol, self.img_pos):
+        self.img_tf = _btn("Transformación libre (Ctrl+T)", "ghost",
+                           "Asas en las 4 esquinas: arrastra una para deformar o dar perspectiva; Mayús la escala "
+                           "desde el centro; dentro, mueve. Intro termina.")
+        self.img_tf.clicked.connect(self.free_transform)
+        self.img_tf_reset = _btn("Quitar la transformación", "ghost", "Vuelve al tamaño, giro y posición de antes")
+        self.img_tf_reset.clicked.connect(self.reset_transform)
+        self.img_tf_info = self._label("Transformada a mano: el tamaño y el giro de arriba no se usan.")
+        for x in (self.img_name, b, self.img_w, self.img_angle, self.img_flip, self.img_tf, self.img_tf_reset,
+                  self.img_tf_info, self._label("Quitar el fondo"), self.img_cut, self.img_tol, self.img_pos):
             lay.addWidget(x)
         lay.addWidget(self._label("Con Mover (V) la arrastras; Ctrl+rueda cambia el tamaño. El tamaño es % del "
-                                  "ancho de la foto; la opacidad, en Capas."))
+                                  "ancho de la foto; la opacidad, en Capas. Las capas de ajuste que pongas encima "
+                                  "la afectan; con «Recortar a la imagen de debajo», solo a ella."))
 
     def _replace_image(self):
         lay = self._layer()
@@ -1446,6 +1489,9 @@ class EditsView(QWidget):
         if key in self.hardness:
             self.opt_hard.set_value(self.hardness[key])
         self.opt_str.setVisible(key in self.strength)
+        if key != "move":
+            self._tf_on = False
+        self._sync_quad()
         if key in self.strength:
             self.opt_str.set_value(self.strength[key])
         modes = {"light": LIGHT_MODES, "liquify": LIQ_MODES}.get(key)
@@ -1543,8 +1589,13 @@ class EditsView(QWidget):
             return False
         if kind == "wheel":
             lay = self._layer()
-            if not lay or lay["kind"] not in EE.OVERLAY:
+            if not lay or lay["kind"] not in MOVABLE:
                 return False
+            if lay.get("quad"):  # transformada: la rueda la escala desde su centro
+                self._scale_quad(lay, 1.04 ** x)
+                self.request()
+                self._prop_timer.start(500)
+                return True
             k, lo, hi = ("size", 0.5, 20.0) if lay["kind"] == "text" else ("width", 1.0, 150.0)
             lay[k] = round(min(hi, max(lo, float(lay.get(k, 10)) * (1.08 ** x))), 2)
             self.request()
@@ -1574,7 +1625,7 @@ class EditsView(QWidget):
         if kind == "dbl":
             return t not in ("move", "hand")
         if t == "move":
-            return self._move_overlay(kind, x, y)
+            return self._move_overlay(kind, x, y, e)
         if t == "hand":
             return False  # el lienzo desplaza la vista
         if t == "zoom":
@@ -1636,7 +1687,7 @@ class EditsView(QWidget):
         self.canvas.stroke = []
         self.status.setText("")
         sel = self._layer()
-        if t == "skin" and sel and (sel.get("mask") or sel["kind"] == "adjust"):
+        if t == "skin" and sel and (sel.get("mask") or sel["kind"] in ("adjust", "image")):
             # máscara de capa: blanco = se ve el efecto; clic derecho / Alt pinta negro (lo oculta)
             sel.setdefault("mask", {"shapes": [{"type": "all", "op": "add"}]})
             sign = -1 if getattr(self, "_erase", False) else 1
@@ -1669,10 +1720,12 @@ class EditsView(QWidget):
             label = "Licuar: " + dict(LIQ_MODES)[self.mode["liquify"]].lower()
         self._commit(label)
 
-    def _move_overlay(self, kind, x, y) -> bool:
+    def _move_overlay(self, kind, x, y, e=None) -> bool:
         lay = self._layer()
-        if not lay or lay["kind"] not in EE.OVERLAY:
+        if not lay or lay["kind"] not in MOVABLE:
             return False
+        if lay.get("quad"):
+            return self._quad_mouse(lay, kind, x, y, e)
         if kind == "press":
             self._drag = (x, y, lay.get("x", 0.5), lay.get("y", 0.5))
             return True
@@ -1687,6 +1740,211 @@ class EditsView(QWidget):
             self._commit("Mover " + lay["name"].lower())
             return True
         return False
+
+    # ---------------------------------------------------------- transformación libre (4 esquinas)
+    def _frame_shape(self):
+        fx, fy, fw, fh = EE._frame(self.base.shape, self.box)
+        return fh, fw
+
+    def free_transform(self):
+        """Ctrl+T: asas en las esquinas de la imagen elegida (deformar, perspectiva, escalar y mover)."""
+        lay = self._layer()
+        if not lay or lay["kind"] != "image" or self.base is None:
+            self.status.setText("Transformación libre: elige antes una capa de imagen en Capas.")
+            return
+        if not lay.get("quad"):
+            lay["quad"] = EE.image_quad(self._frame_shape(), lay)
+            self._commit("Transformación libre")
+        self._tf_on = True
+        self.set_tool("move")
+        self._sync_quad()
+        self._show_props()
+        self.status.setText("Arrastra una esquina para deformar o dar perspectiva (Mayús: escalar desde el "
+                            "centro); dentro del marco, mover; Ctrl+rueda, tamaño. Intro termina.")
+
+    def end_transform(self):
+        if getattr(self, "_tf_on", False):
+            self._tf_on = False
+            self._sync_quad()
+            self.status.setText("")
+
+    def reset_transform(self):
+        lay = self._layer()
+        if lay and lay.get("quad"):
+            lay.pop("quad")
+            self._tf_on = False
+            self._commit("Quitar la transformación")
+
+    def _sync_quad(self):
+        lay = self._layer()
+        on = bool(lay and lay.get("quad") and getattr(self, "_tf_on", False) and self.tool == "move")
+        self.canvas.quad = [tuple(q) for q in lay["quad"]] if on else None
+        self.canvas.update()
+
+    def _scale_quad(self, lay, f, ref=None):
+        q = np.float64(ref if ref is not None else lay["quad"])
+        c = q.mean(0)
+        lay["quad"] = np.round(c + (q - c) * f, 5).tolist()
+
+    def _quad_mouse(self, lay, kind, x, y, e) -> bool:
+        if kind == "press":
+            self._tf_on = True
+            r = self.canvas.img_rect
+            pts = [(qx * r.width(), qy * r.height()) for qx, qy in lay["quad"]]
+            d = [np.hypot(px - x * r.width(), py - y * r.height()) for px, py in pts]
+            k = int(np.argmin(d))
+            corner = k if d[k] <= HANDLE_PX + 3 else None
+            shift = bool(e is not None and e.modifiers() & Qt.ShiftModifier)
+            self._drag = ("quad", corner, shift, x, y, copy.deepcopy(lay["quad"]))
+            self._sync_quad()
+            return True
+        if kind == "move" and self._drag and self._drag[0] == "quad":
+            _, corner, shift, x0, y0, q0 = self._drag
+            if corner is None:  # mover todo
+                lay["quad"] = [[round(qx + x - x0, 5), round(qy + y - y0, 5)] for qx, qy in q0]
+            elif shift:  # escalar proporcional desde el centro
+                q = np.float64(q0)
+                c = q.mean(0)
+                d0 = np.linalg.norm(q[corner] - c)
+                d1 = np.linalg.norm(np.float64([x, y]) - c)
+                self._scale_quad(lay, max(0.02, d1 / max(1e-6, d0)), q0)
+            else:  # mover una esquina: deformar / perspectiva
+                lay["quad"] = copy.deepcopy(q0)
+                lay["quad"][corner] = [round(x, 5), round(y, 5)]
+            self._sync_quad()
+            self.request()
+            return True
+        if kind == "release" and self._drag and self._drag[0] == "quad":
+            corner = self._drag[1]
+            self._drag = None
+            self._commit("Transformar " + lay["name"].lower() if corner is not None else "Mover " + lay["name"].lower())
+            return True
+        return False
+
+    # ---------------------------------------------------------- máscara de recorte
+    def _clip_base(self, lay):
+        """La capa de imagen a la que se recortaría `lay` (la primera de debajo que no esté recortada)."""
+        pix = [l for l in self.doc["layers"] if l["kind"] not in EE.OVERLAY] if self.doc else []
+        if lay not in pix:
+            return None
+        for l in reversed(pix[:pix.index(lay)]):
+            if l["kind"] == "image" and not l.get("clip"):
+                return l
+            if not (l.get("clip") and l["kind"] in EE.CLIPPABLE):
+                return None
+        return None
+
+    def toggle_clip(self, on=None):
+        lay = self._layer()
+        if not lay or lay["kind"] not in EE.CLIPPABLE:
+            self.status.setText("Máscara de recorte: elige una capa de ajuste o de imagen que esté encima de "
+                                "una imagen.")
+            return self._show_props()
+        on = (not lay.get("clip")) if on is None else on
+        base = self._clip_base(lay)
+        if on and base is None:
+            self.status.setText("Para recortar, la capa de justo debajo tiene que ser una imagen (o estar ya "
+                                "recortada a una).")
+            return self._show_props()
+        if bool(lay.get("clip")) == on:
+            return
+        if on:
+            lay["clip"] = True
+        else:
+            lay.pop("clip", None)
+        self._commit(("Recortar a " + base["name"]) if on else "Soltar máscara de recorte")
+
+    # ---------------------------------------------------------- lienzo en blanco
+    def new_canvas(self):
+        """Archivo › Nuevo lienzo: un PNG de un color, del tamaño elegido, para montar encima imágenes."""
+        if not self.folder:
+            self.status.setText("Abre primero una carpeta: el lienzo se guarda con sus ediciones.")
+            return
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLineEdit
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Nuevo lienzo")
+        form = QFormLayout(dlg)
+        name = QLineEdit(self.prefs.get("canvas_name", "Montaje"))
+        preset = QComboBox()
+        for label, w, h in EE.CANVAS_PRESETS:
+            preset.addItem(label, (w, h))
+        preset.addItem("Personalizado", None)
+        wsp, hsp = QSpinBox(), QSpinBox()
+        for sp in (wsp, hsp):
+            sp.setRange(16, 20000)
+            sp.setSuffix(" px")
+        color = {"v": self.prefs.get("canvas_color", "#ffffff")}
+        bcol = _btn("", "ghost", "Color de fondo del lienzo")
+
+        def paint_btn():
+            bcol.setText(color["v"])
+            bcol.setStyleSheet(f"QPushButton {{ border-left: 18px solid {color['v']}; }}")
+
+        def pick():
+            c = QColorDialog.getColor(QColor(color["v"]), dlg, "Color del lienzo")
+            if c.isValid():
+                color["v"] = c.name()
+                paint_btn()
+
+        def on_preset(i):
+            v = preset.itemData(i)
+            if v:
+                wsp.setValue(v[0])
+                hsp.setValue(v[1])
+
+        bcol.clicked.connect(pick)
+        preset.currentIndexChanged.connect(on_preset)
+        last = self.prefs.get("canvas_size")
+        idx = next((i for i, (_, w, h) in enumerate(EE.CANVAS_PRESETS) if last and [w, h] == list(last)), None)
+        preset.setCurrentIndex(idx if idx is not None else (len(EE.CANVAS_PRESETS) if last else 0))
+        on_preset(preset.currentIndex())
+        if last and idx is None:
+            wsp.setValue(int(last[0]))
+            hsp.setValue(int(last[1]))
+        wsp.valueChanged.connect(lambda _: preset.setCurrentIndex(preset.count() - 1)
+                                 if preset.itemData(preset.currentIndex()) and
+                                 preset.itemData(preset.currentIndex())[0] != wsp.value() else None)
+        hsp.valueChanged.connect(lambda _: preset.setCurrentIndex(preset.count() - 1)
+                                 if preset.itemData(preset.currentIndex()) and
+                                 preset.itemData(preset.currentIndex())[1] != hsp.value() else None)
+        paint_btn()
+        form.addRow("Nombre", name)
+        form.addRow("Tamaño", preset)
+        form.addRow("Ancho", wsp)
+        form.addRow("Alto", hsp)
+        form.addRow("Fondo", bcol)
+        form.addRow(self._label("Se guarda con las ediciones de esta carpeta (no aparece en Events). Arrastra "
+                                "imágenes desde el Explorador para montar encima."))
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Crear")
+        bb.button(QDialogButtonBox.Cancel).setText("Cancelar")
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.prefs.update(canvas_name=name.text().strip() or "Montaje", canvas_color=color["v"],
+                          canvas_size=[wsp.value(), hsp.value()])
+        self._save_prefs()
+        try:
+            path = EE.new_canvas(self.folder, wsp.value(), hsp.value(), color["v"], name.text())
+        except OSError as e:
+            self.status.setText(f"No se pudo crear el lienzo: {e}")
+            return
+        self._add_item(path)
+        self.open_photo(path)
+        self.status.setText("Lienzo creado: arrastra imágenes desde el Explorador para montar encima.")
+
+    def _add_item(self, path):
+        it = Item(path)
+        self.items.append(it)
+        li = QListWidgetItem()
+        li.setData(ROLE, len(self.items) - 1)
+        li.setSizeHint(QSize(126, 96))
+        self.film.addItem(li)
+        it.thumb = quick_thumb(path)
+        self.lib_info.setText(f"{os.path.basename(self.folder)} · {len(self.items)} fotos")
+        self.film.viewport().update()
 
     # ---------------------------------------------------------- capas
     def _layer(self):
@@ -1766,8 +2024,10 @@ class EditsView(QWidget):
             thumb = self._thumbs.get(("glyph", l["kind"]))
             if thumb is None:
                 thumb = self._thumbs[("glyph", l["kind"])] = UI._glyph_icon(l["kind"])
+        if l.get("quad"):
+            sub += " · transformada"
         return {"id": l["id"], "name": l["name"], "subtitle": sub, "visible": l.get("visible", True),
-                "thumb": thumb, "mask": bool(l.get("mask"))}
+                "thumb": thumb, "mask": bool(l.get("mask")), "clip": bool(l.get("clip"))}
 
     def _refresh_layers(self):
         self.layer_list.blockSignals(True)
@@ -1806,6 +2066,7 @@ class EditsView(QWidget):
         self._refresh_layers()
 
     def _layer_selected(self, row):
+        self._tf_on = False
         it = self.layer_list.item(row)
         self.layer_id = it.data(ROLE) if it else None
         self._show_props()
@@ -1815,7 +2076,7 @@ class EditsView(QWidget):
                     "background": "skin"}.get(lay["kind"])
             if lay["kind"] == "adjust" and self.tool not in ("skin",) + SELECT_TOOLS:
                 tool = None
-            if lay["kind"] in EE.OVERLAY:
+            if lay["kind"] in MOVABLE and self.tool != "skin":
                 tool = "move"
             if tool and tool != self.tool:
                 self.set_tool(tool)
@@ -1828,6 +2089,10 @@ class EditsView(QWidget):
             w.setVisible(name == kind)
         self.mask_info.setVisible(bool(lay and lay.get("mask")))
         self.blend_cb.setEnabled(lay is not None)
+        self.clip_chk.blockSignals(True)
+        self.clip_chk.setChecked(bool(lay and lay.get("clip")))
+        self.clip_chk.setEnabled(bool(lay and lay["kind"] in EE.CLIPPABLE and self._clip_base(lay) is not None))
+        self.clip_chk.blockSignals(False)
         if lay:
             self.blend_cb.blockSignals(True)
             self.blend_cb.setCurrentIndex(max(0, list(A.BLEND_MODES).index(lay.get("blend", "normal"))))
@@ -1839,7 +2104,8 @@ class EditsView(QWidget):
                 self.adj_panel.load(lay.get("adj", "curves"), lay.get("p") or {}, img)
                 self._adj_key = key
                 self._adj_force = False
-        self.canvas.box = self.boxes.get(self.layer_id) if lay and kind in EE.OVERLAY else None
+        self.canvas.box = self.boxes.get(self.layer_id) if lay and kind in MOVABLE else None
+        self._sync_quad()
         self.canvas.update()
         self.opacity.setEnabled(lay is not None)
         if not lay:
@@ -1906,6 +2172,11 @@ class EditsView(QWidget):
             self.img_cut.blockSignals(False)
             self.img_tol.set_value(lay.get("tol", 12))
             self.img_tol.setVisible(lay.get("cut") == "color")
+            tf = bool(lay.get("quad"))
+            for w in (self.img_w, self.img_angle, self.img_pos):
+                w.setEnabled(not tf)
+            self.img_tf_reset.setVisible(tf)
+            self.img_tf_info.setVisible(tf)
         elif kind == "logo":
             self.logo_name.setText(os.path.basename(lay.get("path", "")) or "Sin logo")
             self.logo_w.set_value(lay.get("width", 16))
@@ -1969,6 +2240,21 @@ class EditsView(QWidget):
     def remove_background(self):
         """Recortar el sujeto a transparente. Si es un JPG/PNG (un logo, un producto), por color o como objeto."""
         if not self.doc:
+            return
+        sel = self._layer()
+        if sel and sel["kind"] == "image":  # la capa de imagen elegida: persona (IA) u objeto
+            cut = "object"
+            im = EE._cutout(sel.get("path") or "", "none", 12)
+            if im is not None:
+                small = im.convert("RGB")
+                small.thumbnail((512, 512))
+                pr = EE.person_probs(np.asarray(small, np.float32) / 255.0, "quitar:" + sel["path"])
+                if pr is not None and float((1 - pr[..., 0]).mean()) > 0.05:
+                    cut = "person"
+            sel["cut"] = cut
+            self._commit("Quitar fondo: " + sel["name"].lower())
+            self.status.setText("Fondo quitado (" + EE.CUTS[cut].lower() + "). Si no acierta, cambia el modo en "
+                                "Propiedades o pinta su máscara con el pincel de máscara (B).")
             return
         lay = next((l for l in self.doc["layers"] if l["kind"] == "background"), None)
         if lay is None:
@@ -2117,7 +2403,9 @@ class EditsView(QWidget):
         if not self.doc:
             return
         n = 1 + sum(1 for l in self.doc["layers"] if l["kind"] == "adjust" and l.get("adj") == kind)
-        lay = EE.add_layer(self.doc, "adjust", adj=kind)
+        sel = self._layer()
+        lay = EE.add_layer(self.doc, "adjust", above=sel["id"] if sel and sel["kind"] not in EE.OVERLAY else None,
+                           adj=kind)
         lay["name"] = f"{A.ADJUSTMENTS[kind][0]} {n}"
         if self.sel:  # la selección se convierte en la máscara del ajuste (y se deselecciona)
             lay["mask"] = copy.deepcopy(self.sel)
@@ -2149,7 +2437,7 @@ class EditsView(QWidget):
             self.status.setText("Elige primero una capa en el panel Capas.")
             return
         if lay["kind"] in EE.OVERLAY:
-            self.status.setText("Las capas de texto, logo e imagen no llevan máscara.")
+            self.status.setText("Las capas de texto y logo no llevan máscara.")
             return
         lay["mask"] = copy.deepcopy(self.sel) if self.sel else {"shapes": [{"type": "all", "op": "add"}]}
         self.deselect()
@@ -2299,7 +2587,8 @@ class EditsView(QWidget):
         import masks as M
         if not M._CFG.get("model_dir"):
             M.configure(os.path.join(self.cfg_dir, "modelos"))
-        self.items = [Item(p.path) for p in E.list_photos(self.folder)]
+        self.items = [Item(p.path) for p in E.list_photos(self.folder)] + \
+            [Item(p) for p in EE.list_canvases(self.folder)]
         for it in self.items:
             it.settings = {"_edits": 1} if EE.has_edits(EE.load(self.folder, it.path)) else None
         self._pm_cache.clear()
@@ -2448,17 +2737,11 @@ class EditsView(QWidget):
             n, path, doc, base, box = job
             key = path + "#edits"
             try:
-                resolved = self._resolve_sources(comp, base, doc, key)
+                resolved = self._resolve_sources(comp, base, doc, key, box)
                 boxes: dict = {}
-                img, alpha = comp.pixel_stage(base, doc["layers"], key)
+                img, alpha = comp.pixel_stage(base, doc["layers"], key, box=box)
                 img, alpha = EE.finish(img, alpha, doc, box)
-                for lay in doc["layers"]:
-                    if lay["kind"] in EE.OVERLAY and EE._layer_active(lay):
-                        r = EE.overlay_rgba(img.shape, lay)
-                        if r:
-                            h, w = img.shape[:2]
-                            x0, y0, x1, y1 = r[1]
-                            boxes[lay["id"]] = (x0 / w, y0 / h, x1 / w, y1 / h)
+                boxes = EE.layer_boxes(doc, base.shape, box)
                 if alpha is not None:
                     img = _checker(img, alpha)
                 self.rendered.emit(n, img, resolved, boxes)
@@ -2466,14 +2749,14 @@ class EditsView(QWidget):
                 self.rendered.emit(n, None, f"{type(e).__name__}: {e}", {})
 
     @staticmethod
-    def _resolve_sources(comp, base, doc, key) -> list:
+    def _resolve_sources(comp, base, doc, key, box=None) -> list:
         """Busca el origen de los trazos del corrector y del relleno que aún no lo tienen."""
         out = []
         for lay in doc["layers"]:
             if lay["kind"] != "retouch" or not any(o.get("src") is None and o["tool"] in ("heal", "fill")
                                                    for o in lay["ops"]):
                 continue
-            img = EE.layer_input(comp, base, doc, lay, key)
+            img = EE.layer_input(comp, base, doc, lay, key, box)
             for j, op in enumerate(lay["ops"]):
                 if op.get("src") is None and op["tool"] in ("heal", "fill"):
                     img_j = EE.apply_retouch(img, {"ops": lay["ops"][:j]})
@@ -2503,7 +2786,8 @@ class EditsView(QWidget):
         self._shown = n
         self.boxes = boxes
         lay = self._layer()
-        self.canvas.box = boxes.get(self.layer_id) if lay and lay["kind"] in EE.OVERLAY else None
+        self.canvas.box = boxes.get(self.layer_id) if lay and lay["kind"] in MOVABLE else None
+        self._sync_quad()
         self._last_img = img
         self.canvas.set(_pixmap(img))
         self._update_chrome()
