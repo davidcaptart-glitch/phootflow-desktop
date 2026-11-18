@@ -56,3 +56,11 @@ Name: "{autodesktop}\PhootFlow"; Filename: "{app}\PhootFlow.exe"; Tasks: escrito
 
 [Run]
 Filename: "{app}\PhootFlow.exe"; Description: "Abrir PhootFlow"; Flags: nowait postinstall skipifsilent
+; actualización automática (instalación silenciosa lanzada por la propia app): volver a abrirla
+Filename: "{app}\PhootFlow.exe"; Parameters: "{param:ARGS|}"; Flags: nowait skipifnotsilent; Check: Relanzar
+
+[Code]
+function Relanzar: Boolean;
+begin
+  Result := ExpandConstant('{param:RELANZAR|0}') = '1';
+end;

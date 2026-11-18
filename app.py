@@ -2085,6 +2085,9 @@ def selftest() -> int:
 def main():
     if "--selftest" in sys.argv:
         sys.exit(selftest())
+    if "--actualizar-con" in sys.argv:  # prueba del build: actualizar con este instalador y reabrir en selftest
+        updater.run_setup_and_restart(sys.argv[sys.argv.index("--actualizar-con") + 1], "--selftest")
+        sys.exit(0)
     migrate_old_config()
     app = make_app()
     if not LIC.ensure():

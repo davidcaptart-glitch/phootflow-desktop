@@ -77,6 +77,21 @@ jobs:
           $p = Start-Process "$app\PhootFlow.exe" -ArgumentList "--selftest" -Wait -PassThru
           Get-Content "$env:TEMP\phootflow_selftest.log"
           if ($p.ExitCode -ne 0) { throw "La app instalada no pasó el selftest" }
+          # actualización automática de verdad: la app instalada lanza el instalador, se cierra, y el instalador
+          # sustituye los archivos y la vuelve a abrir (aquí en modo selftest, que escribe su log al terminar)
+          $log = "$env:TEMP\phootflow_selftest.log"
+          Remove-Item $log -ErrorAction SilentlyContinue
+          Start-Process "$app\PhootFlow.exe" -ArgumentList "--actualizar-con", "`"$PWD\dist\PhootFlow-Setup.exe`"" -Wait
+          $ok = $false
+          for ($i = 0; $i -lt 150; $i++) {
+            if ((Test-Path $log) -and ((Get-Content $log -Raw) -match "^OK")) { $ok = $true; break }
+            Start-Sleep 2
+          }
+          Get-Content "$env:TEMP\phootflow_instalacion.log" -Tail 12 -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "La actualización automática no volvió a abrir la app" }
+          Get-Content $log
+          Write-Host "Actualización automática: OK"
+          Start-Sleep 5
           $p = Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
           Start-Sleep 3
           if (Test-Path "$app\PhootFlow.exe") { throw "La desinstalación dejó el programa" }

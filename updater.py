@@ -143,23 +143,28 @@ def restart_source() -> None:
                      creationflags=_DETACHED, close_fds=True)
 
 
-def _wait_script(pid: int, body: str) -> None:
-    bat = os.path.join(tempfile.gettempdir(), "phootflow_actualizar.bat")
-    with open(bat, "w", encoding="mbcs") as f:
-        f.write(f"""@echo off
-:espera
-tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul && (timeout /t 1 /nobreak >nul & goto espera)
-{body}
-del "%~f0"
-""")
-    subprocess.Popen(["cmd", "/c", bat], creationflags=_NO_WINDOW | 0x00000008, close_fds=True)
+SETUP_LOG = os.path.join(tempfile.gettempdir(), "phootflow_instalacion.log")
 
 
-def run_setup_and_restart(setup: str) -> None:
-    """Al cerrarse el programa, ejecuta el instalador nuevo en silencio (misma carpeta) y vuelve a abrirlo."""
-    current = sys.executable
-    _wait_script(os.getpid(), f'start "" /wait "{setup}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART '
-                              f'/CLOSEAPPLICATIONS\ndel "{setup}" >nul 2>&1\nstart "" "{current}"')
+def setup_args(setup: str, relaunch_args: str = "") -> list[str]:
+    """Instalación silenciosa encima de la actual. El instalador espera a que el programa se cierre (Restart
+    Manager), sustituye los archivos y lo vuelve a abrir él mismo (/RELANZAR=1, ver instalador/PhootFlow.iss)."""
+    args = [setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RELANZAR=1",
+            f"/LOG={SETUP_LOG}"]
+    if relaunch_args:
+        args.append(f"/ARGS={relaunch_args}")
+    return args
+
+
+def run_setup_and_restart(setup: str, relaunch_args: str = "") -> None:
+    """Lanza el instalador nuevo y vuelve: el programa tiene que cerrarse justo después. Sin scripts .bat
+    intermedios (no siempre llegaban a ejecutarse). Lanza OSError si Windows no deja abrir el instalador."""
+    args = setup_args(setup, relaunch_args)
+    flags = _DETACHED
+    try:  # fuera del «job» del programa, para que cerrarlo no se lleve el instalador por delante
+        subprocess.Popen(args, creationflags=flags | 0x01000000, close_fds=True)
+    except OSError:
+        subprocess.Popen(args, creationflags=flags, close_fds=True)
 
 
 def swap_and_restart(new_exe: str) -> None:
