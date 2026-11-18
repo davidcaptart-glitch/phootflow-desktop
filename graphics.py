@@ -2165,7 +2165,8 @@ class GraphicsView(QWidget):
             b.setChecked(k == i)
 
     def toggle_panel(self, i):
-        if self.flyout.isVisible() and self.tabs.currentIndex() == i:
+        # isVisibleTo: abierto dentro de la vista aunque la ventana aún no esté en pantalla
+        if self.flyout.isVisibleTo(self) and self.tabs.currentIndex() == i:
             self.flyout.hide()
             for b in self.rail_btn.values():
                 b.setChecked(False)

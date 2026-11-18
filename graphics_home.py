@@ -594,7 +594,7 @@ class HomePage(QWidget):
         while self.cv.count():
             it = self.cv.takeAt(0)
             if it.widget():
-                it.widget().deleteLater()
+                _drop_widget(it.widget())
             elif it.layout():
                 _drop_layout(it.layout())
 
@@ -779,9 +779,16 @@ def _drop_layout(lay):
     while lay.count():
         it = lay.takeAt(0)
         if it.widget():
-            it.widget().deleteLater()
+            _drop_widget(it.widget())
         elif it.layout():
             _drop_layout(it.layout())
+
+
+def _drop_widget(w):
+    """Fuera ya de la página (no esperar al borrado diferido: se verían y contarían junto a los nuevos)."""
+    w.hide()
+    w.setParent(None)
+    w.deleteLater()
 
 
 # ------------------------------------------------------------------ crear un diseño
