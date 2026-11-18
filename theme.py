@@ -132,6 +132,15 @@ QPushButton#iconBtn {{ background: transparent; border: 1px solid transparent; b
 QPushButton#iconBtn:hover {{ background: {SURFACE_3}; border-color: {LINE}; }}
 QPushButton#iconBtn:checked {{ background: rgba(245, 13, 138, 0.16); border-color: rgba(245, 13, 138, 0.6); }}
 QPushButton#iconBtn:disabled {{ background: transparent; border-color: transparent; }}
+/* revisión: aprobar / rechazar bien visibles (rellenos cuando es la decisión de esa foto) */
+QPushButton#approve, QPushButton#reject {{ border-radius: 18px; padding: 8px 22px; font-size: 10.5pt;
+                                           font-weight: 600; min-height: 20px; }}
+QPushButton#approve {{ background: rgba(76, 195, 138, 0.16); border: 1px solid rgba(76, 195, 138, 0.75); color: #e3f7ec; }}
+QPushButton#approve:hover {{ background: rgba(76, 195, 138, 0.32); }}
+QPushButton#approve:checked {{ background: #2f9e6c; border-color: #4cc38a; color: white; }}
+QPushButton#reject {{ background: rgba(229, 72, 77, 0.14); border: 1px solid rgba(229, 72, 77, 0.7); color: #fbe3e4; }}
+QPushButton#reject:hover {{ background: rgba(229, 72, 77, 0.30); }}
+QPushButton#reject:checked {{ background: #c4373c; border-color: #e5484d; color: white; }}
 /* selector de módulos en píldora */
 QFrame#modulePill {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: 17px; }}
 QPushButton#pill {{ background: transparent; border: none; border-radius: 13px; padding: 5px 14px; color: {MUTED};

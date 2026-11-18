@@ -255,11 +255,13 @@ class ReviewDialog(QDialog):
         self.info.setObjectName("muted")
         self.info.setWordWrap(True)
         row = QHBoxLayout()
-        self.b_ok = _ibtn("check", "Aprobar y pasar a la siguiente (A)", text="Aprobar", kind="chip")
-        self.b_no = _ibtn("x", "Rechazar y pasar a la siguiente (R)", text="Rechazar", kind="chip")
-        for b_ in (self.b_ok, self.b_no):
+        self.b_ok = _btn("  Aprobar", "approve", "Aprobar y pasar a la siguiente (A)")
+        self.b_no = _btn("  Rechazar", "reject", "Rechazar y pasar a la siguiente (R)")
+        for b_, ic in ((self.b_ok, "check"), (self.b_no, "x")):
+            b_.setIcon(I.icon(ic, 18, "#ffffff", "#ffffff"))
+            b_.setIconSize(QSize(18, 18))
             b_.setCheckable(True)
-            b_.setMinimumWidth(120)
+            b_.setMinimumWidth(150)
         self.b_ok.clicked.connect(lambda: self.decide(True))
         self.b_no.clicked.connect(lambda: self.decide(False))
         row.addWidget(self.b_ok)
