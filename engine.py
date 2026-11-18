@@ -119,6 +119,7 @@ class Photo:
     best: str = "Original"
     keep: bool = True
     reason: str = ""
+    reviewed: bool = False  # decidida a mano en la revisión (se guarda en revision.json)
     thumb: bytes = b""
     preview: bytes = b""        # vista previa grande (sin recortar, ya girada) si no hay caché en disco
     preview_path: str = ""      # … o su ruta en la caché
@@ -1379,7 +1380,7 @@ def xmp_sidecar(ph: Photo, st: Settings) -> str:
 
 # ------------------------------------------------------------- sesiones grandes: caché y reanudación
 
-_CACHE_SKIP = {"thumb", "preview", "keep", "reason"}
+_CACHE_SKIP = {"thumb", "preview", "keep", "reason", "reviewed"}
 
 
 def _sig(ph: Photo, st: Settings) -> str:
@@ -1413,6 +1414,51 @@ def save_session(photos: list[Photo], st: Settings, work_dir: str) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(rows, f)
     os.replace(tmp, os.path.join(work_dir, "analisis.json"))
+
+
+CUSTOM_CROP = "Personalizado"  # recorte dibujado a mano en la revisión
+_REVIEW_FIELDS = ("keep", "reviewed", "reason", "best", "look", "bw_style", "lut_strength")
+
+
+def save_review(photos: list[Photo], work_dir: str) -> None:
+    """Guarda lo decidido en la revisión (aprobar/rechazar, recorte, look, B/N) para seguir otro día."""
+    rows = {}
+    for ph in photos:
+        if not ph.thumb or ph.error:
+            continue
+        r = {k: getattr(ph, k) for k in _REVIEW_FIELDS}
+        if CUSTOM_CROP in ph.crops:
+            r["crop"] = list(ph.crops[CUSTOM_CROP])
+        rows[os.path.basename(ph.path)] = r
+    os.makedirs(work_dir, exist_ok=True)
+    tmp = os.path.join(work_dir, "revision.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False)
+    os.replace(tmp, os.path.join(work_dir, "revision.json"))
+
+
+def load_review(photos: list[Photo], work_dir: str) -> int:
+    """Recupera la revisión guardada (después de `cull`, que propone de nuevo). Devuelve cuántas estaban revisadas."""
+    try:
+        with open(os.path.join(work_dir, "revision.json"), encoding="utf-8") as f:
+            rows = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    n = 0
+    for ph in photos:
+        r = rows.get(os.path.basename(ph.path))
+        if not r:
+            continue
+        if r.get("crop") and len(r["crop"]) == 4:
+            ph.crops[CUSTOM_CROP] = tuple(float(v) for v in r["crop"])
+        if r.get("best") in ph.crops:
+            ph.best = r["best"]
+        ph.look, ph.bw_style = r.get("look") or "", r.get("bw_style") or ""
+        ph.lut_strength = r.get("lut_strength")
+        if r.get("reviewed"):
+            ph.keep, ph.reason, ph.reviewed = bool(r.get("keep")), r.get("reason") or "", True
+            n += 1
+    return n
 
 
 def load_session(photos: list[Photo], st: Settings, work_dir: str) -> int:

@@ -55,6 +55,15 @@ def work_dir(out_dir: str) -> str:
     return os.path.join(out_dir, ".phootflow")
 
 
+def studio_start(ph, style: dict) -> dict:
+    """Ajustes de Studio equivalentes a la edición de Events de esta foto."""
+    import studio_engine as SE
+    init = SE.from_style(SE.auto_settings(ph), style)
+    if style.get("cube"):
+        init.update(lut=style["cube"], lut_strength=int(100 * float(style.get("cube_strength", 1.0))))
+    return init
+
+
 def migrate_old_config() -> None:
     """Trae los ajustes y la conexión de Drive de EventEdits (el nombre anterior) la primera vez."""
     old = os.path.join(_APPDATA, OLD_APP)
@@ -139,9 +148,12 @@ class Worker(QThread):
             if p.thumb:
                 self.photo.emit(i)
         E.cull(self.photos, self.st)
+        rev = E.load_review(self.photos, wd)  # lo ya revisado otro día manda sobre la propuesta automática
         keep = sum(p.keep for p in self.photos)
         warn = sum(1 for p in self.photos if p.warn)
-        return detected + f"Análisis: {keep} para editar, {n - keep} descartadas" + (f", {warn} con avisos." if warn else ".")
+        saved = f" Revisión guardada: {rev} ya revisadas; pulsa «Revisar» para seguir." if rev else ""
+        return detected + f"Análisis: {keep} para editar, {n - keep} descartadas" + \
+            (f", {warn} con avisos." if warn else ".") + saved
 
     def export(self, prefix: str = ""):
         studio_keep = [p for p in self.photos if p.keep and os.path.normcase(p.path) in self.overrides]
@@ -1552,13 +1564,25 @@ class Main(QMainWindow):
         self.run(w)
 
     # ----------------------------------------------------- revisión
-    def open_review(self, start: int = 0):
+    def save_review(self):
+        """La revisión se guarda sola (cada decisión): se puede cerrar y seguir otro día."""
+        try:
+            E.save_review(self.photos, work_dir(self.out_dir()))
+        except OSError:
+            pass
+
+    def open_review(self, start: int | None = None):
+        import propagate
         import review
         import studio_engine as SE
         if not any(p.thumb for p in self.photos):
             return QMessageBox.information(self, APP, "Analiza primero la sesión.")
         style = self.settings().style
         overrides = review.pending_studio_paths(self.src.text().strip())
+        prop = propagate.Propagator(self.src.text().strip(), lambda ph: studio_start(ph, style), overrides)
+        if start is None:  # seguir por la primera sin revisar
+            shown = [p for p in self.photos if p.thumb and not p.error]
+            start = next((i for i, p in enumerate(shown) if not p.reviewed), 0)
 
         def render_fn(ph, bw):
             return render_preview(ph, dict(style, bw=False, _no_look=True))
@@ -1576,8 +1600,9 @@ class Main(QMainWindow):
                                   lambda ph: os.path.normcase(ph.path) in overrides, start,
                                   bw_style=self.bw_style_cb.currentText(), bw_on=self.c_bw.isChecked(),
                                   look=self.look_cb.currentText(), before_fn=render_before,
-                                  tile_fn=self.zone_tile)
+                                  tile_fn=self.zone_tile, on_change=self.save_review, prop=prop)
         dlg.exec()
+        self.save_review()
         self.refresh_counts()
         self.apply_filter()
         self.grid.viewport().update()
@@ -1809,7 +1834,7 @@ class Shell(QMainWindow):
                 hh.addWidget(sep)
             b = button(text, "module", tip)
             b.setCheckable(True)
-            from PySide6.QtGui import QFont, QFontMetrics
+            from PySide6.QtGui import QFontMetrics
             fb = QFont(b.font())
             fb.setPointSizeF(12)
             fb.setWeight(QFont.DemiBold)
@@ -1892,12 +1917,7 @@ class Shell(QMainWindow):
 
     def events_settings(self, ph) -> dict:
         """Ajustes de Studio equivalentes a la edición de Events de esta foto."""
-        import studio_engine as SE
-        style = self.events.settings().style
-        init = SE.from_style(SE.auto_settings(ph), style)
-        if style.get("cube"):
-            init.update(lut=style["cube"], lut_strength=int(100 * float(style.get("cube_strength", 1.0))))
-        return init
+        return studio_start(ph, self.events.settings().style)
 
     def edit_in_studio(self, ph):
         """Desde la revisión: retocar esta foto en Studio partiendo de la edición de Events."""
@@ -1921,6 +1941,7 @@ class Shell(QMainWindow):
     def back_to_review(self, ph, use: bool):
         if use:
             ph.keep, ph.reviewed, ph.reason = True, True, ""
+            self.events.save_review()
         self.switch(ENV_EVENTS)
         photos = [p for p in self.events.photos if p.thumb and not p.error]
         i = photos.index(ph) if ph in photos else 0

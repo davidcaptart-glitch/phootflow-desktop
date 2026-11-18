@@ -7,11 +7,12 @@ import os
 import numpy as np
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
-from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QListView, QListWidget,
-                               QListWidgetItem, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout,
+                               QLabel, QListView, QListWidget, QListWidgetItem, QPushButton, QRadioButton,
+                               QSizePolicy, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
 
 import compare as CMP
+import cropview as CV
 import zoomview as Z
 import engine as E
 import theme as T
@@ -84,6 +85,8 @@ class Big(QWidget):
         self.before = None
         self.cmp = CMP.CompareState()
         self.zoom = Z.Zoom(self)
+        self.crop = CV.CropTool(self)
+        self.setMouseTracking(True)
         self.r = QRectF()
 
     def set(self, pm, text="", rejected=False, before=None):
@@ -105,6 +108,9 @@ class Big(QWidget):
             self.zoom.toggle(e.position(), self._area(), self.pm.size())
 
     def mousePressEvent(self, e):
+        if self.crop.active and e.button() == Qt.LeftButton:
+            self.crop.press(e.position(), self.r)
+            return
         if self.zoom.active and (e.button() == Qt.MiddleButton or not self.cmp.split):
             self.zoom.start_pan(e.position())
             return
@@ -116,10 +122,15 @@ class Big(QWidget):
         if self.zoom.panning:
             self.zoom.pan(e.position(), self._area(), self.pm.size())
             return self.update()
+        if self.crop.active:
+            self.crop.move(e.position(), self.r, e.buttons())
+            return
         if self.cmp.dragging and CMP.drag(self.cmp, self.r, e.position().x(), e.position().y()):
             self.update()
 
     def mouseReleaseEvent(self, e):
+        if self.crop.active:
+            self.crop.release()
         self.zoom.end_pan()
         self.cmp.dragging = False
 
@@ -133,8 +144,9 @@ class Big(QWidget):
             self.r = r
             p.setClipRect(area)
             CMP.paint(p, r, self.pm, self.before, self.cmp)
-            if not self.cmp.active:
+            if not self.cmp.active and not self.crop.active:
                 self.zoom.draw_tile(p, r)
+            self.crop.paint(p, r)
             p.setClipping(False)
             self.zoom.draw_badge(p, area, self.pm.size())
             if self.rejected:
@@ -152,8 +164,12 @@ class ReviewDialog(QDialog):
     studio_requested = Signal(object)
 
     def __init__(self, main, render_fn, studio_render_fn, is_studio_fn, start=0, bw_style="Editorial",
-                 bw_on=False, look="Natural", before_fn=None, tile_fn=None):
+                 bw_on=False, look="Natural", before_fn=None, tile_fn=None, on_change=None, prop=None):
         super().__init__(main)
+        self.on_change = on_change or (lambda: None)  # guarda la revisión (se puede seguir otro día)
+        self.prop = prop                              # propagate.Propagator: copiar la edición a otras fotos
+        self.clip = None
+        self.crop_on, self._crop_for = False, None
         self.setWindowTitle("Revisión antes de exportar")
         self.setWindowState(Qt.WindowMaximized)
         self.main = main
@@ -182,7 +198,8 @@ class ReviewDialog(QDialog):
         self.b_bw = _btn("Ver B/N", "ghost", "Alternar color / blanco y negro editorial (B)")
         self.b_bw.setCheckable(True)
         self.b_bw.toggled.connect(self.set_bw)
-        b_close = _btn("Cerrar", "ghost")
+        b_close = _btn("Guardar y cerrar", "ghost", "Todo lo decidido se guarda solo: al volver a abrir la carpeta "
+                                                    "y pulsar «Revisar», sigues por la primera sin revisar")
         b_close.clicked.connect(self.reject)
         self.b_export = _btn("Exportar aprobadas", "primary")
         self.b_export.clicked.connect(self._export)
@@ -226,6 +243,21 @@ class ReviewDialog(QDialog):
         self.b_edits = _btn("Editar en Edits", "ghost", "Retocar esta foto en Edits: corrector, piel, licuar, "
                                                         "texto… (Mayús+E)")
         self.b_edits.clicked.connect(self._edits)
+        self.prop_t = QLabel("PROPAGAR LA EDICIÓN")
+        self.prop_t.setObjectName("cardTitle")
+        prow = QHBoxLayout()
+        self.b_pcopy = _btn("Copiar…", "ghost", "Copiar lo que hiciste en Studio/Edits en esta foto, eligiendo qué (Ctrl+C)")
+        self.b_ppaste = _btn("Pegar aquí", "ghost", "Pegar la edición copiada en esta foto, aprobarla y pasar a la "
+                                                    "siguiente (Ctrl+V)")
+        self.b_papply = _btn("Aplicar a…", "ghost", "Aplicar la edición copiada a varias fotos a la vez")
+        self.b_pcopy.clicked.connect(self._copy_edit)
+        self.b_ppaste.clicked.connect(self._paste_edit)
+        self.b_papply.clicked.connect(self._apply_edit)
+        for b in (self.b_pcopy, self.b_ppaste, self.b_papply):
+            prow.addWidget(b)
+        self.prop_info = QLabel("")
+        self.prop_info.setObjectName("muted")
+        self.prop_info.setWordWrap(True)
         self.bw_t = QLabel("ESTILO B/N DE ESTA FOTO")
         self.bw_t.setObjectName("cardTitle")
         self.bw_list = QListWidget()
@@ -239,6 +271,22 @@ class ReviewDialog(QDialog):
         self.bw_list.itemClicked.connect(self._pick_bw)
         crops_t = QLabel("RECORTE")
         crops_t.setObjectName("cardTitle")
+        crow = QHBoxLayout()
+        self.b_crop = _btn("✂ Ajustar recorte", "ghost", "Marco sobre la foto entera: muévelo y cambia el tamaño (C). "
+                                                       "Intro: listo")
+        self.b_crop.setCheckable(True)
+        self.b_crop.toggled.connect(self.set_crop_mode)
+        self.ratio_cb = QComboBox()
+        self.ratio_cb.addItems(CV.RATIOS)
+        self.ratio_cb.setToolTip("Proporción del marco")
+        self.ratio_cb.activated.connect(self._ratio_changed)
+        self.b_flip = _btn("⇄", "ghost", "Vertical / horizontal")
+        self.b_flip.setCheckable(True)
+        self.b_flip.clicked.connect(self._ratio_changed)
+        crow.addWidget(self.b_crop, 1)
+        crow.addWidget(self.ratio_cb)
+        crow.addWidget(self.b_flip)
+        self.big.crop.on_change = self._on_crop
         self.crops = QListWidget()
         self.crops.setViewMode(QListView.IconMode)
         self.crops.setResizeMode(QListView.Adjust)
@@ -254,10 +302,15 @@ class ReviewDialog(QDialog):
         sv.addLayout(row)
         sv.addWidget(self.b_studio)
         sv.addWidget(self.b_edits)
+        if self.prop is not None:
+            sv.addWidget(self.prop_t)
+            sv.addLayout(prow)
+            sv.addWidget(self.prop_info)
         sv.addSpacing(6)
         sv.addWidget(self.bw_t)
         sv.addWidget(self.bw_list)
         sv.addWidget(crops_t)
+        sv.addLayout(crow)
         sv.addWidget(self.crops, 1)
         mid.addWidget(side)
         v.addLayout(mid, 1)
@@ -283,9 +336,16 @@ class ReviewDialog(QDialog):
                       ("Y", lambda: (self.big.cmp.next_split(), self.set_compare(self.big.cmp.mode))),
                       ("Z", lambda: self.big.zoom.toggle(None, self.big._area(), self.big.pm.size())
                        if self.big.pm is not None else None),
-                      ("E", self._studio), ("Shift+E", self._edits), (Qt.Key_Right, lambda: self.step(1)), (Qt.Key_Left, lambda: self.step(-1))):
+                      ("E", self._studio), ("Shift+E", self._edits), ("C", self.b_crop.toggle),
+                      ("Ctrl+C", self._copy_edit), ("Ctrl+V", self._paste_edit), (Qt.Key_Right, lambda: self.step(1)), (Qt.Key_Left, lambda: self.step(-1))):
             QShortcut(QKeySequence(k), self, fn)
+        self._done_keys = []  # Intro / Esc: terminar de ajustar el recorte
+        for k in ("Return", "Enter", "Escape"):
+            sc = QShortcut(QKeySequence(k), self, lambda: self.b_crop.setChecked(False))
+            sc.setEnabled(False)
+            self._done_keys.append(sc)
         self.b_bw.setEnabled(True)
+        self._refresh_prop()
         self.refresh_counts()
         if self.photos:
             self.strip.setCurrentRow(max(0, min(start, len(self.photos) - 1)))
@@ -346,7 +406,9 @@ class ReviewDialog(QDialog):
             bits.append("Editada en Studio: se exportará con esa edición.")
         self.info.setText("\n".join(bits))
         base = self._base(ph)
-        box = (0.0, 0.0, 1.0, 1.0) if studio else ph.crops.get(ph.best, (0.0, 0.0, 1.0, 1.0))
+        if studio and self.crop_on:
+            self.b_crop.setChecked(False)
+        box = (0.0, 0.0, 1.0, 1.0) if studio or self.crop_on else ph.crops.get(ph.best, (0.0, 0.0, 1.0, 1.0))
         color = crop(base, box)
         if not studio:
             color = E.apply_look(color.astype(np.float32) / 255.0 if color.dtype == np.uint8 else color,
@@ -369,7 +431,19 @@ class ReviewDialog(QDialog):
                     self._before.pop(next(iter(self._before)))
             before = _pm(crop(b, box))
         self.big.set(_pm(img), label, rejected=not ph.keep, before=before)
-        if self.tile_fn and not studio:
+        self.b_crop.setEnabled(not studio)
+        if self.crop_on and self._crop_for != ph.path:
+            self._crop_for = ph.path
+            size = (base.shape[1], base.shape[0])
+            cur = ph.crops.get(ph.best, (0.0, 0.0, 1.0, 1.0))
+            name, flip = CV.guess_ratio(cur, size) if ph.best != "Original" else ("Original", False)
+            self.ratio_cb.setCurrentText(name)
+            self.b_flip.setChecked(flip)
+            self.big.crop.start(list(cur))
+            self.big.crop.rn = self._ratio()
+        if self.crop_on:
+            self.big.zoom.pct, self.big.zoom.provider = None, None
+        elif self.tile_fn and not studio:
             fw, fh = E.full_size(ph.path)
             self.big.zoom.reset(key=(ph.path, ph.best, self.bw, self.photo_look(ph), self.photo_bw(ph)),
                                 full_size=(int(fw * (box[2] - box[0])) or fw, fh))
@@ -381,6 +455,7 @@ class ReviewDialog(QDialog):
             self.big.zoom.provider = None
         self._fill_crops(ph, base, studio)
         self._fill_bw(ph, color if self.bw else crop(base, box), studio)
+        self._refresh_prop()
 
     def _fill_crops(self, ph, base, studio):
         self.crops.clear()
@@ -436,6 +511,7 @@ class ReviewDialog(QDialog):
             ph.bw_style = "" if name == self.bw_style else name
         else:
             ph.look = "" if name == self.look else name
+        self.on_change()
         self.show_photo()
 
     def _pick_crop(self, it):
@@ -443,6 +519,8 @@ class ReviewDialog(QDialog):
         ph = self.cur()
         if ph and name and name in ph.crops:
             ph.best = name
+            self._crop_for = None
+            self.on_change()
             self.show_photo()
 
     def set_compare(self, mode):
@@ -457,6 +535,7 @@ class ReviewDialog(QDialog):
         ph.keep = keep
         ph.reviewed = True
         ph.reason = "" if keep else (ph.reason or "Rechazada en la revisión")
+        self.on_change()
         self.refresh_counts()
         self.strip.viewport().update()
         self.step(1)
@@ -481,9 +560,208 @@ class ReviewDialog(QDialog):
         self.action = "export"
         self.accept()
 
+    # ---------------------------------------------------------- recorte a mano
+    def _ratio(self):
+        ph = self.cur()
+        if not ph:
+            return None
+        b = self._base(ph)
+        size = (b.shape[1], b.shape[0])
+        v = CV.ratio_value(self.ratio_cb.currentText(), self.b_flip.isChecked(), size)
+        return None if v is None else v * size[1] / size[0]
+
+    def set_crop_mode(self, on):
+        self.crop_on, self._crop_for = on, None
+        for sc in self._done_keys:
+            sc.setEnabled(on)
+        if not on:
+            self.big.crop.stop()
+        elif self.big.cmp.mode != "off":
+            self.set_compare("off")
+        self.show_photo()
+
+    def _ratio_changed(self, *_):
+        if not self.crop_on:
+            self.b_crop.setChecked(True)
+        self.big.crop.set_ratio(self._ratio())
+        self._on_crop("end")
+
+    def _on_crop(self, phase):
+        ph = self.cur()
+        if phase != "end" or not ph or self.big.crop.rect is None:
+            return
+        ph.crops[E.CUSTOM_CROP] = tuple(round(float(v), 4) for v in self.big.crop.rect)
+        ph.best = E.CUSTOM_CROP
+        self.on_change()
+        self._fill_crops(ph, self._base(ph), False)
+
+    # ---------------------------------------------------------- propagar la edición de Studio / Edits
+    def _refresh_prop(self):
+        if self.prop is None:
+            return
+        ph = self.cur()
+        has = bool(ph and self.prop.has_edit(ph))
+        self.b_pcopy.setEnabled(has)
+        self.b_ppaste.setEnabled(self.clip is not None and ph is not None)
+        self.b_papply.setEnabled(self.clip is not None)
+        if self.clip:
+            self.prop_info.setText(f"Copiada de {self.clip['src']}: {self.clip['desc']}.")
+        else:
+            self.prop_info.setText("Edita una foto en Studio o en Edits, apruébala y pulsa «Copiar…» para "
+                                   "llevar esa edición a otras fotos." if not has else
+                                   "Esta foto tiene edición propia: puedes copiarla.")
+
+    def _copy_edit(self):
+        ph = self.cur()
+        if self.prop is None or not ph or not self.prop.has_edit(ph):
+            return
+        d = CopyDialog(self, self.prop, ph)
+        if d.exec() == QDialog.Accepted:
+            self.clip = self.prop.make_clip(ph, d.groups(), d.layer_ids())
+            self._refresh_prop()
+
+    def _after_apply(self, n):
+        self._cache.clear()
+        self.on_change()
+        self.strip.viewport().update()
+        self.refresh_counts()
+
+    def _paste_edit(self):
+        ph = self.cur()
+        if self.prop is None or not self.clip or not ph:
+            return
+        self.prop.apply(self.clip, [ph])
+        ph.keep, ph.reviewed, ph.reason = True, True, ""
+        self._after_apply(1)
+        self.step(1)
+
+    def _apply_edit(self):
+        if self.prop is None or not self.clip:
+            return
+        d = ApplyDialog(self, self.clip)
+        if d.exec() == QDialog.Accepted:
+            targets = d.targets()
+            n = self.prop.apply(self.clip, targets)
+            self._after_apply(n)
+            self.show_photo()
+            self.prop_info.setText(f"Edición aplicada a {n} foto(s). Se exportarán con ella.")
+
     def current_index(self) -> int:
         ph = self.cur()
         return self.photos.index(ph) if ph in self.photos else 0
+
+
+class CopyDialog(QDialog):
+    """Qué copiar de la edición de esta foto (como «Copiar ajustes» de Lightroom)."""
+
+    def __init__(self, parent, prop, ph):
+        import propagate as P
+        super().__init__(parent)
+        self.setWindowTitle(f"Copiar la edición de {ph.name}")
+        v = QVBoxLayout(self)
+        self.checks, self.layers = {}, {}
+        if prop.studio_of(ph) is not None:
+            t = QLabel("AJUSTES DE STUDIO")
+            t.setObjectName("cardTitle")
+            v.addWidget(t)
+            for gid, label, _, on in P.STUDIO_GROUPS:
+                c = QCheckBox(label)
+                c.setChecked(on)
+                v.addWidget(c)
+                self.checks[gid] = c
+        layers = prop.edits_of(ph)
+        if layers:
+            t = QLabel("CAPAS DE EDITS")
+            t.setObjectName("cardTitle")
+            v.addWidget(t)
+            for l in layers:
+                c = QCheckBox(l.get("name") or l["kind"])
+                c.setChecked(True)
+                v.addWidget(c)
+                self.layers[l["id"]] = c
+        note = QLabel("Los retoques de zonas concretas (corrector, tampón, licuar) no se copian: solo valen para "
+                      "esta foto.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        v.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Copiar")
+        bb.button(QDialogButtonBox.Cancel).setText("Cancelar")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def groups(self):
+        return {g for g, c in self.checks.items() if c.isChecked()}
+
+    def layer_ids(self):
+        return [i for i, c in self.layers.items() if c.isChecked()]
+
+
+class ApplyDialog(QDialog):
+    """A qué fotos aplicar la edición copiada."""
+
+    def __init__(self, dlg, clip):
+        super().__init__(dlg)
+        self.dlg = dlg
+        self.setWindowTitle("Aplicar la edición a…")
+        self.resize(460, 560)
+        photos, cur = dlg.photos, dlg.cur()
+        i = photos.index(cur) if cur in photos else 0
+        src = clip["src"]
+        own = lambda p: dlg.prop.has_edit(p)  # noqa: E731
+        self.options = [
+            ("Todas las aprobadas", [p for p in photos if p.keep]),
+            ("Las aprobadas que no tienen edición propia", [p for p in photos if p.keep and not own(p)]),
+            ("Las siguientes a esta (aprobadas)", [p for p in photos[i + 1:] if p.keep]),
+            ("Elegir fotos", None),
+        ]
+        v = QVBoxLayout(self)
+        info = QLabel(f"Edición de <b>{src}</b>: {clip['desc']}.")
+        info.setWordWrap(True)
+        v.addWidget(info)
+        self.group = QButtonGroup(self)
+        for k, (label, lst) in enumerate(self.options):
+            lst = [p for p in lst if os.path.basename(p.path) != src] if lst is not None else None
+            self.options[k] = (label, lst)
+            r = QRadioButton(label + (f"  ({len(lst)})" if lst is not None else ""))
+            self.group.addButton(r, k)
+            v.addWidget(r)
+        self.group.button(1).setChecked(True)
+        self.pick = QListWidget()
+        self.pick.setIconSize(QSize(64, 48))
+        for p in photos:
+            if os.path.basename(p.path) == src:
+                continue
+            it = QListWidgetItem(p.name + ("" if p.keep else "  (rechazada)"))
+            pm = dlg.main.thumb_pixmap(p)
+            if pm:
+                from PySide6.QtGui import QIcon
+                it.setIcon(QIcon(pm))
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Unchecked)
+            it.setData(ROLE, p)
+            self.pick.addItem(it)
+        self.pick.setEnabled(False)
+        self.group.idToggled.connect(lambda k, on: self.pick.setEnabled(k == 3 and on) if k == 3 else None)
+        v.addWidget(self.pick, 1)
+        note = QLabel("No cambia si están aprobadas o rechazadas. Se puede volver a aplicar: sustituye lo pegado antes.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        v.addWidget(note)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Aplicar")
+        bb.button(QDialogButtonBox.Cancel).setText("Cancelar")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def targets(self):
+        k = self.group.checkedId()
+        if k == 3:
+            return [self.pick.item(r).data(ROLE) for r in range(self.pick.count())
+                    if self.pick.item(r).checkState() == Qt.Checked]
+        return list(self.options[k][1] or [])
 
 
 def pending_studio_paths(folder: str) -> dict:

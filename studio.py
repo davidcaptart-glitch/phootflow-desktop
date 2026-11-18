@@ -24,6 +24,7 @@ import luts as L
 import studio_engine as SE
 import compare as CMP
 import zoomview as Z
+import cropview as CV
 import masks as M
 import theme as T
 
@@ -142,6 +143,7 @@ class Canvas(QWidget):
         self.pm = self.before = None
         self.cmp = CMP.CompareState()
         self.zoom = Z.Zoom(self)
+        self.crop = CV.CropTool(self)  # marco de recorte (modo Recortar)
         self.msg = "Abre una carpeta y elige una foto"
         self.img_rect = QRectF()
         self.on_mouse = None  # callback(evento, x, y) con x, y en 0..1 sobre la foto mostrada
@@ -188,6 +190,9 @@ class Canvas(QWidget):
         return self.zoom.active and e.button() == Qt.LeftButton and not drawing
 
     def mousePressEvent(self, e):
+        if self.crop.active and e.button() == Qt.LeftButton:
+            self.crop.press(e.position(), self.img_rect)
+            return
         if self._wants_pan(e) and not (self.cmp.split and self._near_line(e)):
             self.zoom.start_pan(e.position())
             self.setCursor(Qt.ClosedHandCursor)
@@ -204,6 +209,9 @@ class Canvas(QWidget):
         if self.zoom.panning:
             self.zoom.pan(e.position(), self._area(), self.pm.size())
             return self.update()
+        if self.crop.active:
+            self.crop.move(e.position(), self.img_rect, e.buttons())
+            return
         if self.cmp.dragging:
             CMP.drag(self.cmp, self.img_rect, e.position().x(), e.position().y())
             return self.update()
@@ -215,6 +223,9 @@ class Canvas(QWidget):
         if self.zoom.panning:
             self.zoom.end_pan()
             self.setCursor(Qt.ArrowCursor)
+            return
+        if self.crop.active:
+            self.crop.release()
             return
         if self.cmp.dragging:
             self.cmp.dragging = False
@@ -247,6 +258,7 @@ class Canvas(QWidget):
         CMP.paint(p, r, pm, self.before, self.cmp)
         if not self.cmp.active:
             self.zoom.draw_tile(p, r)
+        self.crop.paint(p, r)
         p.setClipping(False)
         self.zoom.draw_badge(p, area, pm.size(), busy=self.zoom.active and self.zoom.tile is None
                              and self.zoom.pct * max(1, self.zoom.full_size[0]) > pm.width() * 1.15)
@@ -408,6 +420,9 @@ class StudioView(QWidget):
         threading.Thread(target=self._render_loop, daemon=True).start()
         self.mask_i: int | None = None      # máscara seleccionada
         self.mask_show = False              # superponer la máscara seleccionada
+        self.crop_mode = False              # marco de recorte sobre la foto entera
+        self._crop_undo = None
+        self._view_crop = None              # recorte de la imagen que se ve ahora (None = foto entera)
         self._drag = None
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -437,11 +452,17 @@ class StudioView(QWidget):
                       ("Ctrl+Shift+V", self.paste_settings), ("\\", self.toggle_before),
                       ("P", lambda: self.set_flag(1)), ("X", lambda: self.set_flag(-1)), ("U", lambda: self.set_flag(0)),
                       ("Ctrl+E", self.export_dialog), ("Y", self.next_split),
+                      ("R", lambda: self.b_crop.toggle()),
                       ("Z", lambda: (self.canvas.zoom.toggle(None, self.canvas._area(), self.canvas.pm.size())
                                      if self.canvas.pm is not None else None))):
             QShortcut(QKeySequence(k), self, fn)
         for n in range(6):
             QShortcut(QKeySequence(str(n)), self, lambda n=n: self.set_rating(n))
+        self._crop_keys = []  # solo con el marco de recorte a la vista
+        for k, ok in (("Return", True), ("Enter", True), ("Escape", False)):
+            sc = QShortcut(QKeySequence(k), self, lambda ok=ok: self._crop_key(ok))
+            sc.setEnabled(False)
+            self._crop_keys.append(sc)
 
     # ---------------------------------------------------------- construcción
     def _build_left(self):
@@ -556,6 +577,7 @@ class StudioView(QWidget):
         v.addWidget(bw)
         self.canvas = Canvas()
         self.canvas.on_mouse = self._canvas_mouse
+        self.canvas.crop.on_change = self._on_crop
         self.canvas.zoom.provider = self._tile
         self._full: tuple | None = None
         self.canvas.mask_drawing = lambda: bool(
@@ -572,6 +594,10 @@ class StudioView(QWidget):
         self.cmp_bar = CMP.CompareBar()
         self.cmp_bar.changed.connect(self.set_compare)
         hb.addWidget(self.cmp_bar)
+        self.b_crop_bar = _btn("✂ Recortar", "ghost", "Recortar: mover y cambiar el tamaño del marco (R)")
+        self.b_crop_bar.setCheckable(True)
+        self.b_crop_bar.clicked.connect(lambda on: self.b_crop.setChecked(on))
+        hb.addWidget(self.b_crop_bar)
         hb.addSpacing(8)
         self.stars = []
         for n in range(1, 6):
@@ -681,12 +707,15 @@ class StudioView(QWidget):
                   ("◐", "Color", ["_color", "_hsl", "Gradación de color"]),
                   ("◭", "Detalle", ["Detalle", "Efectos"]),
                   ("◎", "Máscaras", ["_masks"]),
-                  ("⟲", "Geometría", ["Geometría"])]
+                  ("⟲", "Geometría", ["_crop", "Geometría"])]
+        self._tab_btns = []
         for i, (icon, name, secs) in enumerate(layout):
             bv = page(name)
             for t in secs:
                 if t == "_masks":
                     bv.addWidget(self._build_masks())
+                elif t == "_crop":
+                    bv.addWidget(self._build_crop())
                 elif t == "_color":
                     sec = Section("Perfil, LUT y B/N")
                     row = QHBoxLayout()
@@ -739,6 +768,7 @@ class StudioView(QWidget):
             b.clicked.connect(lambda _, i=i: self.pages.setCurrentIndex(i))
             group.addButton(b)
             tl.addWidget(b)
+            self._tab_btns.append(b)
             if i == 0:
                 b.setChecked(True)
         tl.addStretch(1)
@@ -797,7 +827,11 @@ class StudioView(QWidget):
             for k, label in items.items():
                 menu.addAction(label, lambda k=k: self.add_mask(k))
         add.setMenu(menu)
-        self.b_mshow = _btn("Ver", "small", "Superponer la máscara en la foto (O)")
+        self.b_mon = _btn("Activa", "small", "Activar o desactivar el efecto de esta máscara (H)")
+        self.b_mon.setCheckable(True)
+        self.b_mon.clicked.connect(self._toggle_mask_on)
+        self.b_mshow = _btn("Ver zona", "small", "Ver en magenta la zona que coge la máscara (O). Se oculta sola al "
+                                                 "mover un ajuste, para ver el resultado.")
         self.b_mshow.setCheckable(True)
         self.b_mshow.toggled.connect(self._toggle_mask_view)
         self.b_minv = _btn("Invertir", "small")
@@ -805,12 +839,14 @@ class StudioView(QWidget):
         self.b_mdel = _btn("Borrar", "small")
         self.b_mdel.clicked.connect(self._delete_mask)
         row.addWidget(add, 1)
-        for b in (self.b_mshow, self.b_minv, self.b_mdel):
+        for b in (self.b_mon, self.b_mshow, self.b_minv, self.b_mdel):
             row.addWidget(b)
         sec.lay.addLayout(row)
         self.mask_list = QListWidget()
         self.mask_list.setFixedHeight(96)
         self.mask_list.currentRowChanged.connect(self._select_mask)
+        self.mask_list.itemChanged.connect(self._mask_checked)
+        self.mask_list.setToolTip("La casilla activa o desactiva cada máscara (para comparar con y sin ella)")
         sec.lay.addWidget(self.mask_list)
         self.mask_hint = QLabel("")
         self.mask_hint.setObjectName("muted")
@@ -833,6 +869,7 @@ class StudioView(QWidget):
         self.mask_box.hide()
         sec.lay.addWidget(self.mask_box)
         QShortcut(QKeySequence("O"), self, lambda: self.b_mshow.toggle())
+        QShortcut(QKeySequence("H"), self, lambda: (self.b_mon.toggle(), self._toggle_mask_on()))
         return sec
 
     def _masks(self) -> list:
@@ -843,7 +880,11 @@ class StudioView(QWidget):
         self.mask_list.clear()
         for m in self._masks():
             on = any(m.get("adj", {}).values())
-            self.mask_list.addItem(("● " if on else "○ ") + m["name"] + ("  (invertida)" if m.get("invert") else ""))
+            it = QListWidgetItem(("● " if on else "○ ") + m["name"] + ("  (invertida)" if m.get("invert") else "")
+                                 + ("" if m.get("enabled", True) else "  · desactivada"))
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if m.get("enabled", True) else Qt.Unchecked)
+            self.mask_list.addItem(it)
         self.mask_list.blockSignals(False)
         n = len(self._masks())
         if select is not None and n:
@@ -867,6 +908,8 @@ class StudioView(QWidget):
         self.mask_i = i if i is not None and i >= 0 else None
         m = self._masks()[self.mask_i] if self.mask_i is not None and self.mask_i < len(self._masks()) else None
         self.mask_box.setVisible(m is not None)
+        self.b_mon.setEnabled(m is not None)
+        self.b_mon.setChecked(bool(m and m.get("enabled", True)))
         if not m:
             self.mask_hint.setText("Añade una máscara para ajustar solo una zona (caras, fondo, cielo…).")
             return
@@ -907,13 +950,145 @@ class StudioView(QWidget):
             m["params"][k] = value
         else:
             m["adj"][k] = value
+            if self.mask_show:  # al ajustar, se quita el magenta para ver el resultado (como Lightroom)
+                self.b_mshow.blockSignals(True)
+                self.b_mshow.setChecked(False)
+                self.b_mshow.blockSignals(False)
+                self.mask_show = False
         self._refresh_masks(select=self.mask_i)
         self.request(draft=not final)
         self._save_timer.start(600)
 
     def _toggle_mask_view(self, on):
+        if on and self.crop_mode:
+            self.b_crop.setChecked(False)
         self.mask_show = on
         self.request(draft=False)
+
+    def _set_mask_enabled(self, i, on):
+        if not self.cur or i is None or i >= len(self._masks()):
+            return
+        self._push_history("Activar máscara" if on else "Desactivar máscara")
+        self._masks()[i]["enabled"] = bool(on)
+        self._refresh_masks(select=i)
+        self.request(draft=False)
+        self._save_timer.start(400)
+
+    def _toggle_mask_on(self):
+        if self.mask_i is not None:
+            self._set_mask_enabled(self.mask_i, self.b_mon.isChecked())
+
+    def _mask_checked(self, item):
+        self._set_mask_enabled(self.mask_list.row(item), item.checkState() == Qt.Checked)
+
+    # ---------------------------------------------------------- recorte
+    def _build_crop(self):
+        sec = Section("Recorte", open_=True)
+        row = QHBoxLayout()
+        self.b_crop = _btn("✂ Recortar", "small", "Marco sobre la foto entera (R). Intro: aplicar · Esc: cancelar")
+        self.b_crop.setCheckable(True)
+        self.b_crop.toggled.connect(self.toggle_crop)
+        b_reset = _btn("Sin recorte", "small", "Foto entera (o el mayor marco con la proporción elegida)")
+        b_reset.clicked.connect(self._crop_reset)
+        row.addWidget(self.b_crop, 1)
+        row.addWidget(b_reset)
+        sec.lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Proporción"))
+        self.ratio_cb = QComboBox()
+        self.ratio_cb.addItems(CV.RATIOS)
+        self.ratio_cb.activated.connect(self._ratio_changed)
+        self.b_flip = _btn("⇄", "small", "Cambiar entre vertical y horizontal")
+        self.b_flip.setCheckable(True)
+        self.b_flip.clicked.connect(self._ratio_changed)
+        row.addWidget(self.ratio_cb, 1)
+        row.addWidget(self.b_flip)
+        sec.lay.addLayout(row)
+        hint = QLabel("Arrastra el marco para moverlo, y las esquinas o los lados para cambiar el tamaño.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        sec.lay.addWidget(hint)
+        return sec
+
+    def _view_size(self):
+        fw, fh = E.full_size(self.cur.path) if self.cur else (3, 2)
+        x0, y0, x1, y1 = E._safe_rect(fw or 3, fh or 2, float(self.cur.settings.get("angle", 0) if self.cur else 0))
+        return max(1, x1 - x0), max(1, y1 - y0)
+
+    def _ratio(self):
+        size = self._view_size()
+        v = CV.ratio_value(self.ratio_cb.currentText(), self.b_flip.isChecked(), size)
+        return None if v is None else v * size[1] / size[0]
+
+    def toggle_crop(self, on):
+        self.b_crop_bar.setChecked(on)
+        if not self.cur:
+            if on:
+                self.b_crop.setChecked(False)
+            return
+        if on == self.crop_mode:
+            return
+        self.crop_mode = on
+        for sc in self._crop_keys:
+            sc.setEnabled(on)
+        if on:
+            if self.canvas.cmp.mode != "off":
+                self.set_compare("off")
+            if self.mask_show:
+                self.b_mshow.setChecked(False)
+            self._crop_undo = copy.deepcopy(self.cur.settings.get("crop", [0.0, 0.0, 1.0, 1.0]))
+            name, flip = CV.guess_ratio(self._crop_undo, self._view_size())
+            if self._crop_undo == [0.0, 0.0, 1.0, 1.0]:
+                name, flip = "Original", False
+            self.ratio_cb.setCurrentText(name)
+            self.b_flip.setChecked(flip)
+            self.canvas.zoom.pct = None
+            self.canvas.crop.start(self._crop_undo)
+            self.canvas.crop.rn = self._ratio()
+            self.pages.setCurrentIndex(4)
+            self._tab_btns[4].setChecked(True)
+            self.status.setText("Recorte: arrastra el marco · Intro aplica · Esc cancela")
+        else:
+            self.canvas.crop.stop()
+            self.status.setText("")
+        self.request(draft=False)
+
+    def _on_crop(self, phase):
+        if not self.cur or self.canvas.crop.rect is None:
+            return
+        if phase == "start":
+            self._push_history("Recorte")
+            return
+        self.cur.settings["crop"] = [round(float(v), 4) for v in self.canvas.crop.rect]
+        self.cur.settings["crop_ratio"] = self.ratio_cb.currentText()
+        self._refresh_history()
+        self._save_timer.start(400)
+
+    def _ratio_changed(self, *_):
+        if not self.cur:
+            return
+        if not self.crop_mode:
+            self.b_crop.setChecked(True)
+        self._push_history("Recorte")
+        self.canvas.crop.set_ratio(self._ratio())
+        self._on_crop("end")
+
+    def _crop_reset(self):
+        if not self.cur:
+            return
+        if not self.crop_mode:
+            self.b_crop.setChecked(True)
+        self._push_history("Recorte")
+        self.canvas.crop.reset()
+        self._on_crop("end")
+
+    def _crop_key(self, accept: bool):
+        if not self.crop_mode or not self.cur:
+            return
+        if not accept and self._crop_undo is not None:
+            self.cur.settings["crop"] = self._crop_undo
+            self._save_timer.start(300)
+        self.b_crop.setChecked(False)
 
     def _invert_mask(self):
         if self.cur and self.mask_i is not None:
@@ -940,6 +1115,9 @@ class StudioView(QWidget):
         t, p = m["type"], m["params"]
         if t not in ("radial", "linear", "brush"):
             return
+        c = self._view_crop
+        if c:  # la vista está recortada: coordenadas de la foto entera
+            x, y = c[0] + x * (c[2] - c[0]), c[1] + y * (c[3] - c[1])
         if ev == "press":
             self._push_history()
             self._drag = (x, y)
@@ -1021,6 +1199,8 @@ class StudioView(QWidget):
     def select(self, row):
         if row < 0 or row >= self.film.count():
             return
+        if self.crop_mode:
+            self.b_crop.setChecked(False)
         self._save_cur()
         self.cur = self.items[self.film.item(row).data(ROLE)]
         it = self.cur
@@ -1106,7 +1286,7 @@ class StudioView(QWidget):
             return
         self._req += 1
         self._jobs.put((self._req, self.cur.path, copy.deepcopy(self.cur.settings), draft,
-                        self.mask_i if self.mask_show else None, self.canvas.cmp.active))
+                        self.mask_i if self.mask_show else None, self.canvas.cmp.active, self.crop_mode))
         if draft:
             self._full_timer.start(260)
 
@@ -1117,6 +1297,7 @@ class StudioView(QWidget):
                 job = self._jobs.get()
             n, path, s, draft, show = job[:5]
             want_before = len(job) > 5 and job[5]
+            cropped = show is None and not (len(job) > 6 and job[6])
             if path not in self._proxy:
                 continue
             lin = self._proxy[path][0]
@@ -1127,23 +1308,24 @@ class StudioView(QWidget):
             t = time.time()
             try:
                 img = SE.render(lin, s, seed=hash(path) & 0xFFFF, key=path, show_mask=show,
-                                crop=show is None)
+                                crop=cropped)
             except Exception as e:
                 self.rendered.emit(n, None, f"{type(e).__name__}: {e}", draft)
                 continue
             before = None
             if want_before:
-                key = (path, lin.shape, tuple(s.get("crop", (0, 0, 1, 1))), s.get("angle", 0), show is None)
+                key = (path, lin.shape, tuple(s.get("crop", (0, 0, 1, 1))), s.get("angle", 0), cropped)
                 before = self._before_cache.get(key)
                 if before is None:
                     try:
                         neutral = SE.new_settings(crop=s.get("crop", [0.0, 0.0, 1.0, 1.0]), angle=s.get("angle", 0))
-                        before = SE.render(lin, neutral, crop=show is None)
+                        before = SE.render(lin, neutral, crop=cropped)
                         self._before_cache.clear()
                         self._before_cache[key] = before
                     except Exception:
                         before = None
-            self.rendered.emit(n, img, (time.time() - t, before), draft)
+            vc = list(s.get("crop", [0.0, 0.0, 1.0, 1.0])) if cropped else None
+            self.rendered.emit(n, img, (time.time() - t, before, vc if vc != [0.0, 0.0, 1.0, 1.0] else None), draft)
 
     def _tile(self, box):
         """Zona visible a resolución completa con los ajustes actuales (zoom > vista previa)."""
@@ -1154,8 +1336,7 @@ class StudioView(QWidget):
             self._full = (it.path, E.load_linear(it.path, half=False, rebuild_highlights=True))
         lin = self._full[1]
         s = copy.deepcopy(it.settings)
-        c = s.get("crop", [0.0, 0.0, 1.0, 1.0]) if self.canvas.cmp.mode == "off" and not self.mask_show \
-            else [0.0, 0.0, 1.0, 1.0]
+        c = (self._view_crop or [0.0, 0.0, 1.0, 1.0])
         box_rot = (c[0] + box[0] * (c[2] - c[0]), c[1] + box[1] * (c[3] - c[1]),
                    c[0] + box[2] * (c[2] - c[0]), c[1] + box[3] * (c[3] - c[1]))
         flat = dict(s, angle=0, crop=[0.0, 0.0, 1.0, 1.0])
@@ -1169,9 +1350,11 @@ class StudioView(QWidget):
         if img is None:
             return self.canvas.set(msg=f"Error al revelar: {info}")
         pm = _pixmap(img)
+        if isinstance(info, tuple) and len(info) > 2:
+            self._view_crop = info[2]
         if not draft and self.cur:
             fw, fh = E.full_size(self.cur.path)
-            c = self.cur.settings.get("crop", [0.0, 0.0, 1.0, 1.0])
+            c = self._view_crop or [0.0, 0.0, 1.0, 1.0]
             self.canvas.zoom.reset(key=(self.cur.path, n), full_size=(int(fw * (c[2] - c[0])) or fw, fh))
             self.canvas.zoom.schedule()
         before = info[1] if isinstance(info, tuple) else None

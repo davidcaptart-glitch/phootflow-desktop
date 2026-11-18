@@ -915,6 +915,68 @@ class Graphics(unittest.TestCase):
             self.assertTrue(warn[0].startswith("f.jpg: "))
 
 
+class CropAndReview(unittest.TestCase):
+    def test_crop_frame_keeps_ratio_and_stays_inside(self):
+        import cropview as CV
+        rn = 0.8 * 4000 / 6000  # 4:5 sobre una foto 6000x4000 (unidades 0..1)
+        r = CV.fit_aspect([0.1, 0.1, 0.9, 0.6], rn, "rb")
+        self.assertAlmostEqual((r[2] - r[0]) / (r[3] - r[1]), rn, places=4)
+        self.assertTrue(all(0 <= v <= 1 for v in r))
+        r = CV.refit([0.0, 0.0, 1.0, 1.0], 3.0)  # más ancha que la foto: cabe dentro
+        self.assertAlmostEqual(r[2] - r[0], 1.0, places=4)
+        self.assertEqual(CV.guess_ratio([0.0, 0.0, 1.0, 1.0], (6000, 4000))[0], "3:2")
+        self.assertIsNone(CV.ratio_value("Libre", False, (6000, 4000)))
+
+    def test_review_is_saved_and_restored(self):
+        d = tempfile.mkdtemp()
+        photos = []
+        for i in range(3):
+            p = os.path.join(d, f"r{i}.jpg")
+            scene().save(p)
+            ph = E.Photo(p)
+            ph.thumb = b"x"
+            ph.crops = {"Original": (0.0, 0.0, 1.0, 1.0)}
+            photos.append(ph)
+        photos[0].keep, photos[0].reviewed = False, True
+        photos[1].crops[E.CUSTOM_CROP] = (0.1, 0.1, 0.8, 0.9)
+        photos[1].best, photos[1].reviewed, photos[1].look = E.CUSTOM_CROP, True, "Cálido"
+        E.save_review(photos, d)
+        fresh = [E.Photo(p.path) for p in photos]
+        for ph in fresh:
+            ph.crops = {"Original": (0.0, 0.0, 1.0, 1.0)}
+        self.assertEqual(E.load_review(fresh, d), 2)
+        self.assertFalse(fresh[0].keep)
+        self.assertEqual(fresh[1].best, E.CUSTOM_CROP)
+        self.assertEqual(fresh[1].crops[E.CUSTOM_CROP], (0.1, 0.1, 0.8, 0.9))
+        self.assertEqual(fresh[1].look, "Cálido")
+        self.assertFalse(fresh[2].reviewed)
+
+    def test_propagate_studio_groups(self):
+        import propagate as P
+        import studio_engine as SE
+        d = tempfile.mkdtemp()
+        paths = []
+        for n in ("a.jpg", "b.jpg", "c.jpg"):
+            paths.append(os.path.join(d, n))
+            scene().save(paths[-1])
+        src = SE.new_settings(exposure=1.2, contrast=40, vignette=-25, crop=[0.1, 0.1, 0.9, 0.9],
+                              _events_override=True)
+        SE.save(d, paths[0], src)
+        overrides = {os.path.normcase(paths[0]): src}
+        prop = P.Propagator(d, lambda ph: SE.new_settings(exposure=0.3), overrides)
+        a, b, c = (E.Photo(p) for p in paths)
+        self.assertTrue(prop.has_edit(a))
+        self.assertFalse(prop.has_edit(b))
+        clip = prop.make_clip(a, {"light", "effects"}, [])
+        self.assertEqual(prop.apply(clip, [a, b, c]), 2)  # la de origen no cuenta
+        got = SE.load(d, paths[1])
+        self.assertEqual((got["contrast"], got["vignette"]), (40, -25))
+        self.assertEqual(got["exposure"], 0.3)                      # su exposición se respeta
+        self.assertEqual(got["crop"], [0.0, 0.0, 1.0, 1.0])         # el recorte no se copia
+        self.assertTrue(got["_events_override"])
+        self.assertTrue(prop.has_edit(c))
+
+
 class Updater(unittest.TestCase):
     def test_versions(self):
         self.assertTrue(updater.is_newer("v0.10.0", "0.9.9"))

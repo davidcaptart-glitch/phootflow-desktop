@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 46 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 50 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -52,6 +52,9 @@ python -m unittest discover -s tests   # 46 pruebas, sin fotos reales ni red
   grupos, imán, texto curvo, pluma y nodos, Buscatrazos, QR, quitar fondo
   (PNG aparte en `diseños\recortes`), vectorizar (OpenCV) y PDF de imprenta (sangrado, marcas, CMYK simple).
   Un solo pintor (`paint_element`) para lienzo y exportación.
+- `cropview.py` — marco de recorte interactivo común (Studio con R; revisión de Events con C: recorte «Personalizado»).
+- `propagate.py` — propagar la edición de Studio/Edits de una foto a otras de Events (`Propagator`: grupos de ajustes y capas de Edits).
+  La revisión de Events se guarda sola en `<salida>/.phootflow/revision.json` (`save_review`/`load_review`) y sigue por la primera sin revisar.
 - `luts.py` — LUT .cube por tipo de sesión; `eyes.py` (MediaPipe) y `scene_ai.py` (CLIP, onnxruntime): IA local.
 - `drive.py` — OAuth de escritorio con PKCE y Drive v3 por REST.
 - `license.py` — licencias: `ensure()` en `main()` (pide clave, valida en la Edge Function `licencias` de
