@@ -1310,11 +1310,16 @@ class EditsView(QWidget):
         self.b_export_sel = _btn("Exportar las seleccionadas", "ghost",
                                  "Exporta las fotos seleccionadas en la tira que tengan retoque")
         self.b_export_sel.clicked.connect(self.export_selected)
+        self.b_export_vec = _btn("Vectorizar para imprenta…", "ghost",
+                                 "La foto retocada pasada a trazados de color (SVG, PDF, EPS o DXF): para vinilo, "
+                                 "serigrafía, plotter, láser o imprentas que piden vector")
+        self.b_export_vec.clicked.connect(self.export_vectorized)
         for x in (self.fmt, self.size):
             ev.addWidget(x)
         ev.addLayout(qrow)
         ev.addWidget(self.b_export)
         ev.addWidget(self.b_export_sel)
+        ev.addWidget(self.b_export_vec)
         ev.addStretch(1)
         self.bottom_tabs.add_page(ew)
         split.addWidget(self.bottom_tabs)
@@ -3255,7 +3260,8 @@ class EditsView(QWidget):
 
     # ---------------------------------------------------------- exportar
     def _out_path(self, it: Item, fmt: str) -> str:
-        return os.path.join(self.folder, "Edits", f"{it.name}.{fmt}")
+        ext, suffix = EE.format_ext(fmt)
+        return os.path.join(self.folder, "Edits", f"{it.name}{suffix}.{ext}")
 
     def _export(self, targets):
         if not targets:
@@ -3275,7 +3281,7 @@ class EditsView(QWidget):
                 self.export_progress.emit(i, len(jobs), f"Exportando {it.name}…")
                 try:
                     out = EE.export(folder, it.path, doc, self._out_path(it, fmt), fmt, quality, side)
-                    if not out.endswith("." + fmt):
+                    if not out.endswith("." + EE.format_ext(fmt)[0]):
                         self.export_progress.emit(i, len(jobs), f"{it.name}: con transparencia, se guarda en "
                                                                 f"{os.path.splitext(out)[1][1:].upper()}")
                 except Exception as e:
@@ -3289,6 +3295,32 @@ class EditsView(QWidget):
     def export_current(self):
         if self.cur:
             self._export([self.cur])
+
+    def export_vectorized(self):
+        """Vectoriza la foto actual tal como queda en Edits (con sus capas) y la guarda como vector."""
+        if not self.cur:
+            return
+        self._save_doc()
+        from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+        from graphics import VectorizeDialog
+        doc = copy.deepcopy(self.doc or EE.load(self.folder, self.cur.path) or EE.new_doc())
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            img, alpha = EE.render_final(self.folder, self.cur.path, doc, 2400)
+            rgb = (np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8)
+            if alpha is not None:
+                rgb = np.dstack([rgb, (np.clip(alpha, 0, 1) * 255 + 0.5).astype(np.uint8)])
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Vectorizar", f"No se pudo preparar la foto: {e}")
+            return
+        QApplication.restoreOverrideCursor()
+        out = os.path.join(self.folder, "Edits")
+        os.makedirs(out, exist_ok=True)
+        dlg = VectorizeDialog(self, np.ascontiguousarray(rgb), export_only=True, name=self.cur.name,
+                              start_dir=out)
+        if dlg.exec() == QDialog.Accepted and dlg.saved:
+            self.status.setText(f"Vectorizado: {dlg.saved}")
 
     def export_selected(self):
         rows = sorted({i.row() for i in self.film.selectedIndexes()})

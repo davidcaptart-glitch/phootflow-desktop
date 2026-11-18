@@ -1591,14 +1591,13 @@ def image_warnings(d: dict, cache: ImageCache, dpi_min: float = 200) -> list[str
     return out
 
 
-def export_raster(d: dict, path: str, cache: ImageCache, scale: float = 1.0, quality: int = 92) -> str:
-    """PNG o JPG (por la extensión) a `scale` veces el tamaño del diseño."""
+def render_image(d: dict, cache: ImageCache, scale: float = 1.0, opaque: bool = False):
+    """El diseño (una página) como QImage a `scale` veces su tamaño; transparente salvo `opaque` (fondo blanco)."""
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QImage, QPainter
     W, H = max(1, round(d["w"] * scale)), max(1, round(d["h"] * scale))
-    jpg = path.lower().endswith((".jpg", ".jpeg"))
-    img = QImage(W, H, QImage.Format_RGB32 if jpg else QImage.Format_ARGB32_Premultiplied)
-    img.fill(Qt.white if jpg else Qt.transparent)
+    img = QImage(W, H, QImage.Format_RGB32 if opaque else QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.white if opaque else Qt.transparent)
     dpm = round(d.get("dpi", SCREEN_DPI) * scale / MM_PER_IN * 1000)
     img.setDotsPerMeterX(dpm)
     img.setDotsPerMeterY(dpm)
@@ -1607,9 +1606,66 @@ def export_raster(d: dict, path: str, cache: ImageCache, scale: float = 1.0, qua
     p.scale(scale, scale)
     paint_design(p, d, cache, img_px=scale)
     p.end()
-    if not img.save(path, "JPG" if jpg else "PNG", quality if jpg else -1):
-        raise OSError(f"No se pudo guardar {path}")
+    return img
+
+
+def export_raster(d: dict, path: str, cache: ImageCache, scale: float = 1.0, quality: int = 92,
+                  cmyk: bool = False) -> str:
+    """Imagen a `scale` veces el tamaño del diseño; el formato sale de la extensión (JPG, PNG, WebP, AVIF, TIFF,
+    GIF, BMP o PDF de imagen, ver export_formats.RASTER). Guarda la resolución (ppp) para la imprenta."""
+    import export_formats as EF
+    ext = os.path.splitext(path)[1].lower()
+    opaque = ext in (".jpg", ".jpeg", ".bmp") or (cmyk and ext in (".tif", ".tiff", ".pdf"))
+    img = render_image(d, cache, scale, opaque)
+    arr = EF.qimage_to_array(img)
+    EF.save_raster(arr, path, quality=quality, dpi=d.get("dpi", SCREEN_DPI) * scale, cmyk=cmyk)
     return path
+
+
+def export_animation(d: dict, path: str, cache: ImageCache, scale: float = 1.0, duration_ms: int = 1500,
+                     quality: int = 90) -> str:
+    """Las páginas del diseño como GIF o WebP animado (una página por fotograma)."""
+    import export_formats as EF
+    frames = [EF.qimage_to_array(render_image(v, cache, scale))
+              for v in page_views(d)]
+    return EF.save_animation(frames, path, duration_ms, quality=quality)
+
+
+def export_vectorized(d: dict, path: str, cache: ImageCache, cmyk: bool = False, **params) -> str:
+    """El diseño entero pasado a trazados (sin fotos ni fuentes): SVG, PDF, EPS o DXF al tamaño real."""
+    import export_formats as EF
+    vec = vectorize_design(d, cache, **params)
+    return EF.save_vector(vec, path, design_width_mm(d), cmyk, d.get("name", ""))
+
+
+def design_rgba(d: dict, cache: ImageCache, long_side: int = 2400) -> np.ndarray:
+    """La página como RGBA uint8 de unos `long_side` px (para vectorizarla)."""
+    import export_formats as EF
+    scale = min(4.0, long_side / max(d["w"], d["h"]))
+    return EF.qimage_to_array(render_image(d, cache, scale))
+
+
+def vectorize_design(d: dict, cache: ImageCache, max_side: int = 1400, **params) -> dict:
+    return vectorize(design_rgba(d, cache), max_side=max_side, **params)
+
+
+def export_image_pdf(d: dict, path: str, cache: ImageCache, scale: float = 1.0, cmyk: bool = False) -> str:
+    """PDF con cada página como una imagen (sin vectores), a la resolución del diseño × `scale`."""
+    import export_formats as EF
+    ims = [EF._flatten(EF._pil(EF.qimage_to_array(render_image(v, cache, scale, opaque=True))))
+           for v in page_views(d)]
+    if cmyk:
+        ims = [i.convert("CMYK") for i in ims]
+    tmp = path + ".part"
+    ims[0].save(tmp, "PDF", resolution=float(d.get("dpi", SCREEN_DPI) * scale), save_all=True,
+                append_images=ims[1:])
+    os.replace(tmp, path)
+    return path
+
+
+def design_width_mm(d: dict) -> float:
+    """Ancho real del diseño en mm (los de píxeles, a su ppp; 96 si es para pantalla)."""
+    return px_to_mm(d["w"], d.get("dpi", SCREEN_DPI if d.get("unit") != "mm" else PRINT_DPI))
 
 
 def export_svg(d: dict, path: str, cache: ImageCache) -> str:

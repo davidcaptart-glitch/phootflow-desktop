@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 55 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 70 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -73,6 +73,12 @@ python -m unittest discover -s tests   # 55 pruebas, sin fotos reales ni red
   Efectos de texto (`graphics_textfx.py`, `el["tfx"]`; panel en `graphics_textfx_ui.py`): sombra, elevar, eco,
   contorno, fondo, desalineado, hueco, neón, distorsión, resplandor y 3D, más 18 estilos (fuente + color + efecto).
   Los desenfocados no pasan a contornos en el PDF.
+- `export_formats.py` — formatos de salida comunes (sin Qt salvo `qimage_to_array`): imagen (JPG, PNG, WebP, AVIF,
+  TIFF LZW 8/16 bits o CMYK, GIF, BMP, PDF de imagen), GIF/WebP animado (páginas = fotogramas) y el vectorizado
+  (`graphics_engine.vectorize`) a SVG, PDF y EPS escritos a mano (CMYK real con `k`/`setcmykcolor`) y DXF R12 en mm
+  (una capa por color). Graphics: `ExportDialog`/`EXPORT_FORMATS` (incluye «Vectorizado para imprenta»: la página
+  entera a trazados con `VectorizeDialog(export_only=True)` al ancho real en mm). Edits: `EE.FORMATS` ampliado,
+  `EE.render_final` y botón «Vectorizar para imprenta…».
 - `cropview.py` — marco de recorte interactivo común (Studio con R; revisión de Events con C: recorte «Personalizado»).
 - `propagate.py` — propagar la edición de Studio/Edits de una foto a otras de Events (`Propagator`: grupos de ajustes y capas de Edits).
   La revisión de Events se guarda sola en `<salida>/.phootflow/revision.json` (`save_review`/`load_review`) y sigue por la primera sin revisar.

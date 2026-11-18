@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDial
                                QWidget)
 
 import engine as E
+import export_formats as EF
 import graphics_engine as G
 import graphics_textfx as TFX
 import icons as I
@@ -1124,10 +1125,18 @@ class PhotoList(QListWidget):
 # ------------------------------------------------------------------ diálogos
 
 class VectorizeDialog(QDialog):
-    def __init__(self, parent, rgb: np.ndarray):
+    """Vectorizar una imagen. Con `export_only` solo guarda el archivo (SVG, PDF, EPS o DXF): lo usan la
+    exportación de Graphics («Vectorizado para imprenta») y la de Edits."""
+
+    def __init__(self, parent, rgb: np.ndarray, export_only: bool = False, size_mm: float | None = None,
+                 name: str = "vector", start_dir: str = ""):
         super().__init__(parent)
-        self.setWindowTitle("Vectorizar")
+        self.setWindowTitle("Vectorizar para imprenta" if export_only else "Vectorizar")
         self.rgb = rgb
+        self.export_only = export_only
+        self.name = name
+        self.start_dir = start_dir
+        self.saved = ""
         self.vec = None
         self.choice = ""
         self.resize(980, 620)
@@ -1166,16 +1175,36 @@ class VectorizeDialog(QDialog):
             f.addWidget(w_)
         f.addStretch(1)
         v.addLayout(f)
+        f2 = QHBoxLayout()
+        self.width_mm = QDoubleSpinBox()
+        self.width_mm.setRange(0, 10000)
+        self.width_mm.setDecimals(1)
+        self.width_mm.setSuffix(" mm")
+        self.width_mm.setSpecialValueText("sin tamaño")
+        self.width_mm.setValue(size_mm or 0)
+        self.width_mm.setToolTip("Ancho real del archivo (el alto va en proporción). Un vector se puede escalar "
+                                 "después sin perder calidad.")
+        self.cmyk = QCheckBox("Tintas en CMYK (PDF y EPS)")
+        self.cmyk.setToolTip("Conversión simple sin perfil ICC; la imprenta ajusta con el suyo")
+        for w_ in (QLabel("Ancho de impresión"), self.width_mm, self.cmyk):
+            f2.addWidget(w_)
+        f2.addStretch(1)
+        v.addLayout(f2)
         self.info = QLabel("")
         self.info.setObjectName("meta")
         v.addWidget(self.info)
         bb = QHBoxLayout()
         bb.addStretch(1)
-        bb.addWidget(_btn("Guardar SVG…", "ghost", "Guarda solo el dibujo vectorial (vinilo, plotter, imprenta)",
-                          self.save_svg))
-        bb.addWidget(_btn("Cancelar", "", "", self.reject))
-        bb.addWidget(_btn("Añadir encima", "", "Deja la foto y pone el vector encima", lambda: self._done("add")))
-        bb.addWidget(_btn("Sustituir la foto", "primary", "", lambda: self._done("replace")))
+        tip = "SVG, PDF vectorial, EPS o DXF: solo trazados, para imprenta, vinilo, plotter o láser"
+        if export_only:
+            bb.addWidget(_btn("Cancelar", "", "", self.reject))
+            bb.addWidget(_btn("Guardar…", "primary", tip, self.save_vector))
+        else:
+            bb.addWidget(_btn("Guardar vector…", "ghost", tip, self.save_vector))
+            bb.addWidget(_btn("Cancelar", "", "", self.reject))
+            bb.addWidget(_btn("Añadir encima", "", "Deja la foto y pone el vector encima",
+                              lambda: self._done("add")))
+            bb.addWidget(_btn("Sustituir la foto", "primary", "", lambda: self._done("replace")))
         v.addLayout(bb)
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -1228,11 +1257,26 @@ class VectorizeDialog(QDialog):
         finally:
             QApplication.restoreOverrideCursor()
 
-    def save_svg(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Guardar SVG", "vector.svg", "SVG (*.svg)")
-        if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(G.vector_svg(self.final()))
+    def save_vector(self):
+        filters = [f"{lab} — {tip} (*.{ext})" for ext, (lab, tip) in EF.VECTOR.items()]
+        base = os.path.join(self.start_dir, self.name) if self.start_dir else self.name
+        path, flt = QFileDialog.getSaveFileName(self, "Guardar vectorizado", base + ".pdf", ";;".join(filters),
+                                                filters[1])
+        if not path:
+            return
+        ext = list(EF.VECTOR)[filters.index(flt)] if flt in filters else "pdf"
+        if os.path.splitext(path)[1].lower().lstrip(".") not in EF.VECTOR:
+            path += "." + ext
+        try:
+            EF.save_vector(self.final(), path, self.width_mm.value() or None, self.cmyk.isChecked(), self.name)
+        except Exception as ex:
+            QMessageBox.warning(self, "Vectorizar", f"No se pudo guardar: {ex}")
+            return
+        self.saved = path
+        if self.export_only:
+            self.accept()
+        else:
+            QMessageBox.information(self, "Vectorizar", f"Guardado:\n{path}")
 
     def _done(self, c):
         self.vec = self.final()
@@ -1327,7 +1371,35 @@ class BackgroundDialog(QDialog):
             QApplication.restoreOverrideCursor()
 
 
+# formato del diálogo de exportar → (texto, extensión)
+EXPORT_FORMATS = {
+    "pdf": ("PDF para imprenta (vectorial, sangrado y marcas)", ".pdf"),
+    "vec": ("Vectorizado para imprenta: todo trazados (SVG, PDF, EPS, DXF)", ""),
+    "svg": ("SVG editable (textos y formas como vector)", ".svg"),
+    "png": ("PNG — sin pérdida, con transparencia", ".png"),
+    "jpg": ("JPG — foto, la más compatible", ".jpg"),
+    "webp": ("WebP — web y redes, pesa poco", ".webp"),
+    "avif": ("AVIF — web moderna, aún menos peso", ".avif"),
+    "tif": ("TIFF — imprenta, sin pérdida (CMYK opcional)", ".tif"),
+    "gif": ("GIF — animado con las páginas", ".gif"),
+    "pdfimg": ("PDF de imagen (una imagen por página)", ".pdf"),
+    "bmp": ("BMP", ".bmp"),
+}
+
+
 class ExportDialog(QDialog):
+    HINTS = {
+        "pdf": "Lo que pide casi toda imprenta: textos y formas vectoriales, fotos a 300 ppp, sangrado y marcas.",
+        "vec": "Pasa TODO el diseño (fotos incluidas) a trazados de color, sin mapas de bits ni fuentes: para "
+               "vinilo, serigrafía, bordado, plotter, láser o imprentas que piden «vector». Eliges el número "
+               "de colores y el detalle viendo el resultado.",
+        "svg": "Vectorial y editable en Illustrator, Inkscape o la web; las fotos van incrustadas.",
+        "tif": "Sin pérdida y con la resolución de impresión; con CMYK, listo para imprentas que lo piden así.",
+        "gif": "Con varias páginas sale animado; 256 colores, mejor para gráficos que para fotos.",
+        "webp": "Con varias páginas puede salir animado (como un GIF pero con todos los colores).",
+        "pdfimg": "Cada página como una imagen dentro del PDF (para quien no quiere vectorial).",
+    }
+
     def __init__(self, parent, d: dict, cache=None):
         super().__init__(parent)
         self.setWindowTitle("Exportar diseño")
@@ -1343,7 +1415,8 @@ class ExportDialog(QDialog):
         f = QFormLayout()
         outer.addLayout(f)
         self.fmt = QComboBox()
-        self.fmt.addItems(["PDF para imprenta", "PNG", "JPG", "SVG (vectorial)"])
+        for k, (t, _) in EXPORT_FORMATS.items():
+            self.fmt.addItem(t, k)
         f.addRow("Formato", self.fmt)
         self.bleed = QDoubleSpinBox()
         self.bleed.setRange(0, 10)
@@ -1355,16 +1428,29 @@ class ExportDialog(QDialog):
         self.outline = QCheckBox("Convertir textos a contornos (la imprenta no necesita las fuentes)")
         self.outline.setChecked(True)
         self.scale = QComboBox()
-        self.scale.addItems(["1×", "2×", "3×"])
+        self.scale.addItems(["1×", "2×", "3×", "4×"])
         self.quality = QSpinBox()
         self.quality.setRange(50, 100)
         self.quality.setValue(92)
+        self.animate = QCheckBox("Animación: una página por fotograma")
+        self.animate.setChecked(len(d.get("pages") or []) > 1)
+        self.duration = QDoubleSpinBox()
+        self.duration.setRange(0.1, 30)
+        self.duration.setValue(1.5)
+        self.duration.setSuffix(" s por página")
         f.addRow("Sangrado", self.bleed)
         f.addRow("", self.marks)
         f.addRow("", self.cmyk)
         f.addRow("", self.outline)
         f.addRow("Escala", self.scale)
-        f.addRow("Calidad JPG", self.quality)
+        f.addRow("Calidad", self.quality)
+        f.addRow("", self.animate)
+        f.addRow("Duración", self.duration)
+        self.hint = QLabel("")
+        self.hint.setObjectName("meta")
+        self.hint.setWordWrap(True)
+        self.hint.setMaximumWidth(380)
+        f.addRow(self.hint)
         info = QLabel(f"Tamaño: {G.size_label(d)}" + (" · fotos a 300 ppp" if d.get("unit") == "mm" else ""))
         info.setObjectName("meta")
         f.addRow(info)
@@ -1377,18 +1463,27 @@ class ExportDialog(QDialog):
         self.fmt.currentIndexChanged.connect(self._upd)
         self.bleed.valueChanged.connect(self._proof)
         self.marks.toggled.connect(self._proof)
+        self.animate.toggled.connect(self._upd)
         self._upd()
 
-    def _upd(self):
-        i = self.fmt.currentIndex()
-        for w_ in (self.bleed, self.marks, self.cmyk, self.outline):
-            w_.setEnabled(i == 0)
-        self.scale.setEnabled(i in (1, 2))
-        self.quality.setEnabled(i == 2)
+    def key(self) -> str:
+        return self.fmt.currentData()
+
+    def _upd(self, *_):
+        k = self.key()
+        multi = len(self.d.get("pages") or []) > 1
+        for w_ in (self.bleed, self.marks, self.outline):
+            w_.setEnabled(k == "pdf")
+        self.cmyk.setEnabled(k in ("pdf", "tif", "pdfimg"))
+        self.animate.setEnabled(k in EF.ANIMATED and multi)
+        self.duration.setEnabled(k in EF.ANIMATED and multi and self.animate.isChecked())
+        self.scale.setEnabled(k not in ("pdf", "svg", "vec"))
+        self.quality.setEnabled(k in ("jpg", "webp", "avif"))
+        self.hint.setText(self.HINTS.get(k, ""))
         self._proof()
 
     def _proof(self, *_):
-        pdf = self.fmt.currentIndex() == 0
+        pdf = self.key() == "pdf"
         img = G.print_proof(self.d, self.cache, self.bleed.value() if pdf else 0, self.marks.isChecked() and pdf,
                             res=60) if pdf else G.thumbnail(self.d, self.cache, 380)
         self.proof.setPixmap(QPixmap.fromImage(img).scaled(QSize(290, 370), Qt.KeepAspectRatio,
@@ -3483,21 +3578,27 @@ class GraphicsView(QWidget):
         dlg = ExportDialog(self, self.d, self.canvas.cache)
         if dlg.exec() != QDialog.Accepted:
             return
-        i = dlg.fmt.currentIndex()
-        ext = [".pdf", ".png", ".jpg", ".svg"][i]
+        k = dlg.key()
         base = os.path.join(self.folder, "Diseños") if self.folder else os.path.expanduser("~\\Documents")
         os.makedirs(base, exist_ok=True)
         safe = "".join(c for c in self.d.get("name", "diseño") if c not in '\\/:*?"<>|').strip() or "diseño"
+        if k == "vec":
+            self.export_vectorized(base, safe)
+            return
+        ext = EXPORT_FORMATS[k][1]
         path, _ = QFileDialog.getSaveFileName(self, "Exportar", os.path.join(base, safe + ext),
                                               f"{ext[1:].upper()} (*{ext})")
         if not path:
             return
+        if not path.lower().endswith(ext):
+            path += ext
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             views = G.page_views(self.d)
             warn = [w_ for v in views for w_ in G.image_warnings(v, self.canvas.cache)] if self._mm() else []
             files = [path]
-            if i == 0:
+            scale = float(dlg.scale.currentIndex() + 1)
+            if k == "pdf":
                 d = G.ensure_pages(copy.deepcopy(self.d))
                 if dlg.outline.isChecked():
                     for pg in d["pages"]:
@@ -3507,16 +3608,21 @@ class GraphicsView(QWidget):
                     G.ensure_pages(d)
                 G.export_pdf(d, path, self.canvas.cache, dlg.bleed.value(), dlg.marks.isChecked(),
                              dlg.cmyk.isChecked())
+            elif k == "pdfimg":
+                G.export_image_pdf(self.d, path, self.canvas.cache, scale, dlg.cmyk.isChecked())
+            elif k in EF.ANIMATED and len(views) > 1 and dlg.animate.isChecked():
+                G.export_animation(self.d, path, self.canvas.cache, scale, round(dlg.duration.value() * 1000),
+                                   dlg.quality.value())
             else:
                 # varias páginas: un archivo por página (nombre-1, nombre-2…)
                 root, ext_ = os.path.splitext(path)
-                files = [path] if len(views) == 1 else [f"{root}-{k + 1}{ext_}" for k in range(len(views))]
+                files = [path] if len(views) == 1 else [f"{root}-{n + 1}{ext_}" for n in range(len(views))]
                 for v, f in zip(views, files):
-                    if i in (1, 2):
-                        G.export_raster(v, f, self.canvas.cache, float(dlg.scale.currentIndex() + 1),
-                                        dlg.quality.value())
-                    else:
+                    if k == "svg":
                         G.export_svg(v, f, self.canvas.cache)
+                    else:
+                        G.export_raster(v, f, self.canvas.cache, scale, dlg.quality.value(),
+                                        cmyk=dlg.cmyk.isChecked() and k == "tif")
         except Exception as ex:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Exportar", f"No se pudo exportar: {ex}")
@@ -3527,6 +3633,19 @@ class GraphicsView(QWidget):
             msg += "\n\nFotos con poca resolución para imprimir a este tamaño (menos de 200 ppp):\n• " + \
                    "\n• ".join(warn)
         QMessageBox.information(self, "Exportar", msg)
+
+    def export_vectorized(self, base: str, name: str):
+        """La página actual entera pasada a trazados (sin fotos ni fuentes) para imprenta, vinilo o corte."""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            v = G.page_views(self.d)[self.d.get("page", 0)]
+            rgba = G.design_rgba(v, self.canvas.cache)
+        finally:
+            QApplication.restoreOverrideCursor()
+        dlg = VectorizeDialog(self, rgba, export_only=True, size_mm=round(G.design_width_mm(v), 1), name=name,
+                              start_dir=base)
+        if dlg.exec() == QDialog.Accepted and dlg.saved:
+            QMessageBox.information(self, "Exportar", f"Exportado (todo trazados):\n{dlg.saved}")
 
     # ---------------------------------------------------------- páginas
     def refresh_pages(self):

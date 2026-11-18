@@ -69,7 +69,15 @@ FX_DEFAULTS = {"shadow": {"on": False, "color": "#000000", "opacity": 60, "angle
                "motion": {"on": False, "amount": 2.0, "angle": 0}}  # orden por defecto al crear capas
 ANCHORS = {"lt": (0, 0), "mt": (0.5, 0), "rt": (1, 0), "lm": (0, 0.5), "mm": (0.5, 0.5), "rm": (1, 0.5),
            "lb": (0, 1), "mb": (0.5, 1), "rb": (1, 1)}
-FORMATS = {"jpg": "JPG", "tif": "TIFF 16 bits", "png": "PNG (con transparencia)"}
+FORMATS = {"jpg": "JPG", "png": "PNG (con transparencia)", "webp": "WebP (web y redes, transparencia)",
+           "avif": "AVIF (web moderna, aún menos peso)", "tif": "TIFF 16 bits", "tifc": "TIFF CMYK para imprenta",
+           "pdf": "PDF para imprenta (300 ppp)", "gif": "GIF"}
+# clave → (extensión, sufijo del nombre)
+FORMAT_EXT = {"tifc": ("tif", "-CMYK")}
+
+
+def format_ext(fmt: str) -> tuple[str, str]:
+    return FORMAT_EXT.get(fmt, (fmt, ""))
 
 
 # ------------------------------------------------------------------ documento
@@ -1743,20 +1751,27 @@ def new_canvas(folder: str, width: int, height: int, color: str = "#ffffff", nam
 
 # ------------------------------------------------------------------ exportar
 
-def export(folder: str, photo_path: str, doc: dict, out_path: str, fmt: str = "jpg", quality: int = 95,
-           long_side: int | None = None) -> str:
+def render_final(folder: str, photo_path: str, doc: dict, long_side: int | None = None):
+    """La foto revelada con todas sus capas a tamaño completo: (RGB float 0–1, alfa float o None)."""
     s = base_settings(folder, photo_path, doc)
     key = photo_path + "#full"
     base = render_base(photo_path, s, full=True, key=key)
     img, alpha = compose(base, doc, crop_box(s), key)
-    if fmt == "jpg" and alpha is not None:
-        fmt = "png"  # un JPG no guarda transparencia: se exporta en PNG
-        out_path = os.path.splitext(out_path)[0] + ".png"
     if long_side and max(img.shape[:2]) > long_side:
         f = long_side / max(img.shape[:2])
         img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
         if alpha is not None:
             alpha = cv2.resize(alpha, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_AREA)
+    return img, alpha
+
+
+def export(folder: str, photo_path: str, doc: dict, out_path: str, fmt: str = "jpg", quality: int = 95,
+           long_side: int | None = None) -> str:
+    import export_formats as EF
+    img, alpha = render_final(folder, photo_path, doc, long_side)
+    if fmt == "jpg" and alpha is not None:
+        fmt = "png"  # un JPG no guarda transparencia: se exporta en PNG
+        out_path = os.path.splitext(out_path)[0] + ".png"
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     if fmt == "jpg":
         ph = E.Photo(path=photo_path, name=os.path.splitext(os.path.basename(photo_path))[0])
@@ -1767,18 +1782,11 @@ def export(folder: str, photo_path: str, doc: dict, out_path: str, fmt: str = "j
             exif = b""
         E._save(np.clip(img, 0, 1), out_path, quality, exif)
         return out_path
-    bgr = np.ascontiguousarray(img[..., ::-1])
-    if alpha is not None:  # PNG y TIFF guardan la transparencia
-        bgr = np.dstack([bgr, alpha])
-    depth = 65535 if fmt == "tif" else 255
-    data = (np.clip(bgr, 0, 1) * depth + 0.5).astype(np.uint16 if depth > 255 else np.uint8)
-    tmp = out_path + ".part" + os.path.splitext(out_path)[1]
-    ok, buf = cv2.imencode(os.path.splitext(out_path)[1], data)
-    if not ok:
-        raise RuntimeError("No se pudo codificar la imagen")
-    with open(tmp, "wb") as f:
-        f.write(buf.tobytes())
-    os.replace(tmp, out_path)
+    if fmt == "tif":  # 16 bits, con transparencia si la hay
+        EF.save_raster(img, out_path, alpha, dpi=300, bits16=True)
+        return out_path
+    EF.save_raster(img, out_path, alpha, quality=quality, dpi=300, cmyk=fmt == "tifc",
+                   icc=E._SRGB_ICC if fmt in ("png", "webp") else None)
     return out_path
 
 
