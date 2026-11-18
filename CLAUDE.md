@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 53 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 54 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -47,7 +47,9 @@ python -m unittest discover -s tests   # 53 pruebas, sin fotos reales ni red
   `<carpeta>/.phootflow/edits/<foto>.json`. Fotomontaje: las capas de imagen van en su sitio de la pila (los
   ajustes de encima las afectan), con máscara de capa, máscara de recorte (`clip`), transformación libre
   (`quad`, Ctrl+T), lienzos en blanco (`new_canvas`, en `edits/lienzos/`, fuera de Events), capas de pintura
-  (`paint`: pincel B y borrador E, presión de tableta, caché incremental) y grupos (`group` + `parent`, Ctrl+G). `attach_studio_button` añade «Editar en Edits» a Studio sin tocar
+  (`paint`: pincel B y borrador E, presión de tableta, caché incremental) grupos (`group` + `parent`, Ctrl+G), efectos de capa (`fx`: sombra, resplandor, desenfoque y movimiento)
+  y rayos de luz (`rays`). Las imágenes y pinturas se componen solo en su caja; la caché retoma el paso guardado
+  más alto y guarda el de debajo de la capa elegida (`Compositor.focus`); al arrastrar, borrador a 1024 px. `attach_studio_button` añade «Editar en Edits» a Studio sin tocar
   studio.py.
   Interfaz al estilo de PhotoCraft (ArtCraft): `edits_ui.py` (panel de capas, Curvas/Niveles, pestañas) y
   `edits_adjust.py` (capas de ajuste y modos de fusión portados de PhotoCraft, MIT/Apache-2.0); selecciones

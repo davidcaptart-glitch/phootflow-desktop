@@ -63,7 +63,15 @@ TOOLS = [("move", "✥", "Mover: arrastra el texto, el logo o la imagen elegida;
 TOOL_GRID = [("move", None), ("marquee", "lasso"), ("subject", "eyedrop"), ("heal", "skin"), ("clone", "fill"),
              ("brush", "eraser"), ("light", "liquify"), ("type", None), ("hand", "zoom")]
 SELECT_TOOLS = ("marquee", "lasso", "subject")
-MOVABLE = ("text", "logo", "image")  # capas que se arrastran con Mover y tienen caja en la vista
+MOVABLE = ("text", "logo", "image", "rays")
+DRAFT_PX = 1024  # mientras se arrastra un control o una capa se compone a este tamaño (más rápido)
+FX_SPECS = {  # efecto: (título, [(clave, etiqueta, mín, máx, paso)], ¿lleva color?)
+    "shadow": ("Sombra paralela", [("opacity", "Opacidad", 0, 100, 1), ("angle", "Luz desde", -180, 180, 1),
+                                   ("distance", "Distancia", 0, 10, 0.1), ("size", "Suavizado", 0, 8, 0.1)], True),
+    "glow": ("Resplandor exterior", [("opacity", "Opacidad", 0, 100, 1), ("size", "Tamaño", 0.2, 12, 0.1)], True),
+    "blur": ("Desenfoque (profundidad)", [("amount", "Cantidad", 0.05, 5, 0.05)], False),
+    "motion": ("Desenfoque de movimiento", [("amount", "Longitud", 0.2, 20, 0.1), ("angle", "Ángulo", -180, 180, 1)],
+               False)}  # capas que se arrastran con Mover y tienen caja en la vista
 HANDLE_PX = 9  # radio de agarre de las esquinas de la transformación libre (píxeles de pantalla)
 TOOL_LAYER = {k: lay for k, _, _, _, lay in TOOLS}
 LIGHT_MODES = [("dodge", "Aclarar (ojeras)"), ("whiten", "Blanquear (dientes, ojos)"), ("burn", "Oscurecer")]
@@ -916,6 +924,7 @@ class EditsView(QWidget):
             self._act(new, EE.KINDS[kind], lambda k=kind: self.add_layer(k))
         self._act(new, "Imagen…", self._pick_image)
         self._act(new, "Pintura (pincel)", self.add_paint_layer)
+        self._act(new, "Rayos de luz", lambda: self.add_layer("rays"))
         adj = c.addMenu("Nueva capa de ajuste")
         for k in A.ORDER:
             self._act(adj, A.ADJUSTMENTS[k][0] + "…", lambda k=k: self.add_adjust(k))
@@ -947,6 +956,7 @@ class EditsView(QWidget):
         self._act(fi, "Licuar", lambda: self.set_tool("liquify"), "Mayús+Ctrl+X")
         self._act(fi, "Suavizar piel", lambda: self.add_layer("skin"))
         self._act(fi, "Desenfocar fondo", lambda: self.add_layer("background"))
+        self._act(fi, "Rayos de luz", lambda: self.add_layer("rays"))
         vi = mb.addMenu("Vista")
         self._act(vi, "Acercar", lambda: self._zoom_step(1), "Ctrl++")
         self._act(vi, "Alejar", lambda: self._zoom_step(-1), "Ctrl+-")
@@ -1238,6 +1248,7 @@ class EditsView(QWidget):
             mnew.addAction(EE.KINDS[kind], lambda k=kind: self.add_layer(k))
         mnew.addAction("Imagen… (o arrástrala desde el Explorador)", self._pick_image)
         mnew.addAction("Pintura (pincel)", self.add_paint_layer)
+        mnew.addAction("Rayos de luz", lambda: self.add_layer("rays"))
         mnew.addAction("Grupo (con las capas elegidas)", self.group_layers)
         mnew.addSeparator()
         mnew.addAction("Nuevo lienzo en blanco…", self.new_canvas)
@@ -1495,6 +1506,107 @@ class EditsView(QWidget):
 
         self._build_image_page(page("image"))
 
+        lay = page("rays")
+        self.rays_w = {}
+        for key, label, lo, hi, step, neutral in (("amount", "Intensidad", 0, 100, 1, 60),
+                                                  ("length", "Alcance", 5, 150, 1, 70),
+                                                  ("spread", "Abertura", 5, 360, 1, 70),
+                                                  ("angle", "Luz desde", -180, 180, 1, 90),
+                                                  ("count", "Haces", 3, 80, 1, 24)):
+            sr = SliderRow(key, label, lo, hi, step, neutral)
+            sr.changed.connect(lambda k, val, f: self._set_prop(k, int(val) if k == "count" else float(val), f))
+            lay.addWidget(sr)
+            self.rays_w[key] = sr
+        self.rays_color = _btn("Color de la luz", "ghost")
+        self.rays_color.clicked.connect(lambda: self._pick_color("color"))
+        b = _btn("Otra forma de los haces", "ghost", "Reparte los haces de otra manera")
+        b.clicked.connect(lambda: self._set_prop("seed", int((self._layer() or {}).get("seed", 7)) + 1, True))
+        lay.addWidget(self.rays_color)
+        lay.addWidget(b)
+        lay.addWidget(self._label("Con Mover (V) arrastras el foco de luz; «Luz desde» es de dónde viene (90 = "
+                                  "arriba). Se suma en modo Trama; baja la opacidad en Capas o pinta su máscara "
+                                  "(Mayús+B) para quitarla de donde no debe dar."))
+
+        self.fx_box = self._build_fx_box()
+        self.prop_lay.addWidget(self.fx_box)
+
+    def _build_fx_box(self):
+        """Efectos de capa de una imagen o pintura: sombra, resplandor y desenfoques (como el «fx» de Photoshop)."""
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 10, 0, 0)
+        v.setSpacing(4)
+        t = QLabel("Efectos de capa")
+        t.setStyleSheet(f"color: {T.TEXT_STRONG}; font-weight: 600;")
+        v.addWidget(t)
+        self.fx_w = {}
+        for k, (title, rows, has_color) in FX_SPECS.items():
+            chk = QCheckBox(title)
+            chk.toggled.connect(lambda on, k=k: self._set_fx(k, "on", bool(on), True))
+            v.addWidget(chk)
+            box = QWidget()
+            bl = QVBoxLayout(box)
+            bl.setContentsMargins(16, 0, 0, 6)
+            bl.setSpacing(2)
+            sliders = {}
+            for key, label, lo, hi, step in rows:
+                sr = SliderRow(key, label, lo, hi, step, EE.FX_DEFAULTS[k][key])
+                sr.changed.connect(lambda kk, val, f, k=k: self._set_fx(k, kk, float(val), f))
+                bl.addWidget(sr)
+                sliders[key] = sr
+            cb = None
+            if has_color:
+                cb = _btn("Color", "ghost")
+                cb.clicked.connect(lambda _=False, k=k: self._pick_fx_color(k))
+                bl.addWidget(cb)
+            box.hide()
+            v.addWidget(box)
+            self.fx_w[k] = (chk, box, sliders, cb)
+        return w
+
+    def _fx(self, lay, k) -> dict:
+        return dict(EE.FX_DEFAULTS[k], **((lay.get("fx") or {}).get(k) or {}))
+
+    def _set_fx(self, k, field, value, final):
+        lay = self._layer()
+        if not lay or lay["kind"] not in EE.CLIP_BASES:
+            return
+        e = self._fx(lay, k)
+        if e.get(field) == value:
+            return
+        e[field] = value
+        lay.setdefault("fx", {})[k] = e
+        if field == "on":
+            self.fx_w[k][1].setVisible(bool(value))
+        self.request(draft=not final)
+        if final:
+            self._prop_timer.start(250)
+
+    def _pick_fx_color(self, k):
+        lay = self._layer()
+        if not lay:
+            return
+        c = QColorDialog.getColor(QColor(self._fx(lay, k)["color"]), self, "Color del efecto")
+        if c.isValid():
+            self._set_fx(k, "color", c.name(), True)
+            self._show_fx(lay)
+
+    def _show_fx(self, lay):
+        on = bool(lay and lay["kind"] in EE.CLIP_BASES)
+        self.fx_box.setVisible(on)
+        if not on:
+            return
+        for k, (chk, box, sliders, cb) in self.fx_w.items():
+            e = self._fx(lay, k)
+            chk.blockSignals(True)
+            chk.setChecked(bool(e.get("on")))
+            chk.blockSignals(False)
+            box.setVisible(bool(e.get("on")))
+            for key, sr in sliders.items():
+                sr.set_value(e[key])
+            if cb is not None:
+                cb.setStyleSheet(f"QPushButton {{ border-left: 14px solid {e['color']}; }}")
+
     def _build_image_page(self, lay):
         self.img_name = self._label("")
         b = _btn("Cambiar imagen…", "ghost")
@@ -1667,6 +1779,12 @@ class EditsView(QWidget):
             lay = self._layer()
             if not lay or lay["kind"] not in MOVABLE:
                 return False
+            if lay["kind"] == "rays":  # rayos: la rueda cambia el alcance
+                lay["length"] = round(min(150.0, max(5.0, float(lay.get("length", 70)) * (1.06 ** x))), 1)
+                self.request(draft=True)
+                self._prop_timer.start(500)
+                self._show_props()
+                return True
             if lay.get("quad"):  # transformada: la rueda la escala desde su centro
                 self._scale_quad(lay, 1.04 ** x)
                 self.request()
@@ -1879,7 +1997,7 @@ class EditsView(QWidget):
             x0, y0, lx, ly = self._drag
             lay["x"] = round(min(1.0, max(0.0, lx + x - x0)), 4)
             lay["y"] = round(min(1.0, max(0.0, ly + y - y0)), 4)
-            self.request()
+            self.request(draft=True)
             return True
         if kind == "release" and self._drag:
             self._drag = None
@@ -1958,7 +2076,7 @@ class EditsView(QWidget):
                 lay["quad"] = copy.deepcopy(q0)
                 lay["quad"][corner] = [round(x, 5), round(y, 5)]
             self._sync_quad()
-            self.request()
+            self.request(draft=True)
             return True
         if kind == "release" and self._drag and self._drag[0] == "quad":
             corner = self._drag[1]
@@ -2128,8 +2246,13 @@ class EditsView(QWidget):
             kw = {k: self.prefs[k] for k in ("text", "font", "color") if self.prefs.get(k)}
         elif kind == "logo" and self.prefs.get("logo") and os.path.isfile(self.prefs["logo"]):
             kw = {"path": self.prefs["logo"]}
+        sel = self._layer()
+        if kind == "rays" and sel and sel["kind"] not in EE.OVERLAY:
+            kw["above"] = sel["id"]
         lay = EE.add_layer(self.doc, kind, **kw)
         self.layer_id = lay["id"]
+        if kind == "rays":
+            self.set_tool("move")
         self._commit("Nueva capa: " + lay["name"].lower())
         if kind == "logo" and not lay.get("path"):
             self._pick_logo()
@@ -2272,7 +2395,8 @@ class EditsView(QWidget):
             sub = A.ADJUSTMENTS[l.get("adj", "curves")][0]
         else:
             sub = {"retouch": "Retoque", "skin": "Piel", "light": "Ojos y luz", "liquify": "Licuar",
-                   "background": "Fondo (IA)", "text": "Texto", "logo": "Logo", "image": "Imagen"}.get(l["kind"], "")
+                   "background": "Fondo (IA)", "text": "Texto", "logo": "Logo", "image": "Imagen",
+                   "rays": "Rayos de luz"}.get(l["kind"], "")
         if n:
             sub += " · " + _count(n, "trazo")
         if l.get("blend", "normal") != "normal":
@@ -2291,6 +2415,8 @@ class EditsView(QWidget):
                 thumb = self._thumbs[("glyph", l["kind"])] = UI._glyph_icon(l["kind"])
         if l.get("quad"):
             sub += " · transformada"
+        if EE.fx_of(l):
+            sub += " · fx"
         if l["kind"] == "paint":
             sub = "Pintura · " + _count(len(l.get("strokes", [])), "trazo")
         elif l["kind"] == "group":
@@ -2363,6 +2489,7 @@ class EditsView(QWidget):
         for name, w in self._pages.items():
             w.setVisible(name == kind)
         self.mask_info.setVisible(bool(lay and lay.get("mask")))
+        self._show_fx(lay)
         self.blend_cb.setEnabled(lay is not None)
         self.clip_chk.blockSignals(True)
         self.clip_chk.setChecked(bool(lay and lay.get("clip")))
@@ -2393,6 +2520,10 @@ class EditsView(QWidget):
             self.light_info.setText(_count(len(lay["strokes"]), "trazo") + " en esta capa.")
         elif kind == "paint":
             self.paint_info.setText(_count(len(lay.get("strokes", [])), "trazo") + " en esta capa.")
+        elif kind == "rays":
+            for key, sr in self.rays_w.items():
+                sr.set_value(lay.get(key, sr.neutral))
+            self.rays_color.setStyleSheet(f"QPushButton {{ border-left: 14px solid {lay.get('color', '#fff1cf')}; }}")
         elif kind == "group":
             n = sum(1 for x in self.doc["layers"] if x.get("parent") == lay["id"])
             self.group_info.setText(_count(n, "capa") + " dentro.")
@@ -2482,7 +2613,7 @@ class EditsView(QWidget):
             self.bg_blur.setVisible(lay.get("mode") == "blur")
             self.bg_color.setVisible(lay.get("mode") == "color")
             self.bg_color_box.setVisible(lay.get("detect") == "color")
-        self.request()
+        self.request(draft=not final)
         if final:
             self._prop_timer.start(450 if delay else 0)
         elif delay:
@@ -2700,7 +2831,7 @@ class EditsView(QWidget):
         if not lay or lay["kind"] != "adjust":
             return
         lay["p"] = p
-        self.request()
+        self.request(draft=not final)
         if final:
             self._prop_timer.start(250)
 
@@ -3005,14 +3136,17 @@ class EditsView(QWidget):
         self.request()
 
     # ---------------------------------------------------------- render en segundo plano
-    def request(self):
+    def request(self, draft=False):
+        """Pide componer de nuevo. `draft`: mientras se arrastra, a DRAFT_PX (al soltar llega la buena)."""
         if self.base is None or not self.doc or not self.cur:
             return
         self._req += 1
-        self._jobs.put((self._req, self.cur.path, copy.deepcopy(self.doc), self.base, list(self.box)))
+        self._jobs.put((self._req, self.cur.path, copy.deepcopy(self.doc), self.base, list(self.box), draft,
+                        self.layer_id))
 
     def _render_loop(self):
-        comp = EE.Compositor()
+        comp, comp_d = EE.Compositor(), EE.Compositor()
+        small = {}
         while True:
             job = self._jobs.get()
             try:
@@ -3022,14 +3156,29 @@ class EditsView(QWidget):
                 pass
             if job is None:
                 return
-            n, path, doc, base, box = job
+            n, path, doc, base, box, draft, focus = job
             key = path + "#edits"
+            full_shape = base.shape
+            if draft and max(base.shape[:2]) > DRAFT_PX * 1.2:
+                if small.get("id") != id(base):
+                    f = DRAFT_PX / max(base.shape[:2])
+                    small = {"id": id(base), "img": cv2.resize(base, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)}
+                base = small["img"]
+                comp_run, key = comp_d, key + "#borrador"
+            else:
+                draft, comp_run = False, comp
+            comp_run.focus = focus
             try:
-                resolved = self._resolve_sources(comp, base, doc, key, box)
+                resolved = [] if draft else self._resolve_sources(comp, base, doc, key, box)
                 boxes: dict = {}
-                img, alpha = comp.pixel_stage(base, doc["layers"], key, box=box)
+                img, alpha = comp_run.pixel_stage(base, doc["layers"], key, box=box)
                 img, alpha = EE.finish(img, alpha, doc, box)
                 boxes = EE.layer_boxes(doc, base.shape, box)
+                if draft:  # a tamaño de la vista de trabajo: el zoom no salta
+                    th, tw = EE.apply_crop(np.empty(full_shape[:2], np.uint8), box).shape[:2]
+                    img = cv2.resize(img, (tw, th), interpolation=cv2.INTER_LINEAR)
+                    if alpha is not None:
+                        alpha = cv2.resize(alpha, (tw, th), interpolation=cv2.INTER_LINEAR)
                 if alpha is not None:
                     img = _checker(img, alpha)
                 self.rendered.emit(n, img, resolved, boxes)

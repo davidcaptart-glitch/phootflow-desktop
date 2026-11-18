@@ -729,6 +729,50 @@ class Edits(unittest.TestCase):
         doc["layers"] = [l for l in doc["layers"] if l["id"] != g["id"]]
         self.assertFalse(any(l.get("parent") for l in EE.normalize(doc)["layers"]))
 
+    def test_layer_effects_light_rays_and_patch_cache(self):
+        EE = self.EE
+        photo = np.full((400, 600, 3), 0.5, np.float32)
+        full = [0.0, 0.0, 1.0, 1.0]
+        doc = EE.new_doc()
+        dot = EE.add_layer(doc, "paint", strokes=[{"c": "#ffffff", "r": 0.05, "h": 1.0, "o": 1.0,
+                                                   "pts": [[0.5, 0.5, 1.0]]}])
+        plain, _ = EE.compose(photo, doc, full)
+        # sombra paralela: con la luz a 0° (derecha) cae a la izquierda, oscura y fuera de la capa
+        dot["fx"] = {"shadow": {"on": True, "angle": 0, "distance": 5, "size": 0.3, "opacity": 100}}
+        out, _ = EE.compose(photo, doc, full)
+        self.assertLess(float(out[200, 250].mean()), 0.2)
+        self.assertTrue(np.allclose(out[200, 360], photo[200, 360], atol=1e-3))
+        self.assertGreater(float(out[200, 300].mean()), 0.95)  # la capa sigue encima de su sombra
+        # resplandor: aclara alrededor (no oscurece nunca)
+        dot["fx"] = {"glow": {"on": True, "color": "#ffffff", "size": 3, "opacity": 100}}
+        out, _ = EE.compose(photo, doc, full)
+        self.assertGreater(float(out[200, 345].mean()), 0.6)
+        self.assertTrue((out >= photo - 1e-5).all())
+        # desenfoque: el borde se vuelve suave; de movimiento: se estira en su dirección
+        dot["fx"] = {"blur": {"on": True, "amount": 1.0}}
+        out, _ = EE.compose(photo, doc, full)
+        mid = ((out[..., 0] > 0.55) & (out[..., 0] < 0.95)).sum()
+        mid0 = ((plain[..., 0] > 0.55) & (plain[..., 0] < 0.95)).sum()
+        self.assertGreater(mid, 5 * mid0)
+        dot["fx"] = {"motion": {"on": True, "amount": 10, "angle": 0}}
+        out, _ = EE.compose(photo, doc, full)
+        self.assertGreater(float(out[200, 350, 0]), 0.55)  # estirado a lo ancho…
+        self.assertLess(abs(float(out[150, 300, 0]) - 0.5), 0.02)  # …no a lo alto
+        dot["fx"] = {"glow": {"on": False}}
+        self.assertTrue(np.allclose(EE.compose(photo, doc, full)[0], plain))  # apagado: como sin efectos
+        # rayos de luz: aclaran (Trama), más cerca del foco y en el abanico hacia abajo
+        rays = EE.add_layer(doc, "rays", x=0.5, y=0.05, angle=90, spread=60, amount=80)
+        out, _ = EE.compose(photo, doc, full)
+        self.assertTrue((out >= photo - 1e-5).all())
+        self.assertGreater(float(out[60, 300].mean()), float(out[60, 30].mean()))  # fuera del abanico, menos
+        self.assertGreater(float(out[60, 300].mean()) - 0.5, float(out[390, 300].mean()) - 0.5)  # se apaga lejos
+        self.assertIn(rays["id"], EE.layer_boxes(doc, photo.shape, full))
+        # caché: repetir no recompone, y tocar la capa de arriba da lo mismo que componer desde cero
+        c = EE.Compositor()
+        c.render(photo, doc, full)
+        rays["amount"] = 40
+        self.assertTrue(np.allclose(c.render(photo, doc, full)[0], EE.compose(photo, doc, full)[0]))
+
     def test_ai_fill_uses_lama_restores_grain_and_falls_back(self):
         EE = self.EE
         rng = np.random.default_rng(3)
