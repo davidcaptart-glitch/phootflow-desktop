@@ -12,6 +12,7 @@ import json
 import os
 import queue
 import threading
+import time
 import uuid
 
 import cv2
@@ -45,11 +46,14 @@ TOOLS = [("move", "✥", "Mover: arrastra el texto, el logo o la imagen elegida;
          ("heal", "✚", "Pincel corrector puntual: pinta encima de granos, brillos o manchas (busca solo el parche)",
           "J", "retouch"),
          ("skin", "◐", "Pincel de máscara: pinta la máscara de la capa elegida, la Piel o la persona del Fondo (clic "
-                       "derecho o Alt: quita)", "B", "skin"),
+                       "derecho o Alt: quita)", "Shift+B", "skin"),
          ("clone", "◎", "Tampón de clonar: Alt+clic para elegir el origen y pinta donde quieras copiarlo", "S",
           "retouch"),
          ("fill", "▨", "Relleno según contenido con IA: pinta lo que quieras borrar (personas, objetos, cables, "
                        "carteles)", "G", "retouch"),
+         ("brush", "✎", "Pincel: pinta con el color frontal en una capa de pintura (Alt+clic toma el color; con "
+                       "tableta, la presión cambia el grosor)", "B", "paint"),
+         ("eraser", "⌫", "Borrador: borra lo pintado en la capa de pintura elegida", "E", "paint"),
          ("light", "☀", "Sobreexponer / subexponer: aclarar ojeras, blanquear dientes y ojos, oscurecer", "O", "light"),
          ("liquify", "〰", "Licuar: empujar, inflar o encoger", "Shift+Ctrl+X", "liquify"),
          ("type", "T", "Texto horizontal: clic en la foto para escribir", "T", None),
@@ -57,7 +61,7 @@ TOOLS = [("move", "✥", "Mover: arrastra el texto, el logo o la imagen elegida;
          ("zoom", "⌕", "Zoom: clic acerca, Alt+clic aleja", "", None)]
 # disposición de la barra en dos columnas (como PhotoCraft / Photoshop)
 TOOL_GRID = [("move", None), ("marquee", "lasso"), ("subject", "eyedrop"), ("heal", "skin"), ("clone", "fill"),
-             ("light", "liquify"), ("type", None), ("hand", "zoom")]
+             ("brush", "eraser"), ("light", "liquify"), ("type", None), ("hand", "zoom")]
 SELECT_TOOLS = ("marquee", "lasso", "subject")
 MOVABLE = ("text", "logo", "image")  # capas que se arrastran con Mover y tienen caja en la vista
 HANDLE_PX = 9  # radio de agarre de las esquinas de la transformación libre (píxeles de pantalla)
@@ -129,6 +133,24 @@ def tool_icon(key: str):
             blob.cubicTo(8, 21.5, 13, 19, 11.5, 12.5)
             p.setBrush(QColor(color))
             p.drawPath(blob)
+        elif key == "brush":  # pincel
+            p.drawLine(QPointF(20, 3), QPointF(12, 12))
+            p.drawLine(QPointF(21.5, 4.5), QPointF(13.5, 13.5))
+            tip = QPainterPath()
+            tip.moveTo(11.5, 11.5)
+            tip.cubicTo(7.5, 11, 5.5, 14.5, 6, 17.5)
+            tip.cubicTo(6.3, 19.5, 4.5, 20.5, 3, 21)
+            tip.cubicTo(9, 22, 14.5, 19.5, 14, 14)
+            tip.closeSubpath()
+            p.drawPath(tip)
+        elif key == "eraser":  # goma
+            p.translate(12, 12)
+            p.rotate(-40)
+            p.drawRoundedRect(QRectF(-9, -5, 18, 10), 2, 2)
+            p.drawLine(QPointF(-2, -5), QPointF(-2, 5))
+            p.resetTransform()
+            p.scale(44 / 24, 44 / 24)
+            p.drawLine(QPointF(4, 21), QPointF(20, 21))
         elif key == "light":  # ojo con brillo
             eye = QPainterPath()
             eye.moveTo(2.5, 12)
@@ -242,6 +264,8 @@ class EditCanvas(QWidget):
         self.box = None               # caja de la capa de texto/logo seleccionada (0..1)
         self.quad = None              # transformación libre: 4 esquinas (0..1) con asas
         self.on_enter = None          # Intro sobre el lienzo (terminar la transformación)
+        self.stroke_color = None      # color del trazo en curso (pincel); None = acento
+        self._pressure, self._p_t = 1.0, 0.0
         self.handler = None           # callback(tipo, x, y, evento) -> ¿consumido?
         self.space = False
         self.zoom_changed = None
@@ -301,6 +325,15 @@ class EditCanvas(QWidget):
         if steps and self.pm is not None:
             self.zoom.wheel(e.angleDelta().y(), e.position(), self._area(), self.pm.size())
             self._zoomed()
+
+    def tabletEvent(self, e):
+        """Tableta (Wacom…): se guarda la presión y se deja pasar como ratón."""
+        self._pressure, self._p_t = float(e.pressure()), time.monotonic()
+        e.ignore()
+
+    def pressure(self) -> float:
+        """Presión del lápiz (0..1) si llega de una tableta; con ratón, 1."""
+        return self._pressure if time.monotonic() - self._p_t < 0.2 else 1.0
 
     def mouseDoubleClickEvent(self, e):
         if self.handler and self.handler("dbl", *self.norm(e.position()), e):
@@ -427,8 +460,8 @@ class EditCanvas(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         sc = r.width() / max(1, self.pm.width())
         if self.stroke:
-            col = QColor(T.ACCENT)
-            col.setAlpha(80)
+            col = QColor(self.stroke_color or T.ACCENT)
+            col.setAlpha(150 if self.stroke_color else 80)
             pen = QPen(col, max(2.0, 2 * self.brush_px * sc), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             p.setPen(pen)
             pts = [self.to_view(x, y) for x, y in self.stroke]
@@ -533,9 +566,10 @@ class EditsView(QWidget):
         self.box = [0.0, 0.0, 1.0, 1.0]
         self.layer_id = None
         self.tool = "heal"
-        self.radius = {"heal": 14, "clone": 22, "fill": 30, "skin": 40, "light": 16, "liquify": 90}
-        self.hardness = {"clone": 50}
-        self.strength = {"light": 45, "liquify": 50}
+        self.radius = {"heal": 14, "clone": 22, "fill": 30, "skin": 40, "light": 16, "liquify": 90, "brush": 24,
+                       "eraser": 30}
+        self.hardness = {"clone": 50, "brush": 0, "eraser": 60}
+        self.strength = {"light": 45, "liquify": 50, "brush": 100, "eraser": 100}
         self.mode = {"light": "dodge", "liquify": "push"}
         self.clone_off = None       # desplazamiento del tampón (fracción ancho/alto) o None
         self.clone_pick = None      # origen elegido con Alt+clic (0..1 sin recortar)
@@ -622,7 +656,8 @@ class EditsView(QWidget):
                       (Qt.Key_Delete, self._delete_key), ("X", self.swatches.swap), ("D", self.swatches.reset),
                       ("Ctrl+]", lambda: self.move_layer(1)), ("Ctrl+[", lambda: self.move_layer(-1)),
                       ("Ctrl+T", self.free_transform), ("Ctrl+Alt+G", self.toggle_clip),
-                      ("Ctrl+N", self.new_canvas),
+                      ("Ctrl+N", self.new_canvas), ("Ctrl+G", self.group_layers),
+                      ("Ctrl+Shift+G", self.ungroup),
                       ("Escape", self.deselect)):
             QShortcut(QKeySequence(k), self, fn)
         for key, _, _, sc, _ in TOOLS:
@@ -743,9 +778,9 @@ class EditsView(QWidget):
                                 f"QPushButton#tool:checked {{ background: #3b3b3b; border: 1px solid #5a5a5a; }}")
                 b.clicked.connect(lambda _, k=key: self.set_tool(k))
                 g.addButton(b)
-                grid.addWidget(b, row + (row >= 1) + (row >= 5) + (row >= 7), col)
+                grid.addWidget(b, row + (row >= 1) + (row >= 5) + (row >= 8), col)
                 self.tool_btn[key] = b
-        for r in (1, 6, 9):  # separadores entre grupos (como en PhotoCraft)
+        for r in (1, 6, 10):  # separadores entre grupos (como en PhotoCraft)
             sep = QFrame()
             sep.setFixedHeight(9)
             sep.setStyleSheet(f"border-bottom: 1px solid {T.LINE}; margin: 0 6px 4px 6px;")
@@ -880,11 +915,14 @@ class EditsView(QWidget):
         for kind in ("retouch", "skin", "light", "liquify", "background", "text", "logo"):
             self._act(new, EE.KINDS[kind], lambda k=kind: self.add_layer(k))
         self._act(new, "Imagen…", self._pick_image)
+        self._act(new, "Pintura (pincel)", self.add_paint_layer)
         adj = c.addMenu("Nueva capa de ajuste")
         for k in A.ORDER:
             self._act(adj, A.ADJUSTMENTS[k][0] + "…", lambda k=k: self.add_adjust(k))
         c.addSeparator()
         self._act(c, "Duplicar capa", self.duplicate_layer, "Ctrl+J")
+        self._act(c, "Agrupar capas", self.group_layers, "Ctrl+G")
+        self._act(c, "Desagrupar", self.ungroup, "Mayús+Ctrl+G")
         self._act(c, "Eliminar capa", self.delete_layer)
         c.addSeparator()
         self._act(c, "Máscara de capa: de la selección", self.add_mask_from_selection)
@@ -937,6 +975,9 @@ class EditsView(QWidget):
         rows = [f"{sc or '—'}  ·  {tip.split(':')[0]}" for _, _, tip, sc, _ in TOOLS]
         rows += ["Ctrl+A / Ctrl+D / Mayús+Ctrl+I  ·  todo / deseleccionar / invertir",
                  "Mayús+Supr  ·  rellenar la selección según contenido", "Ctrl+J  ·  duplicar capa",
+                 "Ctrl+G / Mayús+Ctrl+G  ·  agrupar / desagrupar (Ctrl+clic en Capas: varias)",
+                 "Ctrl+T  ·  transformación libre", "Alt+Ctrl+G  ·  máscara de recorte",
+                 "Ctrl+N  ·  nuevo lienzo", "Ctrl+[ / Ctrl+]  ·  bajar / subir capa (entra y sale de grupos)",
                  "Ctrl+Z / Mayús+Ctrl+Z  ·  deshacer / rehacer", "[ ]  ·  tamaño del pincel",
                  "Rueda · Z · Ctrl+0 · Ctrl+1  ·  zoom", "Espacio + arrastrar  ·  mano",
                  "X / D  ·  intercambiar / restablecer colores", "\\ · Y  ·  antes / después"]
@@ -1172,6 +1213,7 @@ class EditsView(QWidget):
         self.layer_list.setItemDelegate(UI.LayersDelegate(self))
         self.layer_list.setStyleSheet(f"QListWidget#list {{ background: {T.SURFACE}; border: 1px solid {T.LINE}; }}")
         self.layer_list.currentRowChanged.connect(self._layer_selected)
+        self.layer_list.setSelectionMode(QAbstractItemView.ExtendedSelection)  # Ctrl/Mayús: varias (agrupar)
         lv.addWidget(self.layer_list, 1)
         icons = QHBoxLayout()
         icons.setSpacing(2)
@@ -1195,6 +1237,8 @@ class EditsView(QWidget):
         for kind in ("retouch", "skin", "light", "liquify", "background", "text", "logo"):
             mnew.addAction(EE.KINDS[kind], lambda k=kind: self.add_layer(k))
         mnew.addAction("Imagen… (o arrástrala desde el Explorador)", self._pick_image)
+        mnew.addAction("Pintura (pincel)", self.add_paint_layer)
+        mnew.addAction("Grupo (con las capas elegidas)", self.group_layers)
         mnew.addSeparator()
         mnew.addAction("Nuevo lienzo en blanco…", self.new_canvas)
         mnew.addAction("Quitar fondo (recortar a PNG)", self.remove_background)
@@ -1298,6 +1342,30 @@ class EditsView(QWidget):
         b.clicked.connect(lambda: self._pop_last("ops", "Quitar trazo"))
         lay.addWidget(b)
 
+        lay = page("paint")
+        lay.addWidget(self._label("Pincel (B): pinta con el color frontal (clic en el cuadro de color para "
+                                  "elegirlo, Alt+clic sobre la foto para tomarlo). Borrador (E): borra lo pintado. "
+                                  "Dureza baja = borde suave, para luces, sombras, niebla y brillos; prueba los modos "
+                                  "Trama, Superponer o Luz suave en Capas. Con tableta, la presión cambia el grosor."))
+        self.paint_info = self._label("")
+        lay.addWidget(self.paint_info)
+        b = _btn("Quitar el último trazo", "ghost")
+        b.clicked.connect(lambda: self._pop_last("strokes", "Quitar trazo"))
+        lay.addWidget(b)
+        b = _btn("Borrar todo lo pintado", "ghost")
+        b.clicked.connect(lambda: self._clear_list("strokes", "Borrar pintura"))
+        lay.addWidget(b)
+
+        lay = page("group")
+        self.group_info = self._label("")
+        lay.addWidget(self.group_info)
+        lay.addWidget(self._label("La visibilidad, la opacidad, el modo de fusión y la máscara del grupo se "
+                                  "aplican a todo lo de dentro. Mueve capas dentro o fuera con Ctrl+[ y Ctrl+]; "
+                                  "Ctrl+clic en Capas para elegir varias y Ctrl+G para agruparlas."))
+        b = _btn("Desagrupar (Mayús+Ctrl+G)", "ghost")
+        b.clicked.connect(self.ungroup)
+        lay.addWidget(b)
+
         lay = page("skin")
         self.skin_amount = SliderRow("amount", "Suavizado", 0, 100, 1, 55)
         self.skin_texture = SliderRow("texture", "Textura", 0, 100, 1, 45)
@@ -1308,7 +1376,7 @@ class EditsView(QWidget):
         lay.addWidget(self.skin_amount)
         lay.addWidget(self.skin_texture)
         lay.addWidget(self.skin_auto)
-        lay.addWidget(self._label("Con el pincel de Piel (B) añades zonas; con clic derecho o Alt las quitas. "
+        lay.addWidget(self._label("Con el pincel de Piel (Mayús+B) añades zonas; con clic derecho o Alt las quitas. "
                                   "Textura alta = se conservan los poros finos."))
         b = _btn("Borrar las zonas pintadas", "ghost")
         b.clicked.connect(lambda: self._clear_list("strokes", "Borrar zonas de piel"))
@@ -1378,7 +1446,7 @@ class EditsView(QWidget):
         lay.addWidget(self.bg_blur)
         lay.addWidget(self.bg_color)
         lay.addWidget(self._label("Si el recorte se equivoca (un cartel, un ramo, una letra), pinta con el pincel "
-                                  "de máscara (B) lo que es sujeto; con clic derecho, lo que es fondo. "
+                                  "de máscara (Mayús+B) lo que es sujeto; con clic derecho, lo que es fondo. "
                                   "«Transparente» se exporta en PNG o TIFF con transparencia."))
         b = _btn("Borrar las zonas pintadas", "ghost")
         b.clicked.connect(lambda: self._clear_list("strokes", "Borrar zonas del fondo"))
@@ -1493,6 +1561,8 @@ class EditsView(QWidget):
         if key in self.hardness:
             self.opt_hard.set_value(self.hardness[key])
         self.opt_str.setVisible(key in self.strength)
+        self.opt_str.lab.setText("Opacidad" if key in ("brush", "eraser") else "Fuerza")
+        self.canvas.stroke_color = self.swatches.fg if key == "brush" else None
         if key != "move":
             self._tf_on = False
         self._sync_quad()
@@ -1508,6 +1578,8 @@ class EditsView(QWidget):
             self.opt_mode.setCurrentIndex([k for k, _ in modes].index(self.mode[key]))
             self.opt_mode.blockSignals(False)
         self.opt_hint.setText({"clone": "Alt+clic: origen", "skin": "Clic derecho o Alt: quitar",
+                               "brush": "Alt+clic: tomar color · X: cambiar colores · [ ] tamaño",
+                               "eraser": "Borra en la capa de pintura elegida · [ ] tamaño",
                                "move": "Rueda: zoom · arrastrar: mano", "eyedrop": "Clic: color frontal",
                                "type": "Clic en la foto para escribir", "hand": "Arrastra para desplazar",
                                "zoom": "Clic acerca · Alt+clic aleja", "marquee": "", "lasso": "",
@@ -1520,7 +1592,7 @@ class EditsView(QWidget):
                               (Qt.PointingHandCursor if key in ("subject", "eyedrop") else
                                (Qt.IBeamCursor if key == "type" else Qt.CrossCursor)))
         # al elegir la herramienta se selecciona su capa (si existe)
-        kind = TOOL_LAYER.get(key)
+        kind = TOOL_LAYER.get(key) if key not in ("brush", "eraser") else None  # el pincel pinta en la elegida
         if key == "skin" and self._layer() and (self._layer()["kind"] == "background" or self._layer().get("mask")
                                                  or self._layer()["kind"] == "adjust"):
             kind = None  # el pincel de máscara sigue en la capa elegida (su máscara)
@@ -1652,6 +1724,8 @@ class EditsView(QWidget):
             return True
         if t in SELECT_TOOLS:
             return self._select_mouse(kind, x, y, xu, yu, e)
+        if t in ("brush", "eraser"):
+            return self._brush_mouse(kind, x, y, xu, yu, alt)
         if kind == "press":
             if t == "clone" and alt:
                 self.clone_pick, self.clone_off = (xu, yu), None
@@ -1682,6 +1756,74 @@ class EditsView(QWidget):
             return True
         return False
 
+    def _brush_mouse(self, kind, x, y, xu, yu, alt) -> bool:
+        if kind == "press" and alt and self.tool == "brush":  # Alt+clic: cuentagotas
+            if self._last_img is not None:
+                h, w = self._last_img.shape[:2]
+                px, py = int(min(max(x, 0), 1) * (w - 1)), int(min(max(y, 0), 1) * (h - 1))
+                c = self._last_img[max(0, py - 1):py + 2, max(0, px - 1):px + 2].reshape(-1, 3).mean(0)
+                self.swatches.fg = QColor(*[int(v * 255 + 0.5) for v in c])
+                self.swatches.update()
+                self.canvas.stroke_color = self.swatches.fg
+            return True
+        if kind == "press":
+            self.stroke_u = [(xu, yu)]
+            self.stroke_p = [self.canvas.pressure()]
+            self.canvas.stroke = [(x, y)]
+            self.canvas.update()
+            return True
+        if kind == "move" and self.stroke_u:
+            self.stroke_u.append((xu, yu))
+            self.stroke_p.append(self.canvas.pressure())
+            self.canvas.stroke.append((x, y))
+            return True
+        if kind == "release" and self.stroke_u:
+            self._commit_paint()
+            return True
+        return False
+
+    def _paint_target(self, create: bool):
+        sel = self._layer()
+        if sel and sel["kind"] == "paint":
+            return sel
+        if not create:
+            return None
+        n = 1 + sum(1 for l in self.doc["layers"] if l["kind"] == "paint")
+        lay = EE.add_layer(self.doc, "paint", above=sel["id"] if sel and sel["kind"] not in EE.OVERLAY else None)
+        lay["name"] = f"Pintura {n}"
+        self.layer_id = lay["id"]
+        return lay
+
+    def _commit_paint(self):
+        t = self.tool
+        pts_u, prs = self.stroke_u, getattr(self, "stroke_p", [1.0] * len(self.stroke_u))
+        self.stroke_u, self.stroke_p = [], []
+        self.canvas.stroke = []
+        lay = self._paint_target(create=(t == "brush"))
+        if lay is None:
+            self.status.setText("Borrador: elige en Capas la capa de pintura que quieres borrar.")
+            self.canvas.update()
+            return
+        h, w = self.base.shape[:2]
+        step = max(1.0, self.radius[t] / 6)
+        keep = [0]
+        for i in range(1, len(pts_u)):
+            a, b = pts_u[keep[-1]], pts_u[i]
+            if np.hypot((b[0] - a[0]) * w, (b[1] - a[1]) * h) >= step:
+                keep.append(i)
+        if len(pts_u) > 1 and keep[-1] != len(pts_u) - 1:
+            keep.append(len(pts_u) - 1)
+        pts = [[round(float(pts_u[i][0]), 5), round(float(pts_u[i][1]), 5),
+                round(float(prs[i] if i < len(prs) else 1.0), 3)] for i in keep]
+        st = {"r": round(self._r_norm(), 5), "h": self.hardness[t] / 100.0, "o": self.strength[t] / 100.0,
+              "pts": pts}
+        if t == "eraser":
+            st["erase"] = True
+        else:
+            st["c"] = self.swatches.fg.name()
+        lay["strokes"].append(st)
+        self._commit("Borrador" if t == "eraser" else "Pincel")
+
     def _commit_stroke(self):
         t = self.tool
         r = self._r_norm()
@@ -1691,7 +1833,7 @@ class EditsView(QWidget):
         self.canvas.stroke = []
         self.status.setText("")
         sel = self._layer()
-        if t == "skin" and sel and (sel.get("mask") or sel["kind"] in ("adjust", "image")):
+        if t == "skin" and sel and (sel.get("mask") or sel["kind"] in ("adjust", "image", "paint", "group")):
             # máscara de capa: blanco = se ve el efecto; clic derecho / Alt pinta negro (lo oculta)
             sel.setdefault("mask", {"shapes": [{"type": "all", "op": "add"}]})
             sign = -1 if getattr(self, "_erase", False) else 1
@@ -1831,8 +1973,9 @@ class EditsView(QWidget):
         pix = [l for l in self.doc["layers"] if l["kind"] not in EE.OVERLAY] if self.doc else []
         if lay not in pix:
             return None
+        pix = [l for l in pix if l.get("parent") == lay.get("parent") and l["kind"] != "group" or l is lay]
         for l in reversed(pix[:pix.index(lay)]):
-            if l["kind"] == "image" and not l.get("clip"):
+            if l["kind"] in EE.CLIP_BASES and not l.get("clip"):
                 return l
             if not (l.get("clip") and l["kind"] in EE.CLIPPABLE):
                 return None
@@ -1966,6 +2109,17 @@ class EditsView(QWidget):
         self.layer_id = lay["id"]
         return lay
 
+    def add_paint_layer(self):
+        if not self.doc:
+            return
+        sel = self._layer()
+        n = 1 + sum(1 for l in self.doc["layers"] if l["kind"] == "paint")
+        lay = EE.add_layer(self.doc, "paint", above=sel["id"] if sel and sel["kind"] not in EE.OVERLAY else None)
+        lay["name"] = f"Pintura {n}"
+        self.layer_id = lay["id"]
+        self.set_tool("brush")
+        self._commit("Nueva capa: pintura")
+
     def add_layer(self, kind):
         if not self.doc:
             return
@@ -1983,25 +2137,132 @@ class EditsView(QWidget):
             self.txt.setFocus()
             self.txt.selectAll()
 
+    # ---------------------------------------------------------- grupos
+    def _selected_ids(self) -> list:
+        ids = [it.data(ROLE) for it in self.layer_list.selectedItems() if it.data(ROLE)]
+        return ids or ([self.layer_id] if self.layer_id else [])
+
+    def group_layers(self):
+        """Ctrl+G: mete en un grupo nuevo las capas elegidas en Capas (Ctrl/Mayús+clic para elegir varias)."""
+        if not self.doc:
+            return
+        ids = set(self._selected_ids())
+        L = self.doc["layers"]
+        sel = [l for l in L if l["id"] in ids and l["kind"] not in EE.OVERLAY and l["kind"] != "group"]
+        for g in [l for l in L if l["id"] in ids and l["kind"] == "group"]:  # un grupo elegido: sus capas
+            sel += [l for l in L if l.get("parent") == g["id"] and l not in sel]
+        sel = [l for l in L if l in sel]
+        if not sel:
+            self.status.setText("Agrupar: elige en Capas una o varias capas (no texto ni logo).")
+            return
+        old_groups = {l["id"] for l in L if l["id"] in ids and l["kind"] == "group"}
+        top = max(L.index(l) for l in sel)
+        n = 1 + sum(1 for l in L if l["kind"] == "group")
+        g = EE.new_layer("group")
+        g["name"] = f"Grupo {n}"
+        rest = [l for l in L if l not in sel and l["id"] not in old_groups]
+        at = sum(1 for l in L[:top + 1] if l in rest)
+        for l in sel:
+            l["parent"] = g["id"]
+        self.doc["layers"] = rest[:at] + sel + [g] + rest[at:]
+        self.layer_id = g["id"]
+        self._commit(f"Agrupar {_count(len(sel), 'capa')}")
+
+    def ungroup(self):
+        lay = self._layer()
+        if not lay:
+            return
+        gid = lay["id"] if lay["kind"] == "group" else lay.get("parent")
+        if not gid:
+            self.status.setText("Desagrupar: elige un grupo (o una capa de dentro).")
+            return
+        for l in self.doc["layers"]:
+            if l.get("parent") == gid:
+                l.pop("parent")
+        self.doc["layers"] = [l for l in self.doc["layers"] if l["id"] != gid]
+        if self.layer_id == gid:
+            self.layer_id = self.doc["layers"][-1]["id"] if self.doc["layers"] else None
+        self._commit("Desagrupar")
+
+    def toggle_collapse(self, gid):
+        g = next((l for l in self.doc["layers"] if l["id"] == gid), None) if self.doc else None
+        if g is not None and g["kind"] == "group":
+            g["collapsed"] = not g.get("collapsed", False)
+            if g["collapsed"] and (self._layer() or {}).get("parent") == gid:
+                self.layer_id = gid
+            self._refresh_layers()
+            self._save_timer.start(500)
+
+    def _block(self, lay) -> list:
+        """La capa y, si es un grupo, también sus capas (lo que se mueve, borra o duplica junto)."""
+        if lay["kind"] == "group":
+            return [l for l in self.doc["layers"] if l.get("parent") == lay["id"]] + [lay]
+        return [lay]
+
     def delete_layer(self):
         lay = self._layer()
         if not lay:
             return
-        self.doc["layers"] = [l for l in self.doc["layers"] if l["id"] != lay["id"]]
+        gone = {l["id"] for l in self._block(lay)}
+        self.doc["layers"] = [l for l in self.doc["layers"] if l["id"] not in gone]
         self.layer_id = self.doc["layers"][-1]["id"] if self.doc["layers"] else None
         self._commit("Eliminar capa: " + lay["name"].lower())
 
     def move_layer(self, d):
-        """d = +1 sube (hacia el final de la lista del documento), -1 baja. Texto y logo siempre encima."""
+        """d = +1 sube (hacia el final de la lista del documento), -1 baja. Texto y logo siempre encima. Un
+        grupo se mueve entero; una capa entra en un grupo abierto que encuentra y sale de él por sus bordes."""
         lay = self._layer()
         if not lay:
             return
+        EE.normalize(self.doc)
         L = self.doc["layers"]
-        i = L.index(lay)
-        j = i + d
-        if j < 0 or j >= len(L) or (L[j]["kind"] in EE.OVERLAY) != (lay["kind"] in EE.OVERLAY):
-            return
-        L[i], L[j] = L[j], L[i]
+        if lay["kind"] in EE.OVERLAY:
+            i, j = L.index(lay), L.index(lay) + d
+            if j < 0 or j >= len(L) or L[j]["kind"] not in EE.OVERLAY:
+                return
+            L[i], L[j] = L[j], L[i]
+            return self._commit("Ordenar capas")
+        over = [l for l in L if l["kind"] in EE.OVERLAY]
+        pix = [l for l in L if l["kind"] not in EE.OVERLAY]
+        if lay.get("parent"):  # dentro de un grupo: entre sus hermanas, o sale por el borde
+            sib = [l for l in pix if l.get("parent") == lay["parent"]]
+            k = sib.index(lay) + d
+            if 0 <= k < len(sib):
+                a, b = pix.index(lay), pix.index(sib[k])
+                pix[a], pix[b] = pix[b], pix[a]
+            else:
+                gid = lay.pop("parent")
+                g = next((l for l in pix if l["id"] == gid), None)
+                pix.remove(lay)
+                kids = [l for l in pix if l.get("parent") == gid]
+                if g is None:
+                    pix.append(lay)
+                else:
+                    pix.insert(pix.index(g) + 1 if d > 0 else (pix.index(kids[0]) if kids else pix.index(g)), lay)
+        else:  # suelta o un grupo entero: salta la unidad de al lado (o entra en un grupo abierto)
+            units, seen = [], set()
+            for l in pix:
+                if l["id"] in seen:
+                    continue
+                if l.get("parent"):
+                    continue
+                blk = self._block(l)
+                seen.update(x["id"] for x in blk)
+                units.append(blk)
+            u = next(i for i, blk in enumerate(units) if lay in blk)
+            k = u + d
+            if k < 0 or k >= len(units):
+                return
+            nb = units[k]
+            if lay["kind"] != "group" and nb[-1]["kind"] == "group" and not nb[-1].get("collapsed"):
+                lay["parent"] = nb[-1]["id"]  # entra en el grupo abierto
+                units.pop(u)
+                k = units.index(nb)
+                units[k] = (nb[:-1] + [lay] + nb[-1:]) if d < 0 else ([lay] + nb)
+            else:
+                units[u], units[k] = units[k], units[u]
+            pix = [l for blk in units for l in blk]
+        self.doc["layers"] = pix + over
         self._commit("Ordenar capas")
 
     def _layer_info(self, l) -> dict:
@@ -2030,13 +2291,23 @@ class EditsView(QWidget):
                 thumb = self._thumbs[("glyph", l["kind"])] = UI._glyph_icon(l["kind"])
         if l.get("quad"):
             sub += " · transformada"
+        if l["kind"] == "paint":
+            sub = "Pintura · " + _count(len(l.get("strokes", [])), "trazo")
+        elif l["kind"] == "group":
+            sub = "Grupo · " + _count(sum(1 for x in self.doc["layers"] if x.get("parent") == l["id"]), "capa")
+            if l.get("opacity", 100) < 100:
+                sub += f" · {l['opacity']} %"
         return {"id": l["id"], "name": l["name"], "subtitle": sub, "visible": l.get("visible", True),
-                "thumb": thumb, "mask": bool(l.get("mask")), "clip": bool(l.get("clip"))}
+                "thumb": thumb, "mask": bool(l.get("mask")), "clip": bool(l.get("clip")),
+                "group": l["kind"] == "group", "collapsed": bool(l.get("collapsed")),
+                "indent": bool(l.get("parent"))}
 
     def _refresh_layers(self):
         self.layer_list.blockSignals(True)
         self.layer_list.clear()
-        layers = list(reversed(self.doc["layers"])) if self.doc else []
+        closed = {l["id"] for l in self.doc["layers"] if l["kind"] == "group" and l.get("collapsed")} \
+            if self.doc else set()
+        layers = [l for l in reversed(self.doc["layers"]) if l.get("parent") not in closed] if self.doc else []
         for l in layers:
             it = QListWidgetItem()
             it.setData(UI.ROLE_LAYER, self._layer_info(l))
@@ -2120,6 +2391,11 @@ class EditsView(QWidget):
             self.retouch_info.setText(_count(len(lay["ops"]), "retoque") + " en esta capa.")
         elif kind == "light":
             self.light_info.setText(_count(len(lay["strokes"]), "trazo") + " en esta capa.")
+        elif kind == "paint":
+            self.paint_info.setText(_count(len(lay.get("strokes", [])), "trazo") + " en esta capa.")
+        elif kind == "group":
+            n = sum(1 for x in self.doc["layers"] if x.get("parent") == lay["id"])
+            self.group_info.setText(_count(n, "capa") + " dentro.")
         elif kind == "liquify":
             self.liq_info.setText(_count(len(lay["strokes"]), "trazo") + " en esta capa.")
         elif kind == "skin":
@@ -2258,7 +2534,7 @@ class EditsView(QWidget):
             sel["cut"] = cut
             self._commit("Quitar fondo: " + sel["name"].lower())
             self.status.setText("Fondo quitado (" + EE.CUTS[cut].lower() + "). Si no acierta, cambia el modo en "
-                                "Propiedades o pinta su máscara con el pincel de máscara (B).")
+                                "Propiedades o pinta su máscara con el pincel de máscara (Mayús+B).")
             return
         lay = next((l for l in self.doc["layers"] if l["kind"] == "background"), None)
         if lay is None:
@@ -2463,11 +2739,18 @@ class EditsView(QWidget):
         lay = self._layer()
         if not lay:
             return
-        dup = copy.deepcopy(lay)
-        dup["id"] = uuid.uuid4().hex[:8]
+        blk = self._block(lay)
+        dups = copy.deepcopy(blk)
+        new_gid = uuid.uuid4().hex[:8]
+        for dl in dups:
+            dl["id"] = new_gid if dl["kind"] == "group" else uuid.uuid4().hex[:8]
+            if lay["kind"] == "group" and dl.get("parent") == lay["id"]:
+                dl["parent"] = new_gid
+        dup = dups[-1]
         dup["name"] = lay["name"] + " copia"
         L = self.doc["layers"]
-        L.insert(L.index(lay) + 1, dup)
+        at = L.index(lay) + 1
+        self.doc["layers"] = L[:at] + dups + L[at:]
         self.layer_id = dup["id"]
         self._adj_key = None
         self._commit("Duplicar capa")
@@ -2543,6 +2826,7 @@ class EditsView(QWidget):
     def _commit(self, label):
         if not self.doc:
             return
+        EE.normalize(self.doc)
         self.hist = self.hist[:self.hpos + 1] + [(label, EE.snapshot(self.doc))]
         if len(self.hist) > 80:
             self.hist = [self.hist[0]] + self.hist[-79:]

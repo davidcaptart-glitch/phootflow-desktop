@@ -96,6 +96,16 @@ def _glyph_icon(kind: str, size=THUMB) -> QPixmap:
         path.closeSubpath()
         p.setBrush(QColor("#d8d8d8"))
         p.drawPath(path)
+    elif kind == "group":  # carpeta
+        path = QPainterPath()
+        path.moveTo(c.x() - 10, c.y() - 6)
+        path.lineTo(c.x() - 3, c.y() - 6)
+        path.lineTo(c.x() - 1, c.y() - 3.5)
+        path.lineTo(c.x() + 10, c.y() - 3.5)
+        path.lineTo(c.x() + 10, c.y() + 7)
+        path.lineTo(c.x() - 10, c.y() + 7)
+        path.closeSubpath()
+        p.drawPath(path)
     elif kind == "text":
         f = QFont("Georgia")
         f.setPixelSize(int(size * 0.62))
@@ -103,7 +113,7 @@ def _glyph_icon(kind: str, size=THUMB) -> QPixmap:
         p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, "T")
     else:
         glyph = {"retouch": "✚", "skin": "◐", "light": "◉", "liquify": "≈", "background": "◫",
-                 "logo": "◆", "image": "▣"}.get(kind, "■")
+                 "logo": "◆", "image": "▣", "paint": "✎"}.get(kind, "■")
         f = QFont(p.font())
         f.setPixelSize(int(size * 0.5))
         p.setFont(f)
@@ -139,6 +149,10 @@ def np_thumb(rgb01: np.ndarray, size=THUMB) -> QPixmap:
     return QPixmap.fromImage(QImage(a.data, a.shape[1], a.shape[0], 3 * a.shape[1], QImage.Format_RGB888).copy())
 
 
+def d_group(idx) -> bool:
+    return bool((idx.data(ROLE_LAYER) or {}).get("group"))
+
+
 class LayersDelegate(QStyledItemDelegate):
     """Fila de capa: ojo · miniatura (· máscara) · nombre y tipo (como PhotoCraft). El ojo es clicable."""
 
@@ -172,6 +186,16 @@ class LayersDelegate(QStyledItemDelegate):
             p.setBrush(Qt.NoBrush)
         # miniatura (y máscara)
         x = r.x() + EYE_W
+        if d.get("indent"):  # dentro de un grupo
+            x += 14
+        if d.get("group"):  # triángulo para abrir o cerrar el grupo
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#cfcfcf"))
+            cy = r.y() + r.height() / 2
+            tri = [QPointF(x + 2, cy - 4), QPointF(x + 9, cy - 4), QPointF(x + 5.5, cy + 2)]                 if not d.get("collapsed") else [QPointF(x + 3, cy - 5), QPointF(x + 3, cy + 3), QPointF(x + 8.5, cy - 1)]
+            p.drawPolygon(QPolygonF(tri))
+            p.setBrush(Qt.NoBrush)
+            x += 13
         if d.get("clip"):  # recortada a la imagen de debajo: sangría y flecha, como en Photoshop
             p.setPen(QPen(QColor("#bdbdbd"), 1.4))
             cy = r.y() + r.height() / 2
@@ -221,6 +245,9 @@ class LayersDelegate(QStyledItemDelegate):
 
     def editorEvent(self, event, model, opt, idx):
         from PySide6.QtCore import QEvent
+        if event.type() == QEvent.MouseButtonRelease and d_group(idx) and                 EYE_W <= event.position().x() - opt.rect.x() < EYE_W + 13:
+            self.view.toggle_collapse((idx.data(ROLE_LAYER) or {})["id"])
+            return True
         if event.type() == QEvent.MouseButtonRelease and event.position().x() - opt.rect.x() < EYE_W:
             d = idx.data(ROLE_LAYER) or {}
             if d.get("id") and not d.get("background_row"):

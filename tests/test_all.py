@@ -669,6 +669,66 @@ class Edits(unittest.TestCase):
         self.assertEqual(len(EE.list_canvases(d)), 2)
         self.assertTrue(all(not ph.path.startswith(EE.canvases_dir(d)) for ph in E.list_photos(d)))
 
+    def test_paint_layers_pressure_eraser_and_groups(self):
+        EE = self.EE
+        photo = np.full((400, 600, 3), 0.2, np.float32)
+        full = [0.0, 0.0, 1.0, 1.0]
+        doc = EE.new_doc()
+        lay = EE.add_layer(doc, "paint")
+        self.assertTrue(np.allclose(EE.compose(photo, doc, full)[0], photo))  # vacía: no hace nada
+        hard = {"c": "#ff0000", "r": 0.03, "h": 1.0, "o": 1.0, "pts": [[0.2, 0.5, 1.0], [0.8, 0.5, 1.0]]}
+        lay["strokes"].append(hard)
+        out, _ = EE.compose(photo, doc, full)
+        self.assertGreater(float(out[200, 300, 0]), 0.95)  # pintado de rojo
+        self.assertTrue(np.allclose(out[50, 300], photo[50, 300]))  # lejos, nada
+        # presión: con poca presión el trazo es más fino
+        thin = dict(hard, pts=[[0.2, 0.3, 0.2], [0.8, 0.3, 0.2]])
+        a_thin = EE._stroke_alpha(400, 600, thin)[0]
+        a_full = EE._stroke_alpha(400, 600, dict(hard, pts=[[0.2, 0.3, 1.0], [0.8, 0.3, 1.0]]))[0]
+        self.assertLess(float((a_thin > 0.5).sum()), 0.4 * float((a_full > 0.5).sum()))
+        # opacidad del trazo y borde suave
+        soft = EE._stroke_alpha(400, 600, dict(hard, h=0.0, o=0.5, pts=[[0.5, 0.5, 1.0]]))
+        a, x0, y0 = soft
+        self.assertAlmostEqual(float(a.max()), 0.5, delta=0.03)
+        self.assertGreater(((a > 0.05) & (a < 0.45)).sum(), 50)
+        # borrador: quita lo pintado
+        lay["strokes"].append({"r": 0.05, "h": 1.0, "o": 1.0, "erase": True, "pts": [[0.5, 0.5, 1.0]]})
+        out, _ = EE.compose(photo, doc, full)
+        self.assertTrue(np.allclose(out[200, 300], photo[200, 300], atol=1e-4))
+        self.assertGreater(float(out[200, 150, 0]), 0.95)
+        # la caché incremental da lo mismo que pintar desde cero
+        EE._PAINT_CACHE.clear()
+        self.assertTrue(np.allclose(EE.compose(photo, doc, full)[0], out, atol=1e-5))
+        # pintura recortada a otra pintura: solo dentro
+        top = EE.add_layer(doc, "paint", above=lay["id"], clip=True,
+                           strokes=[{"c": "#00ff00", "r": 0.4, "h": 1.0, "o": 1.0, "pts": [[0.5, 0.5, 1.0]]}])
+        out, _ = EE.compose(photo, doc, full)
+        self.assertGreater(float(out[200, 150, 1]), 0.95)  # verde donde había rojo
+        self.assertTrue(np.allclose(out[100, 300], photo[100, 300], atol=1e-4))  # fuera de la base, nada
+        # grupo: opacidad, ocultar y máscara aplican a todo lo de dentro
+        g = EE.add_layer(doc, "group", above=top["id"])
+        lay["parent"] = top["parent"] = g["id"]
+        inv = EE.add_layer(doc, "adjust", above=top["id"], adj="invert")
+        self.assertEqual(inv.get("parent"), g["id"])  # encima de una capa del grupo: dentro
+        out, _ = EE.compose(photo, doc, full)
+        self.assertAlmostEqual(float(out[50, 50, 0]), 0.8, delta=1e-4)  # el ajuste del grupo invierte la foto
+        g["opacity"] = 50
+        out, _ = EE.compose(photo, doc, full)
+        self.assertAlmostEqual(float(out[50, 50, 0]), 0.5, delta=1e-3)
+        g["opacity"], g["visible"] = 100, False
+        self.assertTrue(np.allclose(EE.compose(photo, doc, full)[0], photo))
+        g["visible"] = True
+        g["mask"] = {"shapes": [{"type": "rect", "box": [0.0, 0.0, 0.5, 1.0], "op": "add"}]}
+        out, _ = EE.compose(photo, doc, full)
+        self.assertAlmostEqual(float(out[50, 50, 0]), 0.8, delta=1e-4)
+        self.assertTrue(np.allclose(out[50, 550], photo[50, 550]))
+        c = EE.Compositor()
+        self.assertTrue(np.allclose(c.render(photo, doc, full)[0], EE.compose(photo, doc, full)[0]))
+        self.assertTrue(np.allclose(c.render(photo, doc, full)[0], EE.compose(photo, doc, full)[0]))
+        # borrar el grupo deja sus capas sueltas (sin padre)
+        doc["layers"] = [l for l in doc["layers"] if l["id"] != g["id"]]
+        self.assertFalse(any(l.get("parent") for l in EE.normalize(doc)["layers"]))
+
     def test_ai_fill_uses_lama_restores_grain_and_falls_back(self):
         EE = self.EE
         rng = np.random.default_rng(3)
