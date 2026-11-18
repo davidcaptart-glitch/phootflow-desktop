@@ -20,10 +20,14 @@ resolución (vista de 2048 px o exportación a tamaño completo):
                mandan sobre posición, tamaño y giro. Va en su sitio de la pila: los ajustes de encima la afectan.
   "paint"      strokes: [{"c": "#rrggbb", "r", "h" (dureza 0..1), "o" (opacidad 0..1), "erase": bool,
                "pts": [[x, y, presión], ...]}]: pincel y borrador (la presión de la tableta cambia el grosor).
+  "rays"       rayos de luz: x, y (0..1 del encuadre, el foco), color, amount, length, spread, angle, count,
+               seed; se suman a la imagen en modo Trama.
   "group"      grupo de capas: las capas con "parent": id del grupo se componen juntas y el grupo les aplica su
                visibilidad, opacidad, modo de fusión y máscara. En la lista, el grupo va encima de sus capas.
   Una capa de ajuste, imagen o pintura con "clip": True se recorta a la imagen o pintura de debajo (máscara de
   recorte): un ajuste así solo cambia esa capa, y una imagen o pintura así solo se ve dentro de ella.
+  Las imágenes y pinturas aceptan efectos de capa en "fx": {"shadow": {...}, "glow": {...}, "blur": {...},
+  "motion": {...}} (cada uno con "on"); ver FX_DEFAULTS.
 - Capas superpuestas (siempre encima y sobre la foto ya recortada): "text" y "logo".
 
 Las posiciones de las capas de imagen (x, y, quad) son 0..1 del encuadre (la foto recortada), como el texto;
@@ -49,14 +53,20 @@ import studio_engine as SE
 DOC_VERSION = 1
 KINDS = {"liquify": "Licuar", "retouch": "Retoque", "skin": "Piel", "light": "Ojos y luz",
          "background": "Fondo", "text": "Texto", "logo": "Logo", "image": "Imagen", "adjust": "Ajuste",
-         "paint": "Pintura", "group": "Grupo"}
+         "paint": "Pintura", "group": "Grupo", "rays": "Rayos de luz"}
 OVERLAY = ("text", "logo")
 CLIPPABLE = ("adjust", "image", "paint")  # lo que puede ir recortado a una imagen o pintura
 CLIP_BASES = ("image", "paint")  # capas con píxeles propios: base de una máscara de recorte
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp")
 CUTS = {"none": "No quitar el fondo", "color": "Logo o fondo liso (por color)",
         "object": "Objeto o producto (automático)", "person": "Persona (IA)"}
-PIXEL_ORDER = ("liquify", "retouch", "skin", "light", "background", "adjust", "image", "paint", "group")  # orden por defecto al crear capas
+PIXEL_ORDER = ("liquify", "retouch", "skin", "light", "background", "adjust", "image", "paint", "rays", "group")
+# efectos de capa (imagen y pintura). Tamaños y distancias en % del lado largo; ángulos en grados
+FX_DEFAULTS = {"shadow": {"on": False, "color": "#000000", "opacity": 60, "angle": 120, "distance": 1.0,
+                          "size": 1.5},
+               "glow": {"on": False, "color": "#ffd890", "opacity": 70, "size": 3.0},
+               "blur": {"on": False, "amount": 0.4},
+               "motion": {"on": False, "amount": 2.0, "angle": 0}}  # orden por defecto al crear capas
 ANCHORS = {"lt": (0, 0), "mt": (0.5, 0), "rt": (1, 0), "lm": (0, 0.5), "mm": (0.5, 0.5), "rm": (1, 0.5),
            "lb": (0, 1), "mb": (0.5, 1), "rb": (1, 1)}
 FORMATS = {"jpg": "JPG", "tif": "TIFF 16 bits", "png": "PNG (con transparencia)"}
@@ -82,7 +92,9 @@ def new_layer(kind: str, **kw) -> dict:
                        flip=False),
          "adjust": dict(adj="curves", p={}),
          "paint": dict(strokes=[]),
-         "group": dict(collapsed=False)}[kind]
+         "group": dict(collapsed=False),
+         "rays": dict(x=0.5, y=0.15, color="#fff1cf", amount=60, length=70, spread=70, angle=90, count=24,
+                      seed=7)}[kind]
     p.update(kw)
     lay = {"id": uuid.uuid4().hex[:8], "kind": kind, "name": KINDS[kind], "visible": True, "opacity": 100,
            "blend": "normal", **p}
@@ -974,10 +986,11 @@ def _cutout(path: str, cut: str, tol: float):
     return im
 
 
-def image_rgba(shape, lay: dict, frame=None) -> tuple[np.ndarray, tuple] | None:
-    """Capa de logo o de imagen (arrastrada desde el Explorador): recorte de fondo, tamaño, giro, volteo y
-    transformación libre. `frame` = (x, y, ancho, alto) en píxeles del encuadre dentro de `shape` (por defecto,
-    toda la imagen): posiciones y tamaños se miden sobre él."""
+def image_patch(shape, lay: dict, frame=None):
+    """Capa de logo o de imagen (arrastrada desde el Explorador) solo en su caja: recorte de fondo, tamaño, giro,
+    volteo y transformación libre. `frame` = (x, y, ancho, alto) en píxeles del encuadre dentro de `shape` (por
+    defecto, toda la imagen): posiciones y tamaños se miden sobre él.
+    Devuelve (RGBA float del trozo visible, x0, y0 del trozo, caja completa (x0, y0, x1, y1)) o None."""
     from PIL import Image
     p = lay.get("path") or ""
     if not os.path.isfile(p):
@@ -989,7 +1002,7 @@ def image_rgba(shape, lay: dict, frame=None) -> tuple[np.ndarray, tuple] | None:
     H, W = shape[:2]
     fx, fy, fw, fh = frame if frame is not None else (0, 0, W, H)
     if lay.get("quad"):
-        return _warp_rgba(im, (H, W), [(fx + qx * fw, fy + qy * fh) for qx, qy in lay["quad"]], lay.get("flip"))
+        return _warp_patch(im, (H, W), [(fx + qx * fw, fy + qy * fh) for qx, qy in lay["quad"]], lay.get("flip"))
     tw = max(4, int(round(float(lay.get("width", 16)) / 100.0 * fw)))
     th = max(1, int(round(im.height * tw / im.width)))
     im = im.resize((tw, th), Image.LANCZOS)
@@ -1000,15 +1013,34 @@ def image_rgba(shape, lay: dict, frame=None) -> tuple[np.ndarray, tuple] | None:
         tw, th = im.size
     x, y = _place(fw, fh, tw, th, lay)
     x, y = x + int(fx), y + int(fy)
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    layer.paste(im, (x, y), im)
-    return np.asarray(layer, np.float32) / 255.0, (x, y, x + tw, y + th)
+    arr = np.asarray(im, np.float32) / 255.0
+    x0, y0, x1, y1 = max(0, x), max(0, y), min(W, x + tw), min(H, y + th)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return np.ascontiguousarray(arr[y0 - y:y1 - y, x0 - x:x1 - x]), x0, y0, (x, y, x + tw, y + th)
 
 
-def _warp_rgba(im, shape, quad, flip=False):
-    """La imagen (PIL RGBA) deformada en perspectiva hasta las 4 esquinas `quad` (píxeles de `shape`)."""
+def image_rgba(shape, lay: dict, frame=None) -> tuple[np.ndarray, tuple] | None:
+    """La capa de imagen en un RGBA del tamaño de `shape` y su caja completa (x0, y0, x1, y1) en píxeles."""
+    r = image_patch(shape, lay, frame)
+    if r is None:
+        return None
+    patch, x0, y0, box = r
+    out = np.zeros((shape[0], shape[1], 4), np.float32)
+    out[y0:y0 + patch.shape[0], x0:x0 + patch.shape[1]] = patch
+    return out, box
+
+
+def _warp_patch(im, shape, quad, flip=False):
+    """La imagen (PIL RGBA) deformada en perspectiva hasta las 4 esquinas `quad` (píxeles de `shape`), solo en
+    la caja de las esquinas. Mismo formato que `image_patch`."""
     H, W = shape
     q = np.float32(quad)
+    bx0, by0 = np.floor(q.min(0)).astype(int)
+    bx1, by1 = np.ceil(q.max(0)).astype(int)
+    x0, y0, x1, y1 = max(0, int(bx0)), max(0, int(by0)), min(W, int(bx1) + 1), min(H, int(by1) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return None
     # se reduce antes al tamaño de destino (sin dientes de sierra al encoger) y se deforma premultiplicada
     side = max(np.linalg.norm(q[1] - q[0]), np.linalg.norm(q[2] - q[3]), 4.0)
     f = min(1.0, side / im.width)
@@ -1019,14 +1051,23 @@ def _warp_rgba(im, shape, quad, flip=False):
         arr = arr[:, ::-1]
     h, w = arr.shape[:2]
     pre = np.ascontiguousarray(np.dstack([arr[..., :3] * arr[..., 3:4], arr[..., 3]]))
-    M = cv2.getPerspectiveTransform(np.float32([[0, 0], [w, 0], [w, h], [0, h]]), q)
-    out = cv2.warpPerspective(pre, M, (W, H), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+    M = cv2.getPerspectiveTransform(np.float32([[0, 0], [w, 0], [w, h], [0, h]]), q - np.float32([x0, y0]))
+    out = cv2.warpPerspective(pre, M, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
                               borderValue=(0, 0, 0, 0))
     a = out[..., 3:4]
     out[..., :3] = np.where(a > 1e-4, out[..., :3] / np.maximum(a, 1e-4), 0)
-    x0, y0 = np.floor(q.min(0)).astype(int)
-    x1, y1 = np.ceil(q.max(0)).astype(int)
-    return np.clip(out, 0, 1).astype(np.float32), (int(x0), int(y0), int(x1), int(y1))
+    return np.clip(out, 0, 1).astype(np.float32), x0, y0, (int(bx0), int(by0), int(bx1), int(by1))
+
+
+def _warp_rgba(im, shape, quad, flip=False):
+    r = _warp_patch(im, shape, quad, flip)
+    H, W = shape
+    out = np.zeros((H, W, 4), np.float32)
+    if r is None:
+        return out, tuple(int(v) for v in (*np.float32(quad).min(0), *np.float32(quad).max(0)))
+    patch, x0, y0, box = r
+    out[y0:y0 + patch.shape[0], x0:x0 + patch.shape[1]] = patch
+    return out, box
 
 
 def image_quad(shape, lay: dict) -> list:
@@ -1087,7 +1128,7 @@ def _layer_active(l: dict) -> bool:
             "light": bool(l.get("strokes")), "background": True,
             "text": bool(str(l.get("text", "")).strip()), "logo": bool(l.get("path")),
             "image": bool(l.get("path")), "adjust": True, "paint": bool(l.get("strokes")),
-            "group": True}.get(k, False)
+            "group": True, "rays": l.get("amount", 0) > 0}.get(k, False)
 
 
 # ------------------------------------------------------------------ pintura (pincel y borrador)
@@ -1171,6 +1212,25 @@ def paint_rgba(shape, lay: dict) -> np.ndarray | None:
     return np.clip(out, 0, 1)
 
 
+def paint_patch(shape, lay: dict):
+    """La pintura solo en la caja de lo pintado: (RGBA, x0, y0, caja) o None."""
+    full = paint_rgba(shape, lay)
+    if full is None:
+        return None
+    ys, xs = np.nonzero(full[::4, ::4, 3] > 0)
+    if not len(xs):
+        return None
+    H, W = shape[:2]
+    x0, y0 = max(0, int(xs.min()) * 4 - 4), max(0, int(ys.min()) * 4 - 4)
+    x1, y1 = min(W, int(xs.max()) * 4 + 8), min(H, int(ys.max()) * 4 + 8)
+    return np.ascontiguousarray(full[y0:y1, x0:x1]), x0, y0, (x0, y0, x1, y1)
+
+
+def layer_patch(shape, lay: dict, frame=None):
+    """Píxeles propios de una capa de imagen o de pintura, solo en su caja: (RGBA, x0, y0, caja) o None."""
+    return paint_patch(shape, lay) if lay["kind"] == "paint" else image_patch(shape, lay, frame)
+
+
 def layer_rgba(shape, lay: dict, frame=None) -> np.ndarray | None:
     """Píxeles propios de una capa de imagen o de pintura (RGBA del tamaño de `shape`)."""
     if lay["kind"] == "paint":
@@ -1186,21 +1246,114 @@ def _frame(shape, box) -> tuple:
     return int(x0 * ww), int(y0 * hh), max(1, int(x1 * ww) - int(x0 * ww)), max(1, int(y1 * hh) - int(y0 * hh))
 
 
-def _layer_alpha(img, lay, rgba, key):
-    """Alfa de una capa de imagen: el suyo, por la opacidad y por su máscara de capa (si la tiene)."""
+def _layer_alpha(img, lay, rgba, key, sl=None):
+    """Alfa de una capa de imagen: el suyo, por la opacidad y por su máscara de capa (si la tiene). `sl`: el
+    trozo de la imagen al que corresponde `rgba`."""
     a = rgba[..., 3] * (float(lay.get("opacity", 100)) / 100.0)
     if lay.get("mask"):
-        a = a * selection_mask(img.shape, lay["mask"], img, key)
+        m = selection_mask(img.shape, lay["mask"], img, key)
+        a = a * (m[sl] if sl is not None else m)
     return a.astype(np.float32)
 
 
+def fx_of(lay: dict) -> dict:
+    """Los efectos activos de una capa, completados con los valores por defecto."""
+    out = {}
+    for k, v in (lay.get("fx") or {}).items():
+        if k in FX_DEFAULTS and v and v.get("on"):
+            out[k] = dict(FX_DEFAULTS[k], **v)
+    return out
+
+
+def _fx_margin(fx: dict, side: int) -> int:
+    """Cuánto pueden salirse los efectos de la caja de la capa (píxeles)."""
+    m = 0.0
+    if "shadow" in fx:
+        m = max(m, (fx["shadow"]["distance"] + 3 * fx["shadow"]["size"]) / 100 * side)
+    if "glow" in fx:
+        m = max(m, 3 * fx["glow"]["size"] / 100 * side)
+    if "blur" in fx:
+        m = max(m, 3 * fx["blur"]["amount"] / 100 * side)
+    if "motion" in fx:
+        m = max(m, fx["motion"]["amount"] / 100 * side)
+    return int(m) + 2
+
+
+def _motion_kernel(length: float, angle: float) -> np.ndarray:
+    n = max(3, int(length) | 1)
+    k = np.zeros((n, n), np.float32)
+    c = n // 2
+    a = np.deg2rad(angle)
+    cv2.line(k, (int(round(c - np.cos(a) * c)), int(round(c + np.sin(a) * c))),
+             (int(round(c + np.cos(a) * c)), int(round(c - np.sin(a) * c))), 1.0, 1, cv2.LINE_AA)
+    return k / max(1e-6, k.sum())
+
+
+def _fx_blur(rgb, a, fx, side):
+    """Desenfoque gaussiano y de movimiento de la propia capa (premultiplicado: sin halos oscuros)."""
+    if "blur" not in fx and "motion" not in fx:
+        return rgb, a
+    pre = np.dstack([rgb * a[..., None], a])
+    if "blur" in fx:
+        pre = cv2.GaussianBlur(pre, (0, 0), max(0.3, fx["blur"]["amount"] / 100 * side))
+    if "motion" in fx:
+        pre = cv2.filter2D(pre, -1, _motion_kernel(fx["motion"]["amount"] / 100 * side, fx["motion"]["angle"]))
+    a = np.clip(pre[..., 3], 0, 1)
+    rgb = np.where(a[..., None] > 1e-5, pre[..., :3] / np.maximum(a[..., None], 1e-5), 0)
+    return np.clip(rgb, 0, 1).astype(np.float32), a.astype(np.float32)
+
+
+def _fx_under(sub, a, fx, side, o):
+    """Sombra paralela y resplandor exterior, por debajo de la capa (con la opacidad de la capa)."""
+    if "shadow" in fx:
+        f = fx["shadow"]
+        d = f["distance"] / 100 * side
+        ang = np.deg2rad(f["angle"])
+        M = np.float32([[1, 0, -np.cos(ang) * d], [0, 1, np.sin(ang) * d]])  # luz desde `angle`: sombra opuesta
+        sh = cv2.warpAffine(a, M, (a.shape[1], a.shape[0]), borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        if f["size"] > 0:
+            sh = cv2.GaussianBlur(sh, (0, 0), max(0.3, f["size"] / 100 * side))
+        sh = (sh * f["opacity"] / 100 * o)[..., None]
+        sub = sub * (1 - sh) + _hex(f["color"]) * sh
+    if "glow" in fx:
+        f = fx["glow"]
+        g = cv2.GaussianBlur(a, (0, 0), max(0.3, f["size"] / 100 * side))
+        g = np.clip(g * 1.6, 0, 1)
+        g = (g * f["opacity"] / 100 * o)[..., None]
+        sub = 1 - (1 - sub) * (1 - _hex(f["color"]) * g)  # Trama: solo aclara
+    return sub
+
+
+def _embed(rc, cx0, cy0, x0, y0, h, w):
+    """Pega el trozo `rc` (en cx0, cy0 de la imagen) en un trozo vacío de h × w que empieza en x0, y0."""
+    out = np.zeros((h, w, 4), np.float32)
+    ax0, ay0 = max(x0, cx0), max(y0, cy0)
+    ax1, ay1 = min(x0 + w, cx0 + rc.shape[1]), min(y0 + h, cy0 + rc.shape[0])
+    if ax1 > ax0 and ay1 > ay0:
+        out[ay0 - y0:ay1 - y0, ax0 - x0:ax1 - x0] = rc[ay0 - cy0:ay1 - cy0, ax0 - cx0:ax1 - cx0]
+    return out
+
+
 def apply_image_group(img: np.ndarray, base: dict, clipped: list, frame, key: str = ""):
-    """Capa de imagen `base` con las capas recortadas a ella (`clipped`, de abajo arriba), compuesta sobre
-    `img`. Devuelve (imagen, alfa de la capa | None si no hay imagen)."""
+    """Capa de imagen o pintura `base` con las capas recortadas a ella (`clipped`, de abajo arriba) y sus efectos,
+    compuesta sobre `img`. Solo se trabaja en la caja de la capa (más lo que se salgan los efectos).
+    Devuelve (imagen, (alfa del trozo, trozo) | None si no hay nada)."""
     import edits_adjust as A
-    rgba = layer_rgba(img.shape, base, frame)
-    if rgba is None:
+    pb = layer_patch(img.shape, base, frame)
+    if pb is None:
         return img, None
+    rgba, x0, y0, _ = pb
+    H, W = img.shape[:2]
+    side = max(H, W)
+    fx = fx_of(base)
+    if fx:  # los efectos se salen de la caja: se amplía el trozo
+        m = _fx_margin(fx, side)
+        nx0, ny0 = max(0, x0 - m), max(0, y0 - m)
+        nx1, ny1 = min(W, x0 + rgba.shape[1] + m), min(H, y0 + rgba.shape[0] + m)
+        rgba = _embed(rgba, x0, y0, nx0, ny0, ny1 - ny0, nx1 - nx0)
+        x0, y0 = nx0, ny0
+    h, w = rgba.shape[:2]
+    sl = (slice(y0, y0 + h), slice(x0, x0 + w))
     rgb = np.ascontiguousarray(rgba[..., :3])
     for c in clipped:
         if not _layer_active(c):
@@ -1209,28 +1362,79 @@ def apply_image_group(img: np.ndarray, base: dict, clipped: list, frame, key: st
             out = A.apply(rgb, c.get("adj", "curves"), c.get("p") or {})
             if c.get("blend", "normal") != "normal":
                 out = np.clip(A.blend(rgb, out, c["blend"]), 0, 1)
-            m = float(c.get("opacity", 100)) / 100.0
+            mo = float(c.get("opacity", 100)) / 100.0
             if c.get("mask"):
-                m = (selection_mask(img.shape, c["mask"], img, key) * m)[..., None]
-            rgb = rgb * (1 - m) + out * m
+                mo = (selection_mask(img.shape, c["mask"], img, key)[sl] * mo)[..., None]
+            rgb = rgb * (1 - mo) + out * mo
         elif c["kind"] in CLIP_BASES:
-            rc = layer_rgba(img.shape, c, frame)
+            rc = layer_patch(img.shape, c, frame)
             if rc is None:
                 continue
-            ac = _layer_alpha(img, c, rc, key)[..., None]
+            rc = _embed(rc[0], rc[1], rc[2], x0, y0, h, w)
+            ac = _layer_alpha(img, c, rc, key, sl)[..., None]
             top = rc[..., :3]
             if c.get("blend", "normal") != "normal":
                 top = np.clip(A.blend(rgb, top, c["blend"]), 0, 1)
             rgb = rgb * (1 - ac) + top * ac
-    a = _layer_alpha(img, base, rgba, key)
+    a_raw = rgba[..., 3]
+    rgb, a_raw = _fx_blur(rgb, a_raw, fx, side)
+    o = float(base.get("opacity", 100)) / 100.0
+    a = a_raw * o
+    if base.get("mask"):
+        a = a * selection_mask(img.shape, base["mask"], img, key)[sl]
+    sub = img[sl]
+    if "shadow" in fx or "glow" in fx:
+        sub = _fx_under(sub, a_raw if not base.get("mask") else a / max(o, 1e-6), fx, side, o)
     top = rgb
     if base.get("blend", "normal") != "normal":
-        top = np.clip(A.blend(img, rgb, base["blend"]), 0, 1)
-    out = img * (1 - a[..., None]) + top * a[..., None]
-    return out.astype(np.float32), a
+        top = np.clip(A.blend(sub, rgb, base["blend"]), 0, 1)
+    out = img.copy()
+    out[sl] = sub * (1 - a[..., None]) + top * a[..., None]
+    if "shadow" in fx or "glow" in fx:  # la sombra y el resplandor también tapan lo transparente
+        a = np.maximum(a, np.clip(np.abs(sub - img[sl]).max(-1) * 4, 0, 1))
+    return out, (a.astype(np.float32), sl)
 
 
-def apply_pixel_layer(img: np.ndarray, lay: dict, key: str = ""):
+# ------------------------------------------------------------------ rayos de luz
+
+def rays_alpha(shape, lay: dict, frame=None) -> np.ndarray:
+    """Intensidad (0..1) de los rayos de luz: haces que salen del foco (x, y del encuadre) en un abanico."""
+    H, W = shape[:2]
+    fx, fy, fw, fh = frame if frame is not None else (0, 0, W, H)
+    cx, cy = fx + float(lay.get("x", 0.5)) * fw, fy + float(lay.get("y", 0.15)) * fh
+    side = max(H, W)
+    f = 4 if side > 1200 else 2  # se calcula a menor tamaño (es suave) y se amplía
+    hs, ws = max(2, H // f), max(2, W // f)
+    yy, xx = np.mgrid[0:hs, 0:ws].astype(np.float32)
+    dx, dy = xx * f - cx, yy * f - cy
+    r = np.hypot(dx, dy) / side
+    th = np.degrees(np.arctan2(-dy, dx))  # 0 = derecha, 90 = arriba
+    rng = np.random.default_rng(int(lay.get("seed", 7)))
+    n = max(1, int(lay.get("count", 24)))
+    spread = max(1.0, float(lay.get("spread", 70)))
+    ang = float(lay.get("angle", 90)) + 180  # hacia dónde caen: el contrario de donde está la luz
+    centers = ang + (rng.random(n) - 0.5) * spread
+    widths = spread / n * (0.25 + rng.random(n) * 0.9)
+    gains = 0.35 + rng.random(n) * 0.65
+    v = np.zeros_like(r)
+    for c, wd, g in zip(centers, widths, gains):
+        d = (th - c + 180) % 360 - 180
+        v = np.maximum(v, g * np.exp(-0.5 * (d / max(0.2, wd * 0.5)) ** 2))
+    d = (th - ang + 180) % 360 - 180
+    fan = np.clip(1 - np.abs(d) / (spread / 2 + 1e-6), 0, 1) ** 0.6 if spread < 359 else 1.0
+    length = max(0.02, float(lay.get("length", 70)) / 100)
+    fall = np.exp(-r / (length * 0.45)) * np.clip(r / 0.01, 0, 1)
+    core = np.exp(-(r / 0.035) ** 2)  # el brillo del foco
+    a = np.clip((v * fan * fall + core * 0.8) * float(lay.get("amount", 60)) / 100 * 1.6, 0, 1)
+    return cv2.resize(a.astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR)
+
+
+def apply_rays(img: np.ndarray, lay: dict, frame=None) -> np.ndarray:
+    a = rays_alpha(img.shape, lay, frame)[..., None]
+    return (1 - (1 - img) * (1 - _hex(lay.get("color", "#fff1cf")) * a)).astype(np.float32)  # Trama
+
+
+def apply_pixel_layer(img: np.ndarray, lay: dict, key: str = "", frame=None):
     """Aplica una capa de imagen. Devuelve (imagen, alfa nuevo | None)."""
     k = lay["kind"]
     alpha = None
@@ -1247,6 +1451,8 @@ def apply_pixel_layer(img: np.ndarray, lay: dict, key: str = ""):
     elif k == "adjust":
         import edits_adjust as A
         out = A.apply(img, lay.get("adj", "curves"), lay.get("p") or {})
+    elif k == "rays":
+        out = apply_rays(img, lay, frame)
     else:
         return img, None
     if lay.get("blend", "normal") != "normal":
@@ -1281,10 +1487,14 @@ def apply_crop(img: np.ndarray, box) -> np.ndarray:
 class Compositor:
     """Composición con caché por prefijo: al pintar en la capa N solo se recalcula de la N hacia arriba."""
 
+    LIMIT = 10
+
     def __init__(self):
         self.key = ""
         self.base_sig = ""
-        self.stack: list = []  # [(firma acumulada, imagen, alfa)]
+        self.stack: list = []  # [(firma acumulada, imagen, alfa)], de la menos a la más usada
+        self.focus = None      # id de la capa que se está editando: se guarda siempre lo que entra en ella
+        self._pin = None
 
     def pixel_stage(self, base: np.ndarray, layers: list, key: str = "", upto: int | None = None, box=None):
         """Imagen sin recortar tras las capas de imagen visibles (hasta `upto`, excluida). (img, alfa).
@@ -1302,16 +1512,59 @@ class Compositor:
         return img, alpha
 
     def _cached(self, sig):
-        return next((c for c in self.stack if c[0] == sig), None)
+        for i, c in enumerate(self.stack):
+            if c[0] == sig:
+                self.stack.append(self.stack.pop(i))  # usada: pasa al final (la última en salir)
+                return c
+        return None
 
     def _push(self, sig, img, alpha):
         self.stack.append((sig, img, alpha))
-        if len(self.stack) > 16:
-            self.stack.pop(0)
+        while len(self.stack) > self.LIMIT:
+            i = next((j for j, c in enumerate(self.stack) if c[0] != self._pin), 0)
+            self.stack.pop(i)
+
+    def _sigs(self, nodes, sig):
+        """Firmas acumuladas tras cada nodo (sin calcular píxeles), con el mismo recorrido que `_run`."""
+        out, i = [], 0
+        while i < len(nodes):
+            node = nodes[i]
+            if isinstance(node, tuple):
+                i += 1
+                if _layer_active(node[0]):
+                    sig = _sig(sig, node[0], _active_tree(node[1]))
+                out.append((i, sig, node[0]["id"]))
+                continue
+            j = i + 1
+            if node["kind"] in CLIP_BASES:
+                while j < len(nodes) and not isinstance(nodes[j], tuple) and nodes[j].get("clip") \
+                        and nodes[j]["kind"] in CLIPPABLE:
+                    j += 1
+            ids = [g["id"] for g in nodes[i:j]]
+            if _layer_active(node):
+                sig = _sig(sig, [g for g in nodes[i:j] if _layer_active(g)])
+            i = j
+            out.append((i, sig, ids))
+        return out
 
     def _run(self, nodes, img, alpha, sig, frame, key):
-        """Compone una lista de capas y grupos (de abajo arriba). (img, alfa, firma)."""
-        i = 0
+        """Compone una lista de capas y grupos (de abajo arriba). (img, alfa, firma). Empieza en la composición
+        guardada más alta que siga valiendo."""
+        steps = self._sigs(nodes, sig)
+        start = 0
+        for k in range(len(steps) - 1, -1, -1):
+            hit = self._cached(steps[k][1])
+            if hit is not None:
+                img, alpha, sig, start = hit[1], hit[2], steps[k][1], steps[k][0]
+                break
+        # lo que entra en la capa elegida no se tira de la caché (al arrastrar un control solo se rehace ella)
+        if self.focus:
+            for k, (_, _, ids) in enumerate(steps):
+                if self.focus in (ids if isinstance(ids, list) else [ids]):
+                    if k > 0:
+                        self._pin = steps[k - 1][1]
+                    break
+        i = start
         while i < len(nodes):
             node = nodes[i]
             if isinstance(node, tuple):  # grupo: (capa del grupo, [nodos de dentro])
@@ -1320,10 +1573,6 @@ class Compositor:
                 if not _layer_active(grp):
                     continue
                 gsig = _sig(sig, grp, _active_tree(kids))
-                hit = self._cached(gsig)
-                if hit is not None:
-                    img, alpha, sig = hit[1], hit[2], gsig
-                    continue
                 below, below_a = img, alpha
                 res, res_a, _ = self._run(kids, img, alpha, sig, frame, key)
                 img, alpha = _mix_group(below, below_a, res, res_a, grp, key)
@@ -1340,16 +1589,14 @@ class Compositor:
             if not _layer_active(lay):
                 continue  # una base oculta oculta también lo recortado a ella
             sig = _sig(sig, [g for g in group if _layer_active(g)])
-            hit = self._cached(sig)
-            if hit is not None:
-                img, alpha = hit[1], hit[2]
-                continue
             if lay["kind"] in CLIP_BASES:
-                img, a = apply_image_group(img, lay, group[1:], frame, key)
-                if a is not None and alpha is not None:
-                    alpha = alpha + a * (1 - alpha)  # la capa tapa lo transparente
+                img, pa = apply_image_group(img, lay, group[1:], frame, key)
+                if pa is not None and alpha is not None:  # la capa tapa lo transparente
+                    a, sl = pa
+                    alpha = alpha.copy()
+                    alpha[sl] = alpha[sl] + a * (1 - alpha[sl])
             else:
-                img, a = apply_pixel_layer(img, lay, key)
+                img, a = apply_pixel_layer(img, lay, key, frame)
                 if a is not None:
                     alpha = a if alpha is None else alpha * a
             self._push(sig, img, alpha)
@@ -1442,12 +1689,15 @@ def layer_boxes(doc: dict, shape, box) -> dict:
     fx, fy, fw, fh = _frame(shape, box)
     out = {}
     for lay in doc.get("layers", []):
-        if lay["kind"] not in ("image", "text", "logo") or not _layer_active(lay):
+        if lay["kind"] not in ("image", "text", "logo", "rays") or not _layer_active(lay):
             continue
-        if lay["kind"] == "image":
-            r = image_rgba((hh, ww), lay, (fx, fy, fw, fh))
+        if lay["kind"] == "rays":  # el foco, como una caja pequeña
+            x, y = float(lay.get("x", 0.5)), float(lay.get("y", 0.15))
+            out[lay["id"]] = (x - 0.02, y - 0.02 * fw / fh, x + 0.02, y + 0.02 * fw / fh)
+        elif lay["kind"] == "image":
+            r = image_patch((hh, ww), lay, (fx, fy, fw, fh))
             if r:
-                x0, y0, x1, y1 = r[1]
+                x0, y0, x1, y1 = r[3]
                 out[lay["id"]] = ((x0 - fx) / fw, (y0 - fy) / fh, (x1 - fx) / fw, (y1 - fy) / fh)
         else:
             r = overlay_rgba((fh, fw), lay)
