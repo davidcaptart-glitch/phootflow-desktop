@@ -29,6 +29,8 @@ import zoomview as Z
 import edits_adjust as A
 import edits_engine as EE
 import edits_ui as UI
+import fx_engine as FX
+import fx_ui as FXU
 import engine as E
 import studio_engine as SE
 import theme as T
@@ -84,6 +86,12 @@ FX_SPECS = {  # efecto: (título, [(clave, etiqueta, mín, máx, paso)], ¿lleva
 HANDLE_PX = 9  # radio de agarre de las esquinas de la transformación libre (píxeles de pantalla)
 TOOL_LAYER = {k: lay for k, _, _, _, lay in TOOLS}
 LIGHT_MODES = [("dodge", "Aclarar (ojeras)"), ("whiten", "Blanquear (dientes, ojos)"), ("burn", "Oscurecer")]
+# corrector por frecuencias, como las dos capas (color y textura) del retoque a mano
+HEAL_MODES = [("both", "Color y textura"), ("color", "Solo color (rojeces, ojeras)"),
+              ("texture", "Solo textura (poros, arrugas)")]
+# atajos de «Pelo y barba»: (parte de la máscara, nombre, parámetros)
+HAIR_PRESETS = {"hair": ("Pelo sedoso", dict(smooth=45, shine=30, define=20, density=0)),
+                "beard": ("Barba", dict(smooth=15, shine=10, define=40, density=35))}
 LIQ_MODES = [("push", "Empujar"), ("bloat", "Inflar"), ("pucker", "Encoger")]
 BG_MODES = [("blur", "Desenfocar"), ("bw", "Blanco y negro"), ("color", "Color liso"),
             ("transparent", "Transparente (PNG)")]
@@ -614,7 +622,8 @@ class EditsView(QWidget):
                        "eraser": 30}
         self.hardness = {"clone": 50, "brush": 0, "eraser": 60}
         self.strength = {"light": 45, "liquify": 50, "brush": 100, "eraser": 100, "wand": 32, "bucket": 32}
-        self.mode = {"light": "dodge", "liquify": "push", "brush": "round", "wand": "contig", "bucket": "contig"}
+        self.mode = {"light": "dodge", "liquify": "push", "brush": "round", "wand": "contig", "bucket": "contig",
+                     "heal": "both"}
         self._patch = None           # parche en curso: (x, y de la vista al pulsar, contornos de la selección)
         self.clone_off = None       # desplazamiento del tampón (fracción ancho/alto) o None
         self.clone_pick = None      # origen elegido con Alt+clic (0..1 sin recortar)
@@ -958,11 +967,14 @@ class EditsView(QWidget):
         self._act(i, "Quitar fondo (recortar a PNG)", self.remove_background)
         c = mb.addMenu("Capa")
         new = c.addMenu("Nueva")
-        for kind in ("retouch", "skin", "light", "liquify", "background", "text", "logo"):
+        for kind in ("retouch", "skin", "light", "portrait", "liquify", "background", "text", "logo"):
             self._act(new, EE.KINDS[kind], lambda k=kind: self.add_layer(k))
         self._act(new, "Imagen…", self._pick_image)
         self._act(new, "Pintura (pincel)", self.add_paint_layer)
         self._act(new, "Rayos de luz", lambda: self.add_layer("rays"))
+        self._act(new, "Partículas (nieve, confeti, bokeh…)", lambda: self.add_layer("particles"))
+        self._act(new, "Filtro artístico (acuarela, óleo, cómic…)", lambda: self.add_layer("artistic"))
+        self._act(new, "Doble exposición…", self.double_exposure)
         adj = c.addMenu("Nueva capa de ajuste")
         for k in A.ORDER:
             self._act(adj, A.ADJUSTMENTS[k][0] + "…", lambda k=k: self.add_adjust(k))
@@ -988,13 +1000,27 @@ class EditsView(QWidget):
         self._act(se, "Invertir", self.invert_selection, "Mayús+Ctrl+I")
         se.addSeparator()
         self._act(se, "Sujeto", self.select_subject)
+        sp = se.addMenu("Parte de la persona (IA)")
+        for k, label in EE.PARTS.items():
+            self._act(sp, label, lambda k=k: self.select_part(k))
         self._act(se, "Calar…", self.feather_selection, "Mayús+F6")
         self._act(se, "Selección a máscara de capa", self.add_mask_from_selection)
         fi = mb.addMenu("Filtro")
         self._act(fi, "Licuar", lambda: self.set_tool("liquify"), "Mayús+Ctrl+X")
         self._act(fi, "Suavizar piel", lambda: self.add_layer("skin"))
+        self._act(fi, "Retoque de retrato en un clic", self.portrait_one_click)
+        self._act(fi, "Retrato automático (ojos, dientes, labios, volumen)", lambda: self.add_layer("portrait"))
+        self._act(fi, "Pelo sedoso", lambda: self.add_hair("hair"))
+        self._act(fi, "Barba: definir y rellenar", lambda: self.add_hair("beard"))
+        self._act(fi, "Enfoque suavizado (solo la cara)", lambda: self.add_adjust("sharpen", mask_part="face"))
+        self._act(fi, "Viñeteado", lambda: self.add_adjust("vignette"))
         self._act(fi, "Desenfocar fondo", lambda: self.add_layer("background"))
         self._act(fi, "Rayos de luz", lambda: self.add_layer("rays"))
+        self._act(fi, "Partículas (nieve, confeti, bokeh…)", lambda: self.add_layer("particles"))
+        art = fi.addMenu("Artístico")
+        for k, label in FX.ARTISTIC.items():
+            self._act(art, label, lambda k=k: self.add_artistic(k))
+        self._act(fi, "Doble exposición…", self.double_exposure)
         vi = mb.addMenu("Vista")
         self._act(vi, "Acercar", lambda: self._zoom_step(1), "Ctrl++")
         self._act(vi, "Alejar", lambda: self._zoom_step(-1), "Ctrl+-")
@@ -1287,6 +1313,9 @@ class EditsView(QWidget):
         mnew.addAction("Imagen… (o arrástrala desde el Explorador)", self._pick_image)
         mnew.addAction("Pintura (pincel)", self.add_paint_layer)
         mnew.addAction("Rayos de luz", lambda: self.add_layer("rays"))
+        mnew.addAction("Partículas (nieve, confeti, bokeh…)", lambda: self.add_layer("particles"))
+        mnew.addAction("Filtro artístico (acuarela, óleo, cómic…)", lambda: self.add_layer("artistic"))
+        mnew.addAction("Doble exposición…", self.double_exposure)
         mnew.addAction("Grupo (con las capas elegidas)", self.group_layers)
         mnew.addSeparator()
         mnew.addAction("Nuevo lienzo en blanco…", self.new_canvas)
@@ -1335,9 +1364,10 @@ class EditsView(QWidget):
             self.fmt.addItem(label, k)
         self.size = QComboBox()
         self.size.addItems(["Tamaño original", "2048 px lado largo", "1080 px lado largo",
-                            "Ampliar ×2 (aumento de escala)"])
-        self.size.setItemData(3, "Dobla el ancho y el alto con remuestreo Lanczos y recuperación de borde (sin IA). "
-                                 "Para imprimir grande o recortes muy cerrados.", Qt.ToolTipRole)
+                            "Ampliar ×2 con IA (Real-ESRGAN)"])
+        self.size.setItemData(3, "Dobla el ancho y el alto con IA local (Real-ESRGAN, la primera vez se descargan "
+                                 "5 MB): bordes nítidos sin dientes de sierra. Para imprimir grande o recortes muy "
+                                 "cerrados. Tarda unos minutos por foto.", Qt.ToolTipRole)
         qrow = QHBoxLayout()
         ql = QLabel("Calidad JPG")
         ql.setObjectName("meta")
@@ -1447,6 +1477,35 @@ class EditsView(QWidget):
         b = _btn("Quitar el último trazo", "ghost")
         b.clicked.connect(lambda: self._pop_last("strokes", "Quitar trazo"))
         lay.addWidget(b)
+
+        lay = page("portrait")
+        lay.addWidget(self._label("Retoque automático en todas las caras de la foto: no hace falta pintar. "
+                                  "Pon a 0 lo que no quieras."))
+        self.portrait_w = {}
+        for key in ("teeth", "eyes", "whites", "sculpt", "even", "blush", "lips"):
+            lo = -100 if key == "lips" else 0
+            sr = SliderRow(key, EE.PORTRAIT_LABELS[key], lo, 100, 1, EE.PORTRAIT_DEFAULTS[key])
+            sr.changed.connect(lambda k, val, f: self._set_prop(k, int(val), f))
+            lay.addWidget(sr)
+            self.portrait_w[key] = sr
+        self.portrait_col = {}
+        for key, amt, text in (("iris_color", "iris_amount", "Color del iris…"),
+                               ("lip_color", "lip_amount", "Color de labios…")):
+            row = QHBoxLayout()
+            b = _btn(text, "ghost")
+            b.clicked.connect(lambda _=False, k=key: self._pick_color(k))
+            x = _btn("Quitar", "ghost", "Sin cambio de color")
+            x.clicked.connect(lambda _=False, k=key: (self._set_prop(k, "", True), self._show_props()))
+            row.addWidget(b, 1)
+            row.addWidget(x)
+            lay.addLayout(row)
+            sr = SliderRow(amt, EE.PORTRAIT_LABELS[amt], 0, 100, 1, EE.PORTRAIT_DEFAULTS[amt])
+            sr.changed.connect(lambda k, val, f: self._set_prop(k, int(val), f))
+            lay.addWidget(sr)
+            self.portrait_w[amt] = sr
+            self.portrait_col[key] = (b, sr)
+        lay.addWidget(self._label("Volumen = dodge and burn guiado: luz en frente, tabique, pómulos y barbilla; "
+                                  "sombra bajo el pómulo y a los lados de la nariz. Para más control, Ojos y luz (O)."))
 
         lay = page("liquify")
         lay.addWidget(self._label("Licuar (W): Empujar arrastra la zona en la dirección del trazo; Inflar y "
@@ -1572,6 +1631,29 @@ class EditsView(QWidget):
         lay.addWidget(self._label("Con Mover (V) arrastras el foco de luz; «Luz desde» es de dónde viene (90 = "
                                   "arriba). Se suma en modo Trama; baja la opacidad en Capas o pinta su máscara "
                                   "(Mayús+B) para quitarla de donde no debe dar."))
+
+        lay = page("particles")
+        self.part_ctl = FXU.ParticleControls()
+        self.part_ctl.changed.connect(lambda p_, final: self._set_prop("p", p_, final, delay=not final))
+        lay.addWidget(self.part_ctl)
+        lay.addWidget(self._label("Nieve, lluvia, confeti, pétalos, bokeh, destellos, polvo dorado o corazones, en "
+                                  "tres planos de profundidad (los cercanos, grandes y desenfocados). Pinta su "
+                                  "máscara (Mayús+B) para quitarlas de las caras."))
+
+        lay = page("artistic")
+        self.art_cb = QComboBox()
+        for k, label in FX.ARTISTIC.items():
+            self.art_cb.addItem(label, k)
+        self.art_cb.currentIndexChanged.connect(lambda i: self._set_prop("art", self.art_cb.itemData(i), True))
+        lay.addWidget(self.art_cb)
+        self.art_w = {}
+        for key, label, neutral in (("amount", "Intensidad", 100), ("detail", "Detalle", 50)):
+            sr = SliderRow(key, label, 0, 100, 1, neutral)
+            sr.changed.connect(lambda k, val, f: self._set_prop(k, float(val), f, delay=not f))
+            lay.addWidget(sr)
+            self.art_w[key] = sr
+        lay.addWidget(self._label("Convierte la foto (o lo que haya debajo) en acuarela, óleo, cómic, tinta, lápiz "
+                                  "o pop art. Con una máscara, solo en una zona."))
 
         self.fx_box = self._build_fx_box()
         self.prop_lay.addWidget(self.fx_box)
@@ -1734,7 +1816,7 @@ class EditsView(QWidget):
             self.opt_str.set_value(self.strength[key])
         wand_modes = [("contig", "Solo la zona contigua"), ("global", "Todo ese color en la foto")]
         modes = {"light": LIGHT_MODES, "liquify": LIQ_MODES, "brush": BRUSH_MODES, "wand": wand_modes,
-                 "bucket": wand_modes}.get(key)
+                 "bucket": wand_modes, "heal": HEAL_MODES}.get(key)
         self.opt_mode.setVisible(bool(modes))
         if modes:
             self.opt_mode.blockSignals(True)
@@ -2028,6 +2110,8 @@ class EditsView(QWidget):
                   "src": [round(self.clone_off[0], 5), round(self.clone_off[1], 5)] if t == "clone" else None}
             if t == "clone":
                 op["hard"] = self.hardness["clone"] / 100.0
+            if t == "heal" and self.mode.get("heal", "both") != "both":
+                op["freq"] = self.mode["heal"]
             lay["ops"].append(op)
             label = {"heal": "Corrector", "clone": "Tampón", "fill": "Relleno"}[t]
             if t == "fill":
@@ -2473,7 +2557,9 @@ class EditsView(QWidget):
         else:
             sub = {"retouch": "Retoque", "skin": "Piel", "light": "Ojos y luz", "liquify": "Licuar",
                    "background": "Fondo (IA)", "text": "Texto", "logo": "Logo", "image": "Imagen",
-                   "rays": "Rayos de luz"}.get(l["kind"], "")
+                   "rays": "Rayos de luz", "portrait": "Retrato (IA)",
+                   "particles": FX.PARTICLES.get((l.get("p") or {}).get("kind"), "Partículas"),
+                   "artistic": FX.ARTISTIC.get(l.get("art"), "Filtro artístico")}.get(l["kind"], "")
         if n:
             sub += " · " + _count(n, "trazo")
         if l.get("blend", "normal") != "normal":
@@ -2505,6 +2591,85 @@ class EditsView(QWidget):
                 "group": l["kind"] == "group", "collapsed": bool(l.get("collapsed")),
                 "indent": bool(l.get("parent"))}
 
+    def _layer_tip(self, l) -> str:
+        """Ficha de la capa (como el plugin Ink): tipo, opacidad, fusión, máscara, efectos y sus parámetros."""
+        rows = [f"{l['name']}  ({EE.KINDS.get(l['kind'], l['kind'])})",
+                f"Opacidad {l.get('opacity', 100)} % · {A.BLEND_MODES.get(l.get('blend', 'normal'), 'Normal')}"
+                + (" · oculta" if not l.get("visible", True) else "")
+                + (" · con máscara" if l.get("mask") else "") + (" · recortada" if l.get("clip") else "")]
+        if EE.fx_of(l):
+            rows.append("Efectos: " + ", ".join(k for k, v in (l.get("fx") or {}).items() if v.get("on")))
+        skip = {"id", "kind", "name", "visible", "opacity", "blend", "mask", "clip", "fx", "parent", "strokes", "ops",
+                "pts", "quad", "collapsed"}
+        vals = []
+        for k, v in l.items():
+            if k in skip:
+                continue
+            if isinstance(v, dict):
+                v = ", ".join(f"{a}={b}" for a, b in list(v.items())[:8] if not isinstance(b, (list, dict)))
+            elif isinstance(v, list):
+                v = f"{len(v)} elementos"
+            elif isinstance(v, float):
+                v = f"{v:g}"
+            vals.append(f"{k}: {v}")
+        if vals:
+            rows.append(" · ".join(vals)[:400])
+        n = len(l.get("strokes") or l.get("ops") or [])
+        if n:
+            rows.append(_count(n, "trazo"))
+        return "\n".join(rows)
+
+    def add_artistic(self, kind):
+        if not self.doc:
+            return
+        sel = self._layer()
+        lay = EE.add_layer(self.doc, "artistic", above=sel["id"] if sel and sel["kind"] not in EE.OVERLAY else None,
+                           art=kind)
+        lay["name"] = FX.ARTISTIC.get(kind, lay["name"])
+        self.layer_id = lay["id"]
+        self._commit("Filtro: " + lay["name"].lower())
+
+    def double_exposure(self):
+        """Doble exposición con capas normales: fondo blanco (persona IA), B/N y la segunda foto en Trama recortada
+        a la silueta de la persona. Todo queda editable."""
+        if not self.doc or not self.folder or self.base is None:
+            return
+        from PySide6.QtWidgets import QDialog
+        dlg = FXU.DoubleExposureDialog(self, self.prefs.get("img_dir", ""))
+        if dlg.exec() != QDialog.Accepted:
+            return
+        self.prefs["img_dir"] = os.path.dirname(dlg.path)
+        self._save_prefs()
+        try:
+            path = EE.import_image(self.folder, dlg.path)
+        except OSError as e:
+            self.status.setText(f"No se pudo copiar la imagen: {e}")
+            return
+        fh, fw = EE.apply_crop(self.base, self.box).shape[:2]
+        try:
+            from PIL import Image
+            with Image.open(path) as im:
+                oa = im.width / max(1, im.height)
+        except Exception:
+            oa = fw / max(1, fh)
+        fa = fw / max(1, fh)
+        width = 100.0 if oa <= fa else 100.0 * oa / fa  # que cubra todo el encuadre
+        if dlg.bg.isChecked():
+            bg = EE.add_layer(self.doc, "background", mode="color", color="#ffffff", detect="person")
+            bg["name"] = "Doble exposición: fondo"
+        if dlg.bw.isChecked():
+            bw = EE.add_layer(self.doc, "adjust", adj="black_white")
+            bw["name"] = "Doble exposición: B/N"
+        lay = EE.add_layer(self.doc, "image", path=path, width=round(width, 2), x=0.5, y=0.5, anchor="mm",
+                           blend=dlg.mode.currentData(), opacity=int(dlg.amount.value()))
+        lay["mask"] = {"shapes": [{"type": "subject", "op": "add"}], "feather": 0.004}
+        lay["name"] = "Doble exposición: " + os.path.splitext(os.path.basename(dlg.path))[0]
+        self.layer_id = lay["id"]
+        self.set_tool("move")
+        self._commit("Doble exposición")
+        self.status.setText("Doble exposición creada: mueve o escala la segunda foto con Mover; su máscara es la "
+                            "silueta (IA). Cambia el modo de fusión u opacidad en Capas.")
+
     def _refresh_layers(self):
         self.layer_list.blockSignals(True)
         self.layer_list.clear()
@@ -2514,6 +2679,7 @@ class EditsView(QWidget):
         for l in layers:
             it = QListWidgetItem()
             it.setData(UI.ROLE_LAYER, self._layer_info(l))
+            it.setToolTip(self._layer_tip(l))
             it.setData(ROLE, l["id"])
             it.setSizeHint(QSize(200, 40))
             self.layer_list.addItem(it)
@@ -2601,9 +2767,24 @@ class EditsView(QWidget):
             for key, sr in self.rays_w.items():
                 sr.set_value(lay.get(key, sr.neutral))
             self.rays_color.setStyleSheet(f"QPushButton {{ border-left: 14px solid {lay.get('color', '#fff1cf')}; }}")
+        elif kind == "particles":
+            self.part_ctl.set_params(lay.get("p"))
+        elif kind == "artistic":
+            self.art_cb.blockSignals(True)
+            self.art_cb.setCurrentIndex(max(0, self.art_cb.findData(lay.get("art", "watercolor"))))
+            self.art_cb.blockSignals(False)
+            for key, sr in self.art_w.items():
+                sr.set_value(lay.get(key, sr.neutral))
         elif kind == "group":
             n = sum(1 for x in self.doc["layers"] if x.get("parent") == lay["id"])
             self.group_info.setText(_count(n, "capa") + " dentro.")
+        elif kind == "portrait":
+            for key, sr in self.portrait_w.items():
+                sr.set_value(lay.get(key, EE.PORTRAIT_DEFAULTS[key]))
+            for key, (b, sr) in self.portrait_col.items():
+                c = lay.get(key, "")
+                b.setStyleSheet(f"QPushButton {{ border-left: 14px solid {c}; }}" if c else "")
+                sr.setVisible(bool(c))
         elif kind == "liquify":
             self.liq_info.setText(_count(len(lay["strokes"]), "trazo") + " en esta capa.")
         elif kind == "skin":
@@ -2956,21 +3137,70 @@ class EditsView(QWidget):
             self.delete_layer()
 
     # ---------------------------------------------------------- capas de ajuste y máscaras
-    def add_adjust(self, kind):
+    def add_adjust(self, kind, mask_part=None, name=None, params=None, commit=True):
+        """Nueva capa de ajuste. Con una selección activa, esa es su máscara; si no y hay `mask_part`, la máscara
+        es esa parte de la persona (Pelo, Barba, Piel de la cara...), que se calcula sola en cada foto."""
         if not self.doc:
-            return
+            return None
         n = 1 + sum(1 for l in self.doc["layers"] if l["kind"] == "adjust" and l.get("adj") == kind)
         sel = self._layer()
         lay = EE.add_layer(self.doc, "adjust", above=sel["id"] if sel and sel["kind"] not in EE.OVERLAY else None,
                            adj=kind)
-        lay["name"] = f"{A.ADJUSTMENTS[kind][0]} {n}"
+        lay["name"] = name or f"{A.ADJUSTMENTS[kind][0]} {n}"
+        if params:
+            lay["p"].update(params)
         if self.sel:  # la selección se convierte en la máscara del ajuste (y se deselecciona)
             lay["mask"] = copy.deepcopy(self.sel)
             self.deselect()
+        elif mask_part:
+            lay["mask"] = {"shapes": [{"type": "part", "part": mask_part, "op": "add"}], "feather": 0.0}
         self.layer_id = lay["id"]
         self._adj_key = None
-        self._commit("Nueva capa de ajuste: " + lay["name"])
-        self.top_tabs.set_current(0)
+        if commit:
+            self._commit("Nueva capa de ajuste: " + lay["name"])
+            self.top_tabs.set_current(0)
+        return lay
+
+    def add_hair(self, part):
+        name, p = HAIR_PRESETS[part]
+        self.status.setText("Buscando " + ("el pelo" if part == "hair" else "la barba") + " con IA…")
+        self.status.repaint()
+        self.add_adjust("hair", mask_part=part, name=name, params=p)
+
+    def select_part(self, part, op="new"):
+        if self.base is None:
+            return
+        self.status.setText(f"Buscando {EE.PARTS[part].lower()} con IA…")
+        self.status.repaint()
+        self._apply_selection({"type": "part", "part": part}, op)
+        if not self.sel:
+            self.status.setText(f"No se ha encontrado {EE.PARTS[part].lower()} en esta foto.")
+
+    def portrait_one_click(self):
+        """Retoque de retrato completo, como el flujo a mano: piel por frecuencias, retrato automático (ojos,
+        dientes, labios, volumen), pelo, barba y enfoque de la cara. Todo en capas que se pueden ajustar."""
+        if not self.doc:
+            return
+        self.status.setText("Retocando el retrato con IA…")
+        self.status.repaint()
+        self.deselect()
+        kinds = {l["kind"] for l in self.doc["layers"]}
+        if "skin" not in kinds:
+            EE.add_layer(self.doc, "skin", amount=45, texture=55)
+        lay = EE.add_layer(self.doc, "portrait")
+        top = lay
+        for part in ("hair", "beard"):
+            if part == "beard" and self.base is not None and \
+                    float(EE.part_mask(self.base, "beard", self.cur.path + "#edits" if self.cur else "").max()) < 0.3:
+                continue  # sin barba, no se añade la capa
+            nm, p = HAIR_PRESETS[part]
+            self.layer_id = top["id"]
+            top = self.add_adjust("hair", mask_part=part, name=nm, params=p, commit=False)
+        self.layer_id = top["id"]
+        top = self.add_adjust("sharpen", mask_part="face", name="Enfoque de la cara", commit=False)
+        self.layer_id = lay["id"]
+        self._adj_key = None
+        self._commit("Retoque de retrato")
 
     def _adj_changed(self, p, final):
         lay = self._layer()
@@ -3418,7 +3648,16 @@ class EditsView(QWidget):
         jobs = [(it, copy.deepcopy(d)) for it, d in jobs]
         folder = self.folder
 
+        if scale > 1:
+            FX.configure(os.path.join(self.cfg_dir, "modelos"))
+
         def job():
+            if scale > 1 and not FX.upscaler_ready():
+                self.export_progress.emit(0, len(jobs), "Descargando el modelo de ampliación (5 MB)…")
+                try:
+                    FX.ensure_upscaler()
+                except Exception as e:
+                    self.export_progress.emit(0, len(jobs), f"Sin el modelo de IA ({e}): ampliación clásica")
             for i, (it, doc) in enumerate(jobs):
                 self.export_progress.emit(i, len(jobs), f"Exportando {it.name}…")
                 try:

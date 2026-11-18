@@ -48,7 +48,10 @@ python -m unittest discover -s tests   # 83 pruebas, sin fotos reales ni red
   ajustes de encima las afectan), con máscara de capa, máscara de recorte (`clip`), transformación libre
   (`quad`, Ctrl+T), lienzos en blanco (`new_canvas`, en `edits/lienzos/`, fuera de Events), capas de pintura
   (`paint`: pincel B y borrador E, presión de tableta, caché incremental) grupos (`group` + `parent`, Ctrl+G), efectos de capa (`fx`: sombra, resplandor, desenfoque y movimiento)
-  y rayos de luz (`rays`). Las imágenes y pinturas se componen solo en su caja; la caché retoma el paso guardado
+  y rayos de luz (`rays`). Retrato: capa `portrait` (automática en todas las caras: dientes, ojos, iris, labios,
+  colorete, igualar tono y dodge and burn guiado `SCULPT`), Filtro › «Retoque de retrato en un clic», selecciones
+  y máscaras por partes con IA (`{"type": "part"}`, `EE.PARTS`; la barba es `masks.beard_alpha`), ajustes
+  `sharpen`, `vignette` y `hair` (Pelo y barba) y corrector con `freq` color/textura. Las imágenes y pinturas se componen solo en su caja; la caché retoma el paso guardado
   más alto y guarda el de debajo de la capa elegida (`Compositor.focus`); al arrastrar, borrador a 1024 px. `attach_studio_button` añade «Editar en Edits» a Studio sin tocar
   studio.py.
   Interfaz al estilo de PhotoCraft (ArtCraft): `edits_ui.py` (panel de capas, Curvas/Niveles, pestañas) y
@@ -85,6 +88,15 @@ python -m unittest discover -s tests   # 83 pruebas, sin fotos reales ni red
   (una capa por color). Graphics: `ExportDialog`/`EXPORT_FORMATS` (incluye «Vectorizado para imprenta»: la página
   entera a trazados con `VectorizeDialog(export_only=True)` al ancho real en mm). Edits: `EE.FORMATS` ampliado,
   `EE.render_final` y botón «Vectorizar para imprenta…».
+- `fx_engine.py` / `fx_ui.py` — efectos «de plugin» (ideas de plugins de Photoshop, código propio): ampliar con IA
+  (Real-ESRGAN General x4v3, BSD-3, ONNX de Qualcomm AI Hub, 5 MB en `modelos/`, bloques de 128 px con solape; sin
+  modelo, Lanczos), partículas (nieve, lluvia, confeti, pétalos, bokeh, destellos, polvo, corazones), filtros
+  artísticos (acuarela, óleo, cómic, tinta, lápiz, pop art), texturas, efectos tipo Eye Candy (cromo, oro, fuego,
+  rayos, hielo, neón), bordes artísticos y doble exposición. Dónde: Studio (máscara «Punto de control», U Point, en
+  `masks.py`; exportar ×2 con IA), Graphics (foto: `el["art"]`/`el["edge"]`; Objeto: Ampliar con IA, Texturas,
+  partículas y efectos; Ver: Retícula y guías `d["grid"]`, como GuideGuide; ficha de capa, como Ink, en Capas y
+  Ctrl+Mayús+I), Edits (capas `particles` y `artistic`, Doble exposición con capas normales, exportar ×2 con IA,
+  ficha de capa al pasar el ratón).
 - `cropview.py` — marco de recorte interactivo común (Studio con R; revisión de Events con C: recorte «Personalizado»).
 - `propagate.py` — propagar la edición de Studio/Edits de una foto a otras de Events (`Propagator`: grupos de ajustes y capas de Edits).
   La revisión de Events se guarda sola en `<salida>/.phootflow/revision.json` (`save_review`/`load_review`) y sigue por la primera sin revisar.

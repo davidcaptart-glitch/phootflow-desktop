@@ -834,7 +834,7 @@ class StudioView(QWidget):
         add.setIcon(I.icon("plus", 16))
         menu = QMenu(add)
         groups = [("Manual", M.MANUAL_TYPES), ("Personas (IA)", M.AI_TYPES),
-                  ("Cara (IA)", {k: v[0] for k, v in M.FACE_PARTS.items()}), ("Otros", M.OTHER_TYPES)]
+                  ("Cara (IA)", {**{k: v[0] for k, v in M.FACE_PARTS.items()}, **M.FACE_EXTRA}), ("Otros", M.OTHER_TYPES)]
         for title, items in groups:
             menu.addSection(title)
             for k, label in items.items():
@@ -872,7 +872,9 @@ class StudioView(QWidget):
         for key, label, lo, hi, st, neu in [("amount", "Cantidad", 0, 100, 1, 100), ("feather", "Difuminado", 0, 100, 1, 50),
                                             ("brush", "Tamaño del pincel", 1, 30, 1, 6),
                                             ("lo", "Luz desde", 0, 100, 1, 60), ("hi", "Luz hasta", 0, 100, 1, 100),
-                                            ("hue", "Tono", 0, 360, 1, 25), ("range", "Amplitud", 5, 90, 1, 30)] + \
+                                            ("hue", "Tono", 0, 360, 1, 25), ("range", "Amplitud", 5, 90, 1, 30),
+                                            ("size", "Alcance", 1, 100, 1, 25),
+                                            ("sim", "Parecido de color", 0, 100, 1, 50)] + \
                 [(k, l, a, b, s_, n) for k, l, a, b, s_, n in M.ADJ]:
             r = SliderRow("m_" + key, label, lo, hi, st, neu)
             r.changed.connect(self._mask_value)
@@ -910,7 +912,7 @@ class StudioView(QWidget):
         self._push_history()
         self._masks().append(M.new_mask(kind))
         self._refresh_masks(select=len(self._masks()) - 1)
-        if kind in M.AI_TYPES or kind in M.FACE_PARTS:
+        if kind in M.AI_TYPES or kind in M.FACE_PARTS or kind in M.FACE_EXTRA:
             self.status.setText("Máscara con IA: la primera vez se descarga el modelo (16 MB)…")
         self.b_mshow.setChecked(True)
         self.request(draft=False)
@@ -929,10 +931,14 @@ class StudioView(QWidget):
         hints = {"radial": "Arrastra sobre la foto: el punto inicial es el centro.",
                  "linear": "Arrastra sobre la foto: de donde el efecto es completo a donde desaparece.",
                  "brush": "Pinta sobre la foto. Botón derecho: borrar.",
-                 "luma": "Elige el rango de luminosidad.", "color": "Elige el tono y su amplitud."}
+                 "luma": "Elige el rango de luminosidad.", "color": "Elige el tono y su amplitud.",
+                 "point": "Pincha en la foto sobre lo que quieres ajustar (cielo, vestido, césped…): coge lo "
+                          "que está cerca y tiene un color parecido. Alcance: hasta dónde llega; Parecido: "
+                          "cuánto se tiene que parecer el color."}
         self.mask_hint.setText(hints.get(t, "Zona detectada automáticamente con IA."))
         vis = {"feather": t in ("radial", "brush", "luma"), "brush": t == "brush", "lo": t == "luma",
-               "hi": t == "luma", "hue": t == "color", "range": t == "color"}
+               "hi": t == "luma", "hue": t == "color", "range": t == "color", "size": t == "point",
+               "sim": t == "point"}
         for k, r in self.mrows.items():
             r.setVisible(vis.get(k, True))
             if k == "amount":
@@ -1124,7 +1130,7 @@ class StudioView(QWidget):
             return
         m = self._masks()[self.mask_i]
         t, p = m["type"], m["params"]
-        if t not in ("radial", "linear", "brush"):
+        if t not in ("radial", "linear", "brush", "point"):
             return
         c = self._view_crop
         if c:  # la vista está recortada: coordenadas de la foto entera
@@ -1137,7 +1143,9 @@ class StudioView(QWidget):
         if self._drag is None:
             return
         x0, y0 = self._drag
-        if t == "radial":
+        if t == "point":
+            p.update(cx=round(x, 4), cy=round(y, 4))
+        elif t == "radial":
             p.update(cx=x0, cy=y0, rx=max(0.02, abs(x - x0)), ry=max(0.02, abs(y - y0)))
         elif t == "linear":
             p.update(x0=x0, y0=y0, x1=x, y1=y)
@@ -1617,7 +1625,8 @@ class StudioView(QWidget):
         v = QVBoxLayout(dlg)
         v.addWidget(QLabel(f"Exportar {len(targets)} foto(s) seleccionada(s)"))
         size = QComboBox()
-        size.addItems(["Original", "2048 px lado largo", "1080 px lado largo"])
+        size.addItems(["Original", "2048 px lado largo", "1080 px lado largo",
+                       "Ampliada ×2 con IA (copias grandes; unos minutos por foto)"])
         q = QSpinBox()
         q.setRange(70, 100)
         q.setValue(95)
@@ -1632,7 +1641,11 @@ class StudioView(QWidget):
         if dlg.exec() != QDialog.Accepted:
             return
         self._save_cur()
-        long_side = {0: None, 1: 2048, 2: 1080}[size.currentIndex()]
+        long_side = {0: None, 1: 2048, 2: 1080, 3: None}[size.currentIndex()]
+        upscale = 2.0 if size.currentIndex() == 3 else 1.0
+        if upscale > 1:
+            import fx_engine as FX
+            FX.configure(os.path.join(self.cfg_dir, "modelos"))
         out = os.path.join(self.folder, "Studio")
         quality = q.value()
 
@@ -1640,7 +1653,11 @@ class StudioView(QWidget):
             for i, it in enumerate(targets):
                 self.export_progress.emit(i, len(targets), f"Exportando {it.name}…")
                 try:
-                    SE.export(it.path, it.settings, os.path.join(out, it.name + ".jpg"), quality, long_side)
+                    SE.export(it.path, it.settings, os.path.join(out, it.name + (".x2.jpg" if upscale > 1 else ".jpg")),
+                              quality, long_side, upscale,
+                              (lambda k, n, i=i, it=it: self.export_progress.emit(
+                                  i, len(targets), f"Ampliando {it.name}… {k * 100 // max(n, 1)} %")) if upscale > 1
+                              else None)
                 except Exception as e:
                     self.export_progress.emit(i, len(targets), f"Error en {it.name}: {e}")
             self.export_progress.emit(len(targets), len(targets), f"Exportadas {len(targets)} en «Studio».")

@@ -281,6 +281,59 @@ def duplicate(d: dict, el: dict, offset: float | None = None) -> dict:
     return c
 
 
+def layer_info(el: dict, d: dict | None = None) -> str:
+    """Ficha de la capa en texto (como el plugin Ink): tipo, posición, tamaño, giro, opacidad y lo propio de
+    cada tipo (fuente, colores, efectos, filtro…). En mm si el diseño es de imprenta."""
+    mm = bool(d and d.get("unit") == "mm")
+    dpi = (d or {}).get("dpi", PRINT_DPI)
+
+    def u(v):
+        return f"{v / dpi * MM_PER_IN:.1f} mm" if mm else f"{v:.0f} px"
+
+    t = el["type"]
+    rows = [layer_name(el).strip(),
+            f"Posición: {u(el['x'])}, {u(el['y'])}   Tamaño: {u(el['w'])} × {u(el['h'])}",
+            f"Giro: {el.get('rot', 0):.0f}°   Opacidad: {el.get('opacity', 1.0) * 100:.0f} %"
+            + ("   Bloqueada" if el.get("locked") else "") + ("   Oculta" if el.get("hidden") else "")]
+    if t == "text":
+        st = [s_ for s_, on in (("negrita", el.get("bold")), ("cursiva", el.get("italic")),
+                                ("mayúsculas", el.get("upper"))) if on]
+        rows.append(f"Fuente: {el.get('font', 'Segoe UI')} {el.get('size', 24):.0f} px" + (f" ({', '.join(st)})"
+                                                                                           if st else ""))
+        rows.append(f"Color: {el.get('color', '#000000')}   Alineado: {el.get('align', 'left')}"
+                    + (f"   Interlineado: {el['line']}" if el.get("line") else "")
+                    + (f"   Espaciado: {el['spacing']}" if el.get("spacing") else ""))
+        if el.get("tfx"):
+            rows.append("Efecto de texto: " + str(el["tfx"].get("type", "sí")))
+        if el.get("curve"):
+            rows.append(f"Texto curvo: {el['curve']}")
+    elif t == "image":
+        rows.append("Archivo: " + (el.get("path") or "(hueco)"))
+        if el.get("orig"):
+            rows.append("Original: " + el["orig"])
+        import fx_engine as FX
+        art, edge = (el.get("art") or {}).get("kind", ""), (el.get("edge") or {}).get("kind", "")
+        extra = [x for x in (el.get("look"), "B/N" if el.get("bw") else "", FX.ARTISTIC.get(art, art),
+                             ("borde " + FX.EDGES.get(edge, edge)) if edge else "") if x]
+        if extra:
+            rows.append("Filtros: " + ", ".join(extra))
+        rows.append(f"Zoom: {el.get('zoom', 1.0) * 100:.0f} %   Forma: {el.get('clip', 'rect')}")
+        if el.get("credit"):
+            rows.append("Crédito: " + str(el["credit"].get("author", el["credit"])))
+    elif t == "shape":
+        rows.append(f"Forma: {el.get('shape')}   Relleno: {el.get('fill')}"
+                    + (f"   Contorno: {el.get('stroke')} {el.get('stroke_w', 0):.1f} px" if el.get("stroke_w") else ""))
+    elif t == "vector":
+        cols = sorted({p_.get("fill", "") for p_ in el.get("paths", [])})
+        rows.append(f"Trazados: {len(el.get('paths', []))}   Colores: " + ", ".join(cols[:8])
+                    + ("…" if len(cols) > 8 else ""))
+    if el.get("grad"):
+        rows.append(f"Degradado: {el['grad'].get('c1')} → {el['grad'].get('c2')} ({el['grad'].get('angle', 90):.0f}°)")
+    if el.get("group"):
+        rows.append("Grupo: " + str(el["group"]))
+    return "\n".join(rows)
+
+
 def layer_name(el: dict) -> str:
     if el.get("name"):
         return el["name"]
@@ -353,9 +406,46 @@ def distribute(els: list[dict], axis: str) -> None:
         pos += (b[i1] - b[i0]) + gap
 
 
+def new_grid(**kw) -> dict:
+    """Retícula del diseño (como GuideGuide): columnas y filas con medianil, márgenes y guías sueltas, en px."""
+    g = dict(show=True, cols=0, rows=0, gutter=0.0, margin=[0.0, 0.0, 0.0, 0.0], vx=[], hy=[], mid=False)
+    g.update(kw)
+    return g
+
+
+def grid_lines(d: dict) -> tuple[list[float], list[float]]:
+    """Guías verticales (x) y horizontales (y) de la retícula `d["grid"]`: márgenes (arriba, derecha, abajo,
+    izquierda), los dos bordes de cada columna/fila con medianil, centro y guías sueltas."""
+    g = d.get("grid") or {}
+    if not g:
+        return [], []
+    W, H = float(d["w"]), float(d["h"])
+    mt, mr, mb, ml = (list(g.get("margin") or [0, 0, 0, 0]) + [0, 0, 0, 0])[:4]
+    xs, ys = [], []
+    if any((mt, mr, mb, ml)):
+        xs += [ml, W - mr]
+        ys += [mt, H - mb]
+    gut = float(g.get("gutter", 0))
+    for n, a0, a1, out in ((int(g.get("cols", 0)), ml, W - mr, xs), (int(g.get("rows", 0)), mt, H - mb, ys)):
+        if n > 1:
+            cell = (a1 - a0 - gut * (n - 1)) / n
+            for i in range(1, n):
+                e = a0 + i * cell + (i - 1) * gut
+                out += [e, e + gut] if gut > 0 else [e]
+    if g.get("mid"):
+        xs.append(W / 2)
+        ys.append(H / 2)
+    xs += [float(v) for v in g.get("vx", [])]
+    ys += [float(v) for v in g.get("hy", [])]
+    return sorted(set(round(v, 3) for v in xs)), sorted(set(round(v, 3) for v in ys))
+
+
 def snap_lines(d: dict, others: list[dict]) -> tuple[list[float], list[float]]:
-    """Líneas de imán: bordes y centro de la página y de los demás elementos."""
+    """Líneas de imán: bordes y centro de la página, la retícula y los demás elementos."""
     xs, ys = [0.0, d["w"] / 2, d["w"]], [0.0, d["h"] / 2, d["h"]]
+    gx, gy = grid_lines(d)
+    xs += gx
+    ys += gy
     for e in others:
         if e.get("hidden"):
             continue
@@ -1248,6 +1338,43 @@ def pathfinder(els: list[dict], op: str) -> dict | None:
 
 # ------------------------------------------------------------------ pintado (lienzo y exportación)
 
+_EDGE_CACHE: dict = {}
+
+
+def edged_image(img, src_rect, w: float, h: float, img_px: float, max_img: int, edge: dict):
+    """La parte visible de la foto con un borde artístico (rasgado, grunge, pincel…) en el alfa, al tamaño de
+    salida justo: el borde se ve igual en pantalla y en la exportación (sus medidas son relativas al lado)."""
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QImage, QPainter
+    import fx_engine as FX
+    k = max(1e-6, min(1.0, max_img / max(w * img_px, h * img_px, 1)))
+    pw, ph = max(8, int(round(w * img_px * k))), max(8, int(round(h * img_px * k)))
+    off = QImage(pw, ph, QImage.Format_RGBA8888)
+    off.fill(0)
+    qp = QPainter(off)
+    qp.setRenderHint(QPainter.SmoothPixmapTransform, True)
+    qp.drawImage(QRectF(0, 0, pw, ph), img, src_rect)
+    qp.end()
+    kind, amount, seed = edge["kind"], float(edge.get("amount", 50)), int(edge.get("seed", 1))
+    key = (pw, ph, kind, amount, seed)
+    a = _EDGE_CACHE.get(key)
+    if a is None:
+        if len(_EDGE_CACHE) > 24:
+            _EDGE_CACHE.clear()
+        a = _EDGE_CACHE[key] = FX.edge_alpha(ph, pw, kind, amount, seed)
+    buf = np.frombuffer(off.bits(), np.uint8, off.bytesPerLine() * ph).reshape(ph, off.bytesPerLine())
+    px = buf[:, :pw * 4].reshape(ph, pw, 4)
+    arr = px.astype(np.float32) / 255
+    if kind == "burn":
+        arr[..., :3] = FX.burn_tint(arr[..., :3], a)
+        aa = np.clip(a * 1.4, 0, 1)
+    else:
+        aa = a
+    arr[..., 3] *= aa
+    px[...] = (np.clip(arr, 0, 1) * 255 + 0.5).astype(np.uint8)
+    return off
+
+
 class ImageCache:
     """Fotos ya cargadas como QImage, por (ruta, lado máximo, B/N)."""
 
@@ -1257,9 +1384,10 @@ class ImageCache:
         self.limit = limit
         self.sizes = {}
 
-    def get(self, path: str, max_side: int, bw: bool = False, look: str = ""):
+    def get(self, path: str, max_side: int, bw: bool = False, look: str = "", art: tuple | None = None):
+        """`art` = (tipo, cantidad, detalle) de un filtro artístico de fx_engine (acuarela, óleo, cómic…)."""
         from PySide6.QtGui import QImage
-        key = (path, max_side, bw, look)
+        key = (path, max_side, bw, look, art)
         if key in self.d:
             self.d.move_to_end(key)
             return self.d[key]
@@ -1271,6 +1399,10 @@ class ImageCache:
             rgb = E.apply_look(a[..., :3].astype(np.float32) / 255, look)
             rgb = (np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8)
             a = np.concatenate([rgb, a[..., 3:]], 2) if a.shape[2] == 4 else rgb
+        if art and art[0]:
+            import fx_engine as FX
+            f = FX.artistic(a.astype(np.float32) / 255, art[0], art[1], art[2])
+            a = (np.clip(f, 0, 1) * 255 + 0.5).astype(np.uint8)
         if bw:
             g = cv2.cvtColor(a[..., :3], cv2.COLOR_RGB2GRAY)
             g = np.stack([g] * 3, 2)
@@ -1491,12 +1623,19 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
             want = int(min(max_img, max(64, max(w, h) * img_px * max(1.0, el.get("zoom", 1.0)) * 1.15)))
             # pedir por escalones para reutilizar la caché
             step = 1 << max(6, int(math.ceil(math.log2(want))))
-            img = cache.get(el["path"], min(step, max_img), bool(el.get("bw")), el.get("look", ""))
+            art = el.get("art") or {}
+            akey = (art["kind"], float(art.get("amount", 100)), float(art.get("detail", 50))) \
+                if art.get("kind") else None
+            img = cache.get(el["path"], min(step, max_img), bool(el.get("bw")), el.get("look", ""), akey)
         if img is not None and not img.isNull():
             x, y, cw, ch = cover_box(img.width(), img.height(), w, h, el.get("zoom", 1.0), el.get("fx", 0.5),
                                      el.get("fy", 0.5))
             p.setRenderHint(p.RenderHint.SmoothPixmapTransform, True)
-            p.drawImage(QRectF(0, 0, w, h), img, QRectF(x, y, cw, ch))
+            edge = el.get("edge") or {}
+            if edge.get("kind"):
+                p.drawImage(QRectF(0, 0, w, h), edged_image(img, QRectF(x, y, cw, ch), w, h, img_px, max_img, edge))
+            else:
+                p.drawImage(QRectF(0, 0, w, h), img, QRectF(x, y, cw, ch))
         elif editing:
             p.fillRect(QRectF(0, 0, w, h), QColor(200, 200, 205))
             pen = QPen(QColor(150, 150, 160), max(w, h) / 300)

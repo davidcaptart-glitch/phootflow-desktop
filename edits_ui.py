@@ -113,7 +113,8 @@ def _glyph_icon(kind: str, size=THUMB) -> QPixmap:
         p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, "T")
     else:
         glyph = {"retouch": "✚", "skin": "◐", "light": "◉", "liquify": "≈", "background": "◫",
-                 "logo": "◆", "image": "▣", "paint": "✎", "rays": "✺"}.get(kind, "■")
+                 "logo": "◆", "image": "▣", "paint": "✎", "rays": "✺", "portrait": "☺",
+                 "particles": "❄", "artistic": "❦"}.get(kind, "■")
         f = QFont(p.font())
         f.setPixelSize(int(size * 0.5))
         p.setFont(f)
@@ -476,7 +477,7 @@ def selection_outline(alpha: np.ndarray, box, max_px: int = 900) -> list:
 ADJ_ICONS = {"brightness": "☀", "levels": "▥", "curves": "∿", "exposure": "±", "vibrance": "▽",
              "hue_sat": "◑", "color_balance": "⚖", "black_white": "◧", "photo_filter": "◎", "invert": "◩",
              "posterize": "▦", "threshold": "▬", "clarity": "◇", "dehaze": "≋", "grain": "⁘", "relight": "✺",
-             "look": "✧", "solid": "■"}
+             "look": "✧", "solid": "■", "sharpen": "◬", "vignette": "◌", "hair": "≀"}
 
 
 def adjustments_grid(on_pick) -> QWidget:
@@ -813,6 +814,30 @@ class AdjustPanel(QWidget):
         self._slider("Intensidad", 0, 150, 1, self.p["amount"], lambda v: self.p.update(amount=v), 70)
         self._note("Un look completo con un solo regulador. Combínalo con la opacidad, una máscara o el modo "
                    "de fusión de la capa.")
+
+    def _ui_sharpen(self):
+        self._slider("Cantidad", 0, 200, 1, self.p["amount"], lambda v: self.p.update(amount=v), 60)
+        self._slider("Radio (px)", 0.3, 4, 0.1, self.p["radius"], lambda v: self.p.update(radius=v), 0.7)
+        self._slider("Umbral", 0, 20, 0.5, self.p["threshold"], lambda v: self.p.update(threshold=v), 2.0)
+        self._note("Enfoque solo de la luminosidad (sin halos de color). El umbral deja la piel lisa sin enfocar "
+                   "el ruido. El radio es para una foto de 2048 px: a tamaño completo se escala solo.")
+
+    def _ui_vignette(self):
+        self._slider("Cantidad", -100, 100, 1, self.p["amount"], lambda v: self.p.update(amount=v), -25)
+        self._slider("Punto medio", 0, 100, 1, self.p["midpoint"], lambda v: self.p.update(midpoint=v), 50)
+        self._slider("Redondez", -100, 100, 1, self.p["roundness"], lambda v: self.p.update(roundness=v))
+        self._slider("Difuminado", 0, 100, 1, self.p["feather"], lambda v: self.p.update(feather=v), 60)
+        self._note("Tras el recorte, como en Lightroom: en negativo oscurece las esquinas para llevar la vista al "
+                   "centro; en positivo las aclara.")
+
+    def _ui_hair(self):
+        self._slider("Alisado sedoso", 0, 100, 1, self.p["smooth"], lambda v: self.p.update(smooth=v), 35)
+        self._slider("Brillo", 0, 100, 1, self.p["shine"], lambda v: self.p.update(shine=v), 20)
+        self._slider("Definición", 0, 100, 1, self.p["define"], lambda v: self.p.update(define=v), 25)
+        self._slider("Densidad (huecos)", 0, 100, 1, self.p["density"], lambda v: self.p.update(density=v))
+        self._note("Va con la máscara «Pelo» o «Barba» (Filtro › Pelo sedoso / Barba, o Selección › Parte de la "
+                   "persona). Densidad rellena los claros de una barba rala con el tono del pelo de al lado. "
+                   "Para el color, añade Tono/Saturación con la misma máscara.")
 
     def _ui_solid(self):
         self.bl.addWidget(self._color_button("color", "Color del relleno…"))

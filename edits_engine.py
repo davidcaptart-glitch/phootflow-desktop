@@ -14,6 +14,8 @@ resolución (vista de 2048 px o exportación a tamaño completo):
   "retouch"    ops: [{"tool": heal|clone|fill, "r", "pts", "src": [dx, dy] | None, "hard"}]
   "skin"       amount, texture, auto (caras/piel con IA), strokes [[x, y, r, ±1]] (añadir/quitar)
   "light"      strokes: [{"mode": dodge|burn|whiten, "r", "s", "pts"}] (ojeras, ojos, dientes)
+  "portrait"   retoque de retrato automático en todas las caras (ver PORTRAIT_DEFAULTS): dientes, ojos, color
+               del iris, labios, colorete, igualar el tono de la piel y volumen (dodge and burn guiado)
   "background" mode: blur|bw|color|transparent, blur, color
   "image"      path, width (% del ancho del encuadre), x, y, anchor, angle, flip, cut (quitar fondo) y, con la
                transformación libre, quad: 4 esquinas [[x, y], ...] (sup-izq, sup-der, inf-der, inf-izq) que
@@ -22,6 +24,10 @@ resolución (vista de 2048 px o exportación a tamaño completo):
                "pts": [[x, y, presión], ...]}]: pincel y borrador (la presión de la tableta cambia el grosor).
   "rays"       rayos de luz: x, y (0..1 del encuadre, el foco), color, amount, length, spread, angle, count,
                seed; se suman a la imagen en modo Trama.
+  "particles"  partículas (fx_engine): nieve, lluvia, confeti, pétalos, bokeh, destellos, polvo dorado o corazones;
+               p = {kind, density, size, depth, angle, motion, opacity, colors, seed} (como Real Snow).
+  "artistic"   filtro artístico (fx_engine): art = acuarela, óleo, cómic, cómic al óleo, tinta, lápiz, lápiz de
+               color o pop art; amount, detail. Como cualquier capa, admite máscara y opacidad.
   "group"      grupo de capas: las capas con "parent": id del grupo se componen juntas y el grupo les aplica su
                visibilidad, opacidad, modo de fusión y máscara. En la lista, el grupo va encima de sus capas.
   Una capa de ajuste, imagen o pintura con "clip": True se recorta a la imagen o pintura de debajo (máscara de
@@ -51,22 +57,30 @@ import engine as E
 import studio_engine as SE
 
 DOC_VERSION = 1
-KINDS = {"liquify": "Licuar", "retouch": "Retoque", "skin": "Piel", "light": "Ojos y luz",
+KINDS = {"liquify": "Licuar", "retouch": "Retoque", "skin": "Piel", "light": "Ojos y luz", "portrait": "Retrato",
          "background": "Fondo", "text": "Texto", "logo": "Logo", "image": "Imagen", "adjust": "Ajuste",
-         "paint": "Pintura", "group": "Grupo", "rays": "Rayos de luz"}
+         "paint": "Pintura", "group": "Grupo", "rays": "Rayos de luz", "particles": "Partículas",
+         "artistic": "Filtro artístico"}
 OVERLAY = ("text", "logo")
 CLIPPABLE = ("adjust", "image", "paint")  # lo que puede ir recortado a una imagen o pintura
 CLIP_BASES = ("image", "paint")  # capas con píxeles propios: base de una máscara de recorte
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp")
 CUTS = {"none": "No quitar el fondo", "color": "Logo o fondo liso (por color)",
         "object": "Objeto o producto (automático)", "person": "Persona (IA)"}
-PIXEL_ORDER = ("liquify", "retouch", "skin", "light", "background", "adjust", "image", "paint", "rays", "group")
+PIXEL_ORDER = ("liquify", "retouch", "skin", "light", "portrait", "background", "adjust", "artistic", "image", "paint",
+               "rays", "particles", "group")
 # efectos de capa (imagen y pintura). Tamaños y distancias en % del lado largo; ángulos en grados
 FX_DEFAULTS = {"shadow": {"on": False, "color": "#000000", "opacity": 60, "angle": 120, "distance": 1.0,
                           "size": 1.5},
                "glow": {"on": False, "color": "#ffd890", "opacity": 70, "size": 3.0},
                "blur": {"on": False, "amount": 0.4},
                "motion": {"on": False, "amount": 2.0, "angle": 0}}  # orden por defecto al crear capas
+# retoque de retrato automático (0..100 salvo `lips`, -100..100); los colores, "" = sin cambio
+PORTRAIT_DEFAULTS = {"teeth": 40, "eyes": 35, "whites": 30, "iris_color": "", "iris_amount": 60, "lips": 10,
+                     "lip_color": "", "lip_amount": 50, "blush": 0, "even": 25, "sculpt": 30}
+PORTRAIT_LABELS = {"teeth": "Blanquear dientes", "eyes": "Iris: luz y nitidez", "whites": "Blanco de los ojos",
+                   "iris_amount": "Color del iris", "lips": "Intensidad de labios", "lip_amount": "Color de labios",
+                   "blush": "Colorete", "even": "Igualar tono de piel", "sculpt": "Volumen (dodge and burn)"}
 ANCHORS = {"lt": (0, 0), "mt": (0.5, 0), "rt": (1, 0), "lm": (0, 0.5), "mm": (0.5, 0.5), "rm": (1, 0.5),
            "lb": (0, 1), "mb": (0.5, 1), "rb": (1, 1)}
 FORMATS = {"jpg": "JPG", "png": "PNG (con transparencia)", "webp": "WebP (web y redes, transparencia)",
@@ -91,6 +105,7 @@ def new_layer(kind: str, **kw) -> dict:
          "retouch": dict(ops=[]),
          "skin": dict(amount=55, texture=45, auto=True, strokes=[]),
          "light": dict(strokes=[]),
+         "portrait": dict(PORTRAIT_DEFAULTS),
          "background": dict(mode="blur", blur=40, color="#ffffff", strokes=[], detect="person", key_color=None,
                             tol=12, soft=8),
          "text": dict(text="© PhootFlow", font="Arial", size=3.0, color="#ffffff", x=0.97, y=0.965, anchor="rb",
@@ -102,7 +117,9 @@ def new_layer(kind: str, **kw) -> dict:
          "paint": dict(strokes=[]),
          "group": dict(collapsed=False),
          "rays": dict(x=0.5, y=0.15, color="#fff1cf", amount=60, length=70, spread=70, angle=90, count=24,
-                      seed=7)}[kind]
+                      seed=7),
+         "particles": dict(p=_fx().particle_defaults("snow")),
+         "artistic": dict(art="watercolor", amount=100.0, detail=50.0)}[kind]
     p.update(kw)
     lay = {"id": uuid.uuid4().hex[:8], "kind": kind, "name": KINDS[kind], "visible": True, "opacity": 100,
            "blend": "normal", **p}
@@ -272,7 +289,7 @@ def stroke_mask(shape, pts, r_px: float) -> np.ndarray:
 def selection_mask(shape, spec: dict | None, img: np.ndarray | None = None, key: str = "") -> np.ndarray:
     """Alfa 0..1 de una selección (o de la máscara de una capa), en coordenadas 0..1 de la foto sin recortar.
 
-    spec = {"shapes": [{"op": add|sub|inter, "type": rect|ellipse|lasso|subject|wand|all, "box": [x0, y0, x1, y1],
+    spec = {"shapes": [{"op": add|sub|inter, "type": rect|ellipse|lasso|subject|wand|part|all, "box": [x0, y0, x1, y1],
             "pts": [[x, y], ...], (varita) "pt": [x, y], "tol", "contiguous"}],"feather": radio del calado (fracción del lado largo), "invert": bool,
             "strokes": [[x, y, r, ±1], ...] (pincel de máscara)}
     """
@@ -300,6 +317,9 @@ def selection_mask(shape, spec: dict | None, img: np.ndarray | None = None, key:
         elif t == "wand" and img is not None:
             m = None
             sa = wand_mask(img, sh)
+        elif t == "part" and img is not None:
+            m = None
+            sa = part_mask(img, sh.get("part", "lips"), key)
         elif t == "subject" and img is not None:
             pr = person_probs(img, key)
             sub = (1 - pr[..., 0]) if pr is not None else object_alpha(img)
@@ -316,6 +336,21 @@ def selection_mask(shape, spec: dict | None, img: np.ndarray | None = None, key:
     if spec.get("invert"):
         a = 1 - a
     return np.clip(a, 0, 1).astype(np.float32)
+
+
+# partes que se seleccionan solas (IA): "part" de una forma de selección o de una máscara de capa
+PARTS = {"lips": "Labios", "teeth": "Dientes", "eyes": "Ojos", "iris": "Iris", "brows": "Cejas",
+         "beard": "Barba y bigote", "hair": "Pelo", "face": "Piel de la cara", "skin": "Piel (cara y cuerpo)",
+         "clothes": "Ropa", "person": "Persona", "background": "Fondo"}
+
+
+def part_mask(img: np.ndarray, part: str, key: str = "") -> np.ndarray:
+    """Máscara automática de una parte de la cara o de la persona (vacía si no hay modelo o no hay caras)."""
+    try:
+        import masks as M
+        return np.clip(M.part_alpha(np.ascontiguousarray(img, dtype=np.float32), part, key), 0, 1)
+    except Exception:
+        return np.zeros(img.shape[:2], np.float32)
 
 
 WAND_PX = 1024  # la varita trabaja a este tamaño: la misma selección en la vista y al exportar
@@ -604,8 +639,15 @@ def _apply_op(img: np.ndarray, op: dict) -> np.ndarray:
     src = img[y0 + dy:y1 + dy, x0 + dx:x1 + dx]
     hardness = float(op.get("hard", 0.5 if tool == "clone" else 0.25))
     feather = r * (1.0 - hardness) * 0.6
+    freq = op.get("freq", "both")
     if tool == "clone":
         res = src
+    elif tool == "heal" and freq in ("color", "texture"):
+        # como la separación de frecuencias a mano: «color» trae el tono del origen y conserva los poros del
+        # destino (rojeces, ojeras); «textura» trae los poros del origen y conserva el tono (arrugas, poros)
+        fs = max(0.8, 0.0012 * max(h, w))
+        lo_s, lo_d = _lowpass(src, fs), _lowpass(dst, fs)
+        res = (dst - lo_d + lo_s) if freq == "color" else (src - lo_s + lo_d)
     else:
         # corrector: textura del origen + tono y color del entorno del destino (separación de frecuencias)
         sigma = r * (0.55 if tool == "heal" else 0.4)
@@ -852,6 +894,153 @@ def apply_light(img: np.ndarray, lay: dict) -> np.ndarray:
         new = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2RGB), 0, 1)
         out = out.copy() if out is img else out
         out[y0:y1, x0:x1] = reg * (1 - a) + new * a
+    return out
+
+
+# ------------------------------------------------------------------ retoque de retrato automático
+
+# dodge and burn guiado: manchas suaves en coordenadas de la cara (s: anchos de cara desde el centro de los
+# ojos; t: distancias ojos-boca hacia la barbilla), tamaño en anchos de cara y signo (+ aclarar, - oscurecer).
+# Luz donde la cara la recibe (frente, tabique, pómulos, barbilla, bajo la ceja) y sombra donde se hunde
+# (bajo el pómulo, lados de la nariz, sienes), como en el retoque a mano.
+SCULPT = [(0.0, -0.95, 0.20, 1.0), (0.0, 0.30, 0.055, 0.9), (0.0, 0.62, 0.05, 0.6), (0.0, 1.62, 0.09, 0.8),
+          (-0.26, 0.32, 0.09, 0.8), (0.26, 0.32, 0.09, 0.8), (-0.17, -0.38, 0.055, 0.6), (0.17, -0.38, 0.055, 0.6),
+          (-0.33, 0.98, 0.10, -1.0), (0.33, 0.98, 0.10, -1.0), (-0.10, 0.45, 0.04, -0.7), (0.10, 0.45, 0.04, -0.7),
+          (-0.45, -0.42, 0.09, -0.6), (0.45, -0.42, 0.09, -0.6)]
+
+
+def _blobs(shape, pts, spots, x0=0, y0=0) -> np.ndarray:
+    """Suma de manchas gaussianas con signo en los ejes de una cara (en un recorte que empieza en x0, y0)."""
+    import masks as M
+    h, w = shape[:2]
+    ax = M.face_axes(pts)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    out = np.zeros((h, w), np.float32)
+    for s_, t_, size, sign in spots:
+        c = ax["E"] + ax["u"] * ax["fw"] * s_ + ax["v"] * ax["d"] * t_ - np.array([x0, y0], np.float32)
+        sig = max(1.0, size * ax["fw"])
+        out += sign * np.exp(-((xx - c[0]) ** 2 + (yy - c[1]) ** 2) / (2 * sig * sig))
+    return out
+
+
+def _lab(x):
+    return cv2.cvtColor(np.ascontiguousarray(np.clip(x, 0, 1), dtype=np.float32), cv2.COLOR_RGB2Lab)
+
+
+def _rgb(lab):
+    return np.clip(cv2.cvtColor(np.ascontiguousarray(lab, dtype=np.float32), cv2.COLOR_Lab2RGB), 0, 1)
+
+
+def _hex_lab(c: str) -> np.ndarray:
+    return _lab(_hex(c).reshape(1, 1, 3))[0, 0]
+
+
+def apply_portrait(img: np.ndarray, lay: dict, key: str = "") -> np.ndarray:
+    """Retoque de retrato en todas las caras, sin pincel: dientes, ojos, iris, labios, colorete, tono de la piel
+    y volumen. Las zonas salen de la malla facial y de la segmentación de la persona (IA local)."""
+    p = dict(PORTRAIT_DEFAULTS, **{k: lay[k] for k in PORTRAIT_DEFAULTS if k in lay})
+    try:
+        import masks as M
+        faces = M.faces_scaled(np.ascontiguousarray(img, dtype=np.float32), key)
+    except Exception:
+        return img
+    faces = [f for f in faces if len(f) >= 468]
+    if not faces:
+        return img
+    h, w = img.shape[:2]
+    # todo se calcula en la caja de las caras (con margen para el cuello y la frente)
+    xs = np.concatenate([f[:, 0] for f in faces])
+    ys = np.concatenate([f[:, 1] for f in faces])
+    fwm = max(float(np.ptp(f[:, 0])) for f in faces)
+    x0, y0 = max(0, int(xs.min() - 0.5 * fwm)), max(0, int(ys.min() - 0.6 * fwm))
+    x1, y1 = min(w, int(xs.max() + 0.5 * fwm)), min(h, int(ys.max() + 0.5 * fwm))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return img
+    crop = img[y0:y1, x0:x1]
+    cache: dict = {}
+
+    def part(name):
+        if name not in cache:
+            cache[name] = part_mask(img, name, key)[y0:y1, x0:x1]
+        return cache[name]
+
+    lab = _lab(crop)
+    L, A_, B_ = lab[..., 0], lab[..., 1], lab[..., 2]
+    skin = None
+    if p["even"] > 0 or p["sculpt"] > 0 or p["blush"] > 0:
+        skin = part("face").copy()
+        if skin.max() < 0.05:  # sin modelo de segmentación: el óvalo de la cara
+            skin = np.zeros(crop.shape[:2], np.float32)
+            for f in faces:
+                cv2.fillPoly(skin, [np.round(f[M.FACE_OVAL] - [x0, y0]).astype(np.int32)], 1.0, cv2.LINE_AA)
+            skin = cv2.GaussianBlur(skin, (0, 0), max(1.0, 0.02 * fwm))
+        feat = np.maximum(np.maximum(part("eyes"), part("brows")), part("lips"))
+        it = max(1, int(0.01 * fwm))
+        feat = cv2.GaussianBlur(cv2.dilate(feat, np.ones((3, 3), np.uint8), iterations=it), (0, 0), float(it))
+        skin = np.clip(skin * (1 - feat), 0, 1)
+    if p["even"] > 0:  # rojeces y manchas de color: el color de la piel se acerca a su media de alrededor
+        sig = max(2.0, 0.035 * fwm)
+        wl = cv2.GaussianBlur(skin, (0, 0), sig) + 1e-4
+        ww = cv2.GaussianBlur(skin, (0, 0), sig * 3) + 1e-4
+        k = skin * (p["even"] / 100.0) * 0.8
+        for ch in (A_, B_):
+            loc = cv2.GaussianBlur(ch * skin, (0, 0), sig) / wl
+            wide = cv2.GaussianBlur(ch * skin, (0, 0), sig * 3) / ww
+            ch -= (loc - wide) * k
+    if p["sculpt"] > 0:
+        dmap = np.zeros(crop.shape[:2], np.float32)
+        for f in faces:
+            dmap += _blobs(crop.shape, f, SCULPT, x0, y0)
+        mid = np.clip(1 - np.abs(L / 50.0 - 1) ** 2, 0, 1)
+        L += np.clip(dmap, -1, 1) * skin * mid * (p["sculpt"] / 100.0) * 9.0
+    if p["blush"] > 0:
+        cheeks = np.zeros(crop.shape[:2], np.float32)
+        for f in faces:
+            cheeks += _blobs(crop.shape, f, [(-0.25, 0.72, 0.11, 1.0), (0.25, 0.72, 0.11, 1.0)], x0, y0)
+        wgt = np.clip(cheeks, 0, 1) * skin * (p["blush"] / 100.0)
+        A_ += wgt * 14.0
+        B_ += wgt * 3.0
+        L -= wgt * 2.0
+    if p["teeth"] > 0:
+        t = part("teeth") * np.clip((L - 35) / 20, 0, 1) * (p["teeth"] / 100.0)
+        A_ -= A_ * 0.45 * t
+        B_ -= np.maximum(B_, 0) * 0.75 * t
+        L += (np.minimum(100, L * 1.08 + 2) - L) * t
+    if p["whites"] > 0 or p["eyes"] > 0 or p["iris_color"]:
+        iris = part("iris")
+        if p["whites"] > 0:
+            ring = cv2.dilate(iris, np.ones((3, 3), np.uint8), iterations=max(1, int(0.006 * fwm)))
+            wh = np.clip(part("eyes") - ring, 0, 1) * np.clip((L - 40) / 20, 0, 1) * (p["whites"] / 100.0)
+            A_ -= A_ * 0.6 * wh  # venas y rojez fuera
+            B_ -= np.maximum(B_, 0) * 0.5 * wh
+            L += (100 - L) * 0.12 * wh
+        if p["iris_color"]:
+            tgt = _hex_lab(p["iris_color"])
+            wi = iris * np.clip((L - 12) / 15, 0, 1) * (p["iris_amount"] / 100.0)  # la pupila no se tiñe
+            A_ += (tgt[1] * 0.7 - A_) * wi
+            B_ += (tgt[2] * 0.7 - B_) * wi
+        if p["eyes"] > 0:
+            e = iris * (p["eyes"] / 100.0)
+            L += (100 - L) * 0.18 * e * np.clip((L - 8) / 20, 0, 1)
+            sig = max(0.6, 0.004 * fwm)
+            L += (L - cv2.GaussianBlur(L, (0, 0), sig)) * 1.2 * e
+            A_ *= 1 + 0.25 * e
+            B_ *= 1 + 0.25 * e
+    if p["lips"] or p["lip_color"]:
+        lips = part("lips")
+        if p["lips"]:
+            k = 1 + lips * (p["lips"] / 100.0) * 0.6
+            A_ *= k
+            B_ *= k
+        if p["lip_color"]:
+            tgt = _hex_lab(p["lip_color"])
+            wl = lips * (p["lip_amount"] / 100.0)
+            A_ += (tgt[1] - A_) * wl
+            B_ += (tgt[2] - B_) * wl
+            L += (tgt[0] - L) * wl * 0.25
+    np.clip(L, 0, 100, out=L)
+    out = img.copy()
+    out[y0:y1, x0:x1] = _rgb(lab)
     return out
 
 
@@ -1168,7 +1357,9 @@ def _layer_active(l: dict) -> bool:
             "light": bool(l.get("strokes")), "background": True,
             "text": bool(str(l.get("text", "")).strip()), "logo": bool(l.get("path")),
             "image": bool(l.get("path")), "adjust": True, "paint": bool(l.get("strokes")),
-            "group": True, "rays": l.get("amount", 0) > 0}.get(k, False)
+            "group": True, "rays": l.get("amount", 0) > 0,
+            "particles": float((l.get("p") or {}).get("density", 0)) > 0,
+            "artistic": bool(l.get("art")) and float(l.get("amount", 0)) > 0}.get(k, False)
 
 
 # ------------------------------------------------------------------ pintura (pincel y borrador)
@@ -1558,6 +1749,22 @@ def apply_rays(img: np.ndarray, lay: dict, frame=None) -> np.ndarray:
     return (1 - (1 - img) * (1 - _hex(lay.get("color", "#fff1cf")) * a)).astype(np.float32)  # Trama
 
 
+def _fx():
+    import fx_engine as FX
+    return FX
+
+
+def apply_particles(img: np.ndarray, lay: dict, frame=None) -> np.ndarray:
+    """Partículas en el encuadre (frame = x, y, w, h de la foto recortada dentro de la imagen sin recortar)."""
+    FX = _fx()
+    H, W = img.shape[:2]
+    fx, fy, fw, fh = frame if frame is not None else (0, 0, W, H)
+    p = dict(lay.get("p") or {})
+    p.update(x0=fx / W, y0=fy / H, x1=(fx + fw) / W, y1=(fy + fh) / H)
+    rgba = FX.particles_rgba(H, W, p)
+    return FX.over(img, rgba, FX.PARTICLE_BLEND.get(p.get("kind"), "normal"))
+
+
 def apply_pixel_layer(img: np.ndarray, lay: dict, key: str = "", frame=None):
     """Aplica una capa de imagen. Devuelve (imagen, alfa nuevo | None)."""
     k = lay["kind"]
@@ -1574,9 +1781,16 @@ def apply_pixel_layer(img: np.ndarray, lay: dict, key: str = "", frame=None):
         out, alpha = apply_background(img, lay, key)
     elif k == "adjust":
         import edits_adjust as A
-        out = A.apply(img, lay.get("adj", "curves"), lay.get("p") or {})
+        out = A.apply(img, lay.get("adj", "curves"), lay.get("p") or {}, frame)
+    elif k == "portrait":
+        out = apply_portrait(img, lay, key)
     elif k == "rays":
         out = apply_rays(img, lay, frame)
+    elif k == "particles":
+        out = apply_particles(img, lay, frame)
+    elif k == "artistic":
+        out = _fx().artistic(img, lay.get("art", "watercolor"), float(lay.get("amount", 100)),
+                             float(lay.get("detail", 50)))
     else:
         return img, None
     if lay.get("blend", "normal") != "normal":
@@ -1874,6 +2088,12 @@ def upscale(img: np.ndarray, factor: int = 2, alpha: np.ndarray | None = None):
     if f == 1:
         return img, alpha
     h, w = img.shape[:2]
+    FX = _fx()
+    if FX.upscaler_ready():  # con IA (Real-ESRGAN) si el modelo está: bordes nítidos sin dientes de sierra
+        big = FX.upscale(np.clip(img, 0, 1).astype(np.float32), float(f), True)
+        if alpha is not None:
+            alpha = np.clip(cv2.resize(alpha, (w * f, h * f), interpolation=cv2.INTER_CUBIC), 0, 1)
+        return big, alpha
     big = np.empty((h * f, w * f, 3), np.float32)
     rng = np.random.default_rng(5)
     band, ov = 384, 12  # por franjas: una foto de 24 Mpx ampliada no cabe entera en memoria varias veces

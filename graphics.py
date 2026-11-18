@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDial
 
 import engine as E
 import export_formats as EF
+import fx_engine as FX
+import fx_ui as FXU
 import graphics_engine as G
 import graphics_textfx as TFX
 import icons as I
@@ -827,6 +829,15 @@ class Canvas(QGraphicsView):
             p.drawRect(pg.adjusted(-b, -b, b, b))
             p.setPen(QPen(QColor(46, 134, 171, 140), 1 / s, Qt.DotLine))
             p.drawRect(pg.adjusted(b, b, -b, -b))  # margen de seguridad
+        grid = self.d.get("grid") or {}
+        if grid.get("show", True):
+            rx, ry = G.grid_lines(self.d)
+            if rx or ry:
+                p.setPen(QPen(QColor(62, 197, 255, 150), 1 / s))
+                for x in rx:
+                    p.drawLine(QPointF(pg.left() + x, pg.top()), QPointF(pg.left() + x, pg.bottom()))
+                for y in ry:
+                    p.drawLine(QPointF(pg.left(), pg.top() + y), QPointF(pg.right(), pg.top() + y))
         gx, gy = self.guides
         p.setPen(QPen(GUIDE, 1 / s))
         for x in gx:
@@ -1060,11 +1071,14 @@ class TaskBar(QFrame):
         else:
             t = sel[0]["type"]
             if t == "text":
-                acts += [("Efectos", o.show_text_effects), ("T  Crear contornos", o.outline_text)]
+                acts += [("Efectos", o.show_text_effects), ("Cromo, fuego…", o.fx_effect),
+                         ("T  Crear contornos", o.outline_text)]
             elif t == "image" and sel[0].get("path"):
-                acts += [("Quitar fondo", o.remove_bg), ("Vectorizar", o.vectorize)]
+                acts += [("Quitar fondo", o.remove_bg), ("Vectorizar", o.vectorize), ("Ampliar IA", o.upscale_image)]
             elif t == "vector":
-                acts += [("Editar nodos", lambda: o.set_tool("direct"))]
+                acts += [("Editar nodos", lambda: o.set_tool("direct")), ("Cromo, fuego…", o.fx_effect)]
+            elif t == "shape":
+                acts += [("Cromo, fuego…", o.fx_effect)]
         acts += [("Duplicar", o.duplicate)]
         for txt, fn in acts:
             b = QPushButton(txt)
@@ -2218,6 +2232,9 @@ class GraphicsView(QWidget):
                          ("Repartir en vertical", lambda: self.distribute("v"))]),
             None,
             ("Quitar fondo…", self.remove_bg), ("Vectorizar imagen…", self.vectorize),
+            ("Ampliar con IA…", self.upscale_image), None,
+            ("Texturas, partículas y efectos…", lambda: self.open_generator("texture")),
+            ("Efecto especial (cromo, fuego, neón…)…", self.fx_effect),
             ("Código QR…", self.add_qr)])
         self.b_bg, self.b_vec = ob["Quitar fondo…"], ob["Vectorizar imagen…"]
         menu("Texto", [("Añadir título", lambda: self.add_text("title")),
@@ -2228,6 +2245,7 @@ class GraphicsView(QWidget):
         vw = menu("Ver", [("Encajar la página", self.canvas.fit, "Ctrl+0"),
                           ("Tamaño real (100 %)", lambda: self.canvas.set_zoom(1.0), "Ctrl+1"), None,
                           ("Imán (guías inteligentes)", lambda: None),
+                          ("Retícula y guías…", self.grid_dialog, "Ctrl+'"),
                           ("Vista avanzada (herramientas y ayuda a la vista)", lambda: None), None,
                           ("Pantalla completa", self.toggle_fullscreen, "F11")])
         self.adv_act = vw["Vista avanzada (herramientas y ayuda a la vista)"]
@@ -2238,7 +2256,8 @@ class GraphicsView(QWidget):
         self.snap_cb.setChecked(True)
         self.snap_cb.toggled.connect(lambda on: setattr(self.canvas, "snap_on", on))
         menu("Ventana", [("Propiedades", lambda: self.right_tabs.setCurrentIndex(0)),
-                         ("Capas", lambda: self.right_tabs.setCurrentIndex(1)), None,
+                         ("Capas", lambda: self.right_tabs.setCurrentIndex(1)),
+                         ("Información de la capa", self.show_layer_info, "Ctrl+Shift+I"), None,
                          ("Bibliotecas: diseño y plantillas", lambda: self.show_library(0)),
                          ("Bibliotecas: elementos de internet", lambda: self.show_library(1)),
                          ("Bibliotecas: fotos", lambda: self.show_library(2)),
@@ -2967,6 +2986,7 @@ class GraphicsView(QWidget):
             bw.setChecked(bool(el.get("bw")))
             bw.toggled.connect(lambda on: self.set_prop(el, "bw", on))
             self.props.addWidget(bw)
+            self._fx_image_props(el)
         elif t == "vector":
             paths = el.get("paths", [])
             if len(paths) == 1:
@@ -3208,7 +3228,7 @@ class GraphicsView(QWidget):
             it.setData(Qt.UserRole, el["id"])
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled)
             it.setCheckState(Qt.Unchecked if el.get("hidden") else Qt.Checked)
-            it.setToolTip("Casilla: visible · arrastra para cambiar el orden")
+            it.setToolTip(G.layer_info(el, self.d) + "\n\nCasilla: visible · arrastra para cambiar el orden")
             self.layers.addItem(it)
         self.layers.blockSignals(False)
         self._building = False
@@ -3497,6 +3517,188 @@ class GraphicsView(QWidget):
         if len(sel) == 1 and sel[0]["type"] == "image" and sel[0].get("path"):
             return sel[0]
         return None
+
+    # ---------------------------------------------------------- efectos «de plugin» (fx_engine)
+    def _fx_image_props(self, el):
+        """Filtro artístico (acuarela, óleo, cómic…) y borde artístico (rasgado, grunge…) de una foto."""
+        art = el.get("art") or {}
+        ac = QComboBox()
+        ac.addItem("Ninguno", "")
+        for k, txt in FX.ARTISTIC.items():
+            ac.addItem(txt, k)
+        ac.setCurrentIndex(max(0, ac.findData(art.get("kind", ""))))
+        ai, ad = QSlider(Qt.Horizontal), QSlider(Qt.Horizontal)
+        for sl, v in ((ai, art.get("amount", 100)), (ad, art.get("detail", 50))):
+            sl.setRange(0, 100)
+            sl.setValue(int(v))
+
+        def set_art(*_):
+            k = ac.currentData()
+            self.set_prop(el, "art", {"kind": k, "amount": ai.value(), "detail": ad.value()} if k else None)
+
+        ac.currentIndexChanged.connect(set_art)
+        for sl in (ai, ad):
+            sl.sliderReleased.connect(set_art)
+            sl.valueChanged.connect(lambda _v, sl=sl: None if sl.isSliderDown() else set_art())
+        ac.setToolTip("Convierte la foto en pintura: acuarela, óleo, cómic, tinta, lápiz o pop art")
+        self._row("Artístico", ac)
+        self._row("Intensidad", ai)
+        self._row("Detalle", ad)
+        edge = el.get("edge") or {}
+        ec = QComboBox()
+        ec.addItem("Ninguno", "")
+        for k, txt in FX.EDGES.items():
+            ec.addItem(txt, k)
+        ec.setCurrentIndex(max(0, ec.findData(edge.get("kind", ""))))
+        ea = QSlider(Qt.Horizontal)
+        ea.setRange(0, 100)
+        ea.setValue(int(edge.get("amount", 50)))
+
+        def set_edge(*_):
+            k = ec.currentData()
+            self.set_prop(el, "edge", {"kind": k, "amount": ea.value(), "seed": int(edge.get("seed", 1))}
+                          if k else None)
+
+        ec.currentIndexChanged.connect(set_edge)
+        ea.sliderReleased.connect(set_edge)
+        ea.valueChanged.connect(lambda _v: None if ea.isSliderDown() else set_edge())
+        self._row("Borde", ec)
+        self._row("Cantidad", ea)
+
+    def upscale_image(self):
+        """Amplía la foto seleccionada ×2/×3/×4 (Real-ESRGAN) y la cambia por la ampliada (el original no se toca;
+        «Volver a la original» la recupera)."""
+        el = self._sel_image()
+        if el is None:
+            QMessageBox.information(self, "Ampliar con IA", "Selecciona una foto.")
+            return
+        FX.configure(os.path.join(self.cfg_dir, "modelos"))
+        src = el["path"]
+        w0, h0 = self.canvas.cache.full_size(src)
+        if not w0:
+            QMessageBox.warning(self, "Ampliar con IA", "No se pudo abrir la foto.")
+            return
+
+        def load():
+            a = G.load_rgb(src)
+            return None if a is None else a.astype(np.float32) / 255
+
+        dlg = FXU.UpscaleDialog(self, load, (w0, h0))
+        if dlg.exec() != QDialog.Accepted or dlg.result is None:
+            return
+        res = dlg.result
+        stem = os.path.splitext(os.path.basename(el.get("orig") or src))[0] + f"_x{dlg.factor:g}"
+        alpha = res.shape[2] == 4
+        path = FXU.unique_path(os.path.join(self.ddir, "ampliadas"), stem, "png" if alpha else "jpg")
+        try:
+            from PIL import Image
+            a8 = (np.clip(res, 0, 1) * 255 + 0.5).astype(np.uint8)
+            if alpha:
+                Image.fromarray(a8, "RGBA").save(path)
+            else:
+                Image.fromarray(a8, "RGB").save(path, quality=96, subsampling=0)
+        except Exception as ex:
+            QMessageBox.warning(self, "Ampliar con IA", f"No se pudo guardar: {ex}")
+            return
+        el["orig"] = el.get("orig") or src
+        el["path"] = path
+        self.items[el["id"]].update()
+        self.commit()
+        self.build_props()
+        self.status_msg(f"Ampliada ×{dlg.factor:g}: {os.path.basename(path)}")
+
+    def status_msg(self, text):
+        bar = getattr(self, "status", None)
+        if bar is not None and hasattr(bar, "setText"):
+            bar.setText(text)
+
+    def _effect_alpha(self, el, margin=0.35):
+        """Función px → alfa del elemento `el` (sin girar) con un margen alrededor, para los efectos."""
+        def fn(px):
+            W, H = el["w"] * (1 + 2 * margin), el["h"] * (1 + 2 * margin)
+            k = px / max(W, H, 1e-6)
+            iw, ih = max(8, int(W * k)), max(8, int(H * k))
+            img = QImage(iw, ih, QImage.Format_ARGB32_Premultiplied)
+            img.fill(0)
+            p = QPainter(img)
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setRenderHint(QPainter.TextAntialiasing, True)
+            p.scale(k, k)
+            p.translate(el["w"] * margin, el["h"] * margin)
+            e = dict(el, opacity=1.0, hidden=False)
+            G.paint_element(p, e, self.canvas.cache, False, k)
+            p.end()
+            buf = np.frombuffer(img.constBits(), np.uint8, img.bytesPerLine() * ih).reshape(ih, img.bytesPerLine())
+            return buf[:, :iw * 4].reshape(ih, iw, 4)[..., 3].astype(np.float32) / 255
+        return fn
+
+    def fx_effect(self):
+        sel = self.selected()
+        if len(sel) != 1 or sel[0]["type"] not in ("text", "shape", "vector", "image"):
+            QMessageBox.information(self, "Efecto especial", "Selecciona un texto, una forma o un logo.")
+            return
+        self.open_generator("effect", sel[0])
+
+    def open_generator(self, start="texture", target=None):
+        """Texturas (fondo), partículas (encima de todo) o efecto sobre `target` (encima de él, que se oculta)."""
+        m = 0.35
+        if target is not None:
+            size = (int(target["w"] * (1 + 2 * m)), int(target["h"] * (1 + 2 * m)))
+            fn = self._effect_alpha(target, m)
+        else:
+            sel = self.selected()
+            cand = sel[0] if len(sel) == 1 and sel[0]["type"] in ("text", "shape", "vector") else None
+            fn = self._effect_alpha(cand, m) if cand is not None else None
+            target = cand
+            size = (int(self.d["w"]), int(self.d["h"]))
+        dlg = FXU.GeneratorDialog(self, size if start == "effect" else (int(self.d["w"]), int(self.d["h"])), fn,
+                                  start)
+        if dlg.exec() != QDialog.Accepted or dlg.result is None:
+            return
+        path = FXU.unique_path(os.path.join(self.ddir, "efectos"), dlg.label, "png")
+        try:
+            FXU.save_png(dlg.result, path)
+        except Exception as ex:
+            QMessageBox.warning(self, "Texturas y efectos", f"No se pudo guardar: {ex}")
+            return
+        if dlg.kind == "effect" and target is not None:
+            el = G.image_el(self.d, path, 1.0, x=target["x"] - target["w"] * m, y=target["y"] - target["h"] * m,
+                            w=target["w"] * (1 + 2 * m), h=target["h"] * (1 + 2 * m), rot=target.get("rot", 0.0),
+                            name=f"{dlg.label}: {G.layer_name(target).strip()}")
+            i = self.d["elements"].index(target)
+            target["hidden"] = True
+            self.d["elements"].insert(i + 1, el)
+        else:
+            el = G.image_el(self.d, path, self.d["w"] / max(1, self.d["h"]), x=0.0, y=0.0, w=float(self.d["w"]),
+                            h=float(self.d["h"]), name=("Textura: " if dlg.kind == "texture" else "Partículas: ")
+                            + dlg.label)
+            if dlg.kind == "texture":
+                self.d["elements"].insert(0, el)  # de fondo
+            else:
+                self.d["elements"].append(el)
+        self.rebuild(select=[el["id"]])
+        self.commit()
+
+    def grid_dialog(self):
+        u = "mm" if self._mm() else "px"
+        dlg = FXU.GridDialog(self, self.d.get("grid"), (self.d["w"], self.d["h"]), self._to_unit, self._from_unit, u)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        g = dlg.grid()
+        if g is None:
+            self.d.pop("grid", None)
+        else:
+            self.d["grid"] = g
+        self.canvas.viewport().update()
+        self.commit()
+
+    def show_layer_info(self):
+        sel = self.selected()
+        if not sel:
+            QMessageBox.information(self, "Información de la capa", "Selecciona una capa.")
+            return
+        QMessageBox.information(self, "Información de la capa",
+                                "\n\n".join(G.layer_info(e, self.d) for e in sel[:6]))
 
     def remove_bg(self):
         el = self._sel_image()

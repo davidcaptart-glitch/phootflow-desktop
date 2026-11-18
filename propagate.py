@@ -31,7 +31,7 @@ STUDIO_GROUPS: list[tuple[str, str, list[str], bool]] = [
     ("geometry", "Recorte y enderezado", ["crop", "crop_ratio", "angle"], False),
 ]
 # capas de Edits que valen para otra foto (las de IA se recalculan; texto y logo se colocan igual)
-EDITS_COPYABLE = ("adjust", "skin", "light", "background", "text", "logo", "image")
+EDITS_COPYABLE = ("adjust", "skin", "light", "portrait", "background", "text", "logo", "image")
 
 
 def studio_patch(settings: dict, groups) -> dict:

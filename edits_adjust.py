@@ -37,13 +37,16 @@ ADJUSTMENTS = {  # clave: (nombre, parámetros por defecto)
                                           ambient=-20.0, relief=40.0)),
     "look": ("Reajuste (looks)", dict(look="neo_noir", amount=70.0)),
     "solid": ("Relleno de color", dict(color="#ff4fa0")),
+    "sharpen": ("Enfoque suavizado", dict(amount=60.0, radius=0.7, threshold=2.0)),
+    "vignette": ("Viñeteado", dict(amount=-25.0, midpoint=50.0, roundness=0.0, feather=60.0)),
+    "hair": ("Pelo y barba", dict(smooth=35.0, shine=20.0, define=25.0, density=0.0)),
 }
 # «Reajuste»: looks con un solo regulador de intensidad (como el Reajuste generativo, pero con fórmulas fijas)
 LOOKS = {"neo_noir": "Lluvia neo-noir", "golden": "Hora dorada", "teal_orange": "Cine (azul y naranja)",
          "pastel": "Pastel suave", "faded": "Película antigua", "winter": "Invierno frío",
          "sunset": "Atardecer magenta", "bw_drama": "B/N dramático", "matte": "Mate editorial",
          "night": "Noche americana"}
-SPATIAL = ("clarity", "dehaze", "grain", "relight")  # dependen del tamaño o de la posición en la foto
+SPATIAL = ("clarity", "dehaze", "grain", "relight", "sharpen", "vignette", "hair")  # dependen del tamaño o de la posición en la foto
 ORDER = list(ADJUSTMENTS)
 
 BLEND_MODES = {"normal": "Normal", "multiply": "Multiplicar", "screen": "Trama", "overlay": "Superponer",
@@ -504,6 +507,87 @@ def relight(img, p):
     return lin_to_srgb(out)
 
 
+def sharpen(img, amount, radius, threshold):
+    """Enfoque suavizado: máscara de enfoque solo sobre la luminosidad (sin halos de color), con umbral para no
+    enfocar el ruido ni la piel lisa. `radius` en píxeles de una foto de 2048 px (se escala al tamaño real)."""
+    import cv2
+    a = float(amount) / 100.0
+    if a <= 0:
+        return img
+    y = lum(img).astype(np.float32)
+    sig = max(0.4, float(radius) * max(img.shape[:2]) / 2048.0)
+    d = y - cv2.GaussianBlur(y, (0, 0), sig)
+    th = float(threshold) / 255.0
+    if th > 0:
+        d = d * np.clip((np.abs(d) - th * 0.5) / (th * 0.5 + 1e-6), 0, 1)
+    d = np.clip(d * a * 2.0, -0.25, 0.25)  # sin blancos ni negros duros en los bordes fuertes
+    return np.clip(img + d[..., None], 0, 1).astype(np.float32)
+
+
+def vignette(img, p, frame=None):
+    """Viñeteado tras el recorte (como en Lightroom): en negativo oscurece las esquinas y en positivo las
+    aclara. `frame` (x, y, ancho, alto en píxeles) es el encuadre; sin él, la foto entera."""
+    import cv2
+    a = float(p.get("amount", -25)) / 100.0
+    if a == 0:
+        return img
+    H, W = img.shape[:2]
+    fx, fy, fw, fh = frame if frame else (0, 0, W, H)
+    f = min(1.0, 512.0 / max(H, W))
+    hs, ws = max(2, int(H * f)), max(2, int(W * f))
+    yy, xx = np.mgrid[0:hs, 0:ws].astype(np.float32)
+    cx, cy = (fx + fw / 2) * f, (fy + fh / 2) * f
+    rx, ry = max(1.0, fw * f / 2), max(1.0, fh * f / 2)
+    rnd = float(p.get("roundness", 0)) / 100.0  # 100: círculo; -100: sigue la forma del encuadre
+    rr = min(rx, ry)
+    rx2, ry2 = (rx + (rr - rx) * max(rnd, 0)), (ry + (rr - ry) * max(rnd, 0))
+    d = np.hypot((xx - cx) / rx2, (yy - cy) / ry2)
+    if rnd < 0:  # más cuadrado
+        q = 2 + (-rnd) * 6
+        d = (np.abs((xx - cx) / rx2) ** q + np.abs((yy - cy) / ry2) ** q) ** (1 / q)
+    mid = 0.3 + float(p.get("midpoint", 50)) / 100.0 * 0.9
+    fea = max(0.05, float(p.get("feather", 60)) / 100.0)
+    t = np.clip((d - mid * (1 - fea * 0.5)) / (mid * fea + 1e-6), 0, 1)
+    t = t * t * (3 - 2 * t)
+    t = cv2.resize(t.astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR)[..., None]
+    if a < 0:  # en luz lineal, como un objetivo de verdad
+        out = lin_to_srgb(srgb_to_lin(img) * (1 + a * 0.85 * t))
+    else:
+        out = img + (1 - img) * a * 0.8 * t
+    return np.clip(out, 0, 1).astype(np.float32)
+
+
+def hair(img, smooth, shine, define, density):
+    """Pelo y barba (para usar con la máscara «Pelo» o «Barba»): alisado sedoso que respeta los mechones,
+    brillo en las luces, definición de los pelos y densidad (rellena los huecos claros de una barba rala con
+    el tono del pelo de alrededor)."""
+    import cv2
+    out = img.astype(np.float32)
+    side = max(img.shape[:2])
+    k = side / 2048.0
+    if smooth > 0:  # como la «pintura al óleo» del artículo, pero sin perder los mechones
+        r = max(1, int(round(3 * k)))
+        sm = np.stack([guided(np.ascontiguousarray(out[..., c]), np.ascontiguousarray(out[..., c]), r, 4e-4)
+                       for c in range(3)], -1)
+        out = out + (sm - out) * (float(smooth) / 100.0)
+    if density > 0:
+        r = max(1, int(round(2.5 * k)))
+        y = lum(out).astype(np.float32)
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+        lo = cv2.erode(y, ker)
+        idx = cv2.erode(out, ker)  # el color oscuro de alrededor (el pelo)
+        gap = np.clip((y - lo) / 0.12, 0, 1)[..., None]  # lo claro entre pelos oscuros
+        out = out + (idx - out) * gap * (float(density) / 100.0) * 0.8
+    if define > 0:
+        out = sharpen(out, float(define) * 1.2, 0.9, 1.0)
+    if shine > 0:
+        y = lum(out).astype(np.float32)
+        base = _blur_fast(y, max(1.0, 6 * k))
+        hi = np.clip((y - base) * 4.0, 0, 1) * np.clip((y - 0.2) / 0.6, 0, 1)
+        out = out + ((1 - out) * hi[..., None]) * (float(shine) / 100.0) * 0.5
+    return np.clip(out, 0, 1).astype(np.float32)
+
+
 def _split(img, shadows, highlights, amt, balance=0.5):
     """Virado partido: un color en las sombras y otro en las luces."""
     y = lum(img)[..., None]
@@ -563,8 +647,9 @@ def look(img, name, amount):
 
 # ------------------------------------------------------------------ aplicar un ajuste
 
-def apply(img: np.ndarray, kind: str, p: dict) -> np.ndarray:
-    """Aplica el ajuste `kind` con los parámetros `p` a `img` (sRGB 0..1)."""
+def apply(img: np.ndarray, kind: str, p: dict, frame=None) -> np.ndarray:
+    """Aplica el ajuste `kind` con los parámetros `p` a `img` (sRGB 0..1). `frame`: el encuadre en píxeles
+    (x, y, ancho, alto), para lo que va referido al recorte (viñeteado)."""
     img = np.clip(img, 0, 1).astype(np.float32)
     if kind == "brightness":
         lut = brightness_contrast_lut(float(p.get("brightness", 0)), float(p.get("contrast", 0)))
@@ -624,6 +709,13 @@ def apply(img: np.ndarray, kind: str, p: dict) -> np.ndarray:
         return relight(img, p)
     if kind == "look":
         return look(img, p.get("look", "neo_noir"), float(p.get("amount", 70)))
+    if kind == "sharpen":
+        return sharpen(img, float(p.get("amount", 60)), float(p.get("radius", 0.7)), float(p.get("threshold", 2)))
+    if kind == "vignette":
+        return vignette(img, p, frame)
+    if kind == "hair":
+        return hair(img, float(p.get("smooth", 35)), float(p.get("shine", 20)), float(p.get("define", 25)),
+                    float(p.get("density", 0)))
     if kind == "solid":
         return np.broadcast_to(_hex(p.get("color", "#ff4fa0")), img.shape).astype(np.float32).copy()
     return img

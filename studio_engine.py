@@ -501,9 +501,16 @@ def save_preset(cfg_dir: str, name: str, s: dict) -> str:
     return p
 
 
-def export(photo_path: str, s: dict, out_path: str, quality: int = 95, long_side: int | None = None) -> str:
+def export(photo_path: str, s: dict, out_path: str, quality: int = 95, long_side: int | None = None,
+           upscale: float = 1.0, progress=None) -> str:
+    """Revela y guarda. `upscale` > 1 amplía con IA (Real-ESRGAN, fx_engine) para copias grandes."""
     lin = E.load_linear(photo_path, half=False, rebuild_highlights=True)
     img = render(lin, s, seed=hash(os.path.basename(photo_path)) & 0xFFFF, key=photo_path + "#full")
+    if upscale and upscale > 1:
+        import fx_engine as FX
+        if not FX.upscaler_ready():
+            FX.ensure_upscaler()
+        img = FX.upscale(np.clip(img, 0, 1).astype(np.float32), upscale, True, progress)
     if long_side and max(img.shape[:2]) > long_side:
         f = long_side / max(img.shape[:2])
         img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
