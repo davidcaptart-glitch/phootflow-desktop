@@ -42,7 +42,13 @@ TOOLS = [("move", "✥", "Mover: arrastra el texto, el logo o la imagen elegida;
          ("lasso", "ʘ", "Lazo: rodea a mano alzada la zona a seleccionar", "L", None),
          ("subject", "✦", "Selección de sujeto: clic para seleccionar a las personas (o el objeto principal)", "W",
           None),
+         ("wand", "✧", "Varita mágica: clic para seleccionar la zona de color parecido (Mayús añade, Alt resta)",
+          "Shift+W", None),
          ("eyedrop", "⌖", "Cuentagotas: toma el color frontal de la foto", "I", None),
+         ("patch", "⬚", "Parche: rodea lo que quieres tapar y arrástralo hasta una zona buena (o arrastra una "
+                        "selección que ya tengas)", "Shift+J", "retouch"),
+         ("bucket", "▼", "Bote de pintura: clic para rellenar con el color frontal la zona de color parecido",
+          "Shift+G", None),
          ("heal", "✚", "Pincel corrector puntual: pinta encima de granos, brillos o manchas (busca solo el parche)",
           "J", "retouch"),
          ("skin", "◐", "Pincel de máscara: pinta la máscara de la capa elegida, la Piel o la persona del Fondo (clic "
@@ -60,9 +66,12 @@ TOOLS = [("move", "✥", "Mover: arrastra el texto, el logo o la imagen elegida;
          ("hand", "✋", "Mano: arrastra para desplazar la vista ampliada", "H", None),
          ("zoom", "⌕", "Zoom: clic acerca, Alt+clic aleja", "", None)]
 # disposición de la barra en dos columnas (como PhotoCraft / Photoshop)
-TOOL_GRID = [("move", None), ("marquee", "lasso"), ("subject", "eyedrop"), ("heal", "skin"), ("clone", "fill"),
-             ("brush", "eraser"), ("light", "liquify"), ("type", None), ("hand", "zoom")]
-SELECT_TOOLS = ("marquee", "lasso", "subject")
+TOOL_GRID = [("move", None), ("marquee", "lasso"), ("subject", "wand"), ("heal", "patch"), ("clone", "fill"),
+             ("brush", "eraser"), ("bucket", "skin"), ("light", "liquify"), ("type", "eyedrop"), ("hand", "zoom")]
+GRID_GROUPS = (1, 5, 9)  # filas de TOOL_GRID que empiezan grupo (llevan una raya encima)
+SELECT_TOOLS = ("marquee", "lasso", "subject", "wand")
+BRUSH_MODES = [("round", "Redondo"), ("watercolor", "Acuarela"), ("oil", "Óleo"), ("charcoal", "Carboncillo"),
+               ("spray", "Aerógrafo"), ("marker", "Rotulador")]
 MOVABLE = ("text", "logo", "image", "rays")
 DRAFT_PX = 1024  # mientras se arrastra un control o una capa se compone a este tamaño (más rápido)
 FX_SPECS = {  # efecto: (título, [(clave, etiqueta, mín, máx, paso)], ¿lleva color?)
@@ -188,6 +197,33 @@ def tool_icon(key: str):
             p.drawPath(path)
             for a, b in (((19, 3), (19, 9)), ((16, 6), (22, 6))):
                 p.drawLine(QPointF(*a), QPointF(*b))
+        elif key == "wand":  # varita con destellos
+            p.drawLine(QPointF(4, 20), QPointF(15, 9))
+            for a, b in (((17, 2.5), (17, 6.5)), ((15, 4.5), (19, 4.5)), ((20.5, 8.5), (20.5, 11.5)),
+                         ((19, 10), (22, 10)), ((11, 3), (11, 5.5)), ((9.8, 4.2), (12.2, 4.2))):
+                p.drawLine(QPointF(*a), QPointF(*b))
+        elif key == "patch":  # parche: zona discontinua y flecha hacia la buena
+            pen.setDashPattern([2, 1.5])
+            p.setPen(pen)
+            p.drawEllipse(QPointF(8, 15), 5, 4)
+            p.setPen(QPen(QColor(color), 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawEllipse(QPointF(16.5, 7.5), 4.5, 3.5)
+            p.drawLine(QPointF(10.5, 12), QPointF(13.5, 10))
+        elif key == "bucket":  # bote de pintura volcado con gota
+            path = QPainterPath()
+            path.moveTo(4, 10)
+            path.lineTo(11, 3)
+            path.lineTo(18, 10)
+            path.lineTo(11, 17)
+            path.closeSubpath()
+            p.drawPath(path)
+            p.drawLine(QPointF(4, 10), QPointF(18, 10))
+            drop = QPainterPath()
+            drop.moveTo(19.5, 13)
+            drop.cubicTo(21.5, 16, 21.5, 19, 19.5, 19)
+            drop.cubicTo(17.5, 19, 17.5, 16, 19.5, 13)
+            p.setBrush(QColor(color))
+            p.drawPath(drop)
         elif key == "eyedrop":
             p.drawLine(QPointF(5, 19), QPointF(14, 10))
             p.drawLine(QPointF(4, 20), QPointF(5, 19))
@@ -577,8 +613,9 @@ class EditsView(QWidget):
         self.radius = {"heal": 14, "clone": 22, "fill": 30, "skin": 40, "light": 16, "liquify": 90, "brush": 24,
                        "eraser": 30}
         self.hardness = {"clone": 50, "brush": 0, "eraser": 60}
-        self.strength = {"light": 45, "liquify": 50, "brush": 100, "eraser": 100}
-        self.mode = {"light": "dodge", "liquify": "push"}
+        self.strength = {"light": 45, "liquify": 50, "brush": 100, "eraser": 100, "wand": 32, "bucket": 32}
+        self.mode = {"light": "dodge", "liquify": "push", "brush": "round", "wand": "contig", "bucket": "contig"}
+        self._patch = None           # parche en curso: (x, y de la vista al pulsar, contornos de la selección)
         self.clone_off = None       # desplazamiento del tampón (fracción ancho/alto) o None
         self.clone_pick = None      # origen elegido con Alt+clic (0..1 sin recortar)
         self.stroke_u: list = []    # trazo en curso en 0..1 SIN recortar
@@ -786,9 +823,10 @@ class EditsView(QWidget):
                                 f"QPushButton#tool:checked {{ background: #3b3b3b; border: 1px solid #5a5a5a; }}")
                 b.clicked.connect(lambda _, k=key: self.set_tool(k))
                 g.addButton(b)
-                grid.addWidget(b, row + (row >= 1) + (row >= 5) + (row >= 8), col)
+                grid.addWidget(b, row + sum(row >= g for g in GRID_GROUPS), col)
                 self.tool_btn[key] = b
-        for r in (1, 6, 10):  # separadores entre grupos (como en PhotoCraft)
+        for i, g0 in enumerate(GRID_GROUPS):  # separadores entre grupos (como en PhotoCraft)
+            r = g0 + i
             sep = QFrame()
             sep.setFixedHeight(9)
             sep.setStyleSheet(f"border-bottom: 1px solid {T.LINE}; margin: 0 6px 4px 6px;")
@@ -1296,7 +1334,10 @@ class EditsView(QWidget):
         for k, label in EE.FORMATS.items():
             self.fmt.addItem(label, k)
         self.size = QComboBox()
-        self.size.addItems(["Tamaño original", "2048 px lado largo", "1080 px lado largo"])
+        self.size.addItems(["Tamaño original", "2048 px lado largo", "1080 px lado largo",
+                            "Ampliar ×2 (aumento de escala)"])
+        self.size.setItemData(3, "Dobla el ancho y el alto con remuestreo Lanczos y recuperación de borde (sin IA). "
+                                 "Para imprimir grande o recortes muy cerrados.", Qt.ToolTipRole)
         qrow = QHBoxLayout()
         ql = QLabel("Calidad JPG")
         ql.setObjectName("meta")
@@ -1636,8 +1677,13 @@ class EditsView(QWidget):
         self.img_tf_reset = _btn("Quitar la transformación", "ghost", "Vuelve al tamaño, giro y posición de antes")
         self.img_tf_reset.clicked.connect(self.reset_transform)
         self.img_tf_info = self._label("Transformada a mano: el tamaño y el giro de arriba no se usan.")
+        self.img_harm = SliderRow("harmonize", "Armonizar", 0, 100, 1, 0)
+        self.img_harm.setToolTip("Iguala la luz y el color de la imagen con los del fondo que la rodea. Para la "
+                                 "sombra de contacto, usa Efectos › Sombra paralela.")
+        self.img_harm.changed.connect(lambda k, val, f: self._set_prop("harmonize", float(val), f))
         for x in (self.img_name, b, self.img_w, self.img_angle, self.img_flip, self.img_tf, self.img_tf_reset,
-                  self.img_tf_info, self._label("Quitar el fondo"), self.img_cut, self.img_tol, self.img_pos):
+                  self.img_tf_info, self.img_harm, self._label("Quitar el fondo"), self.img_cut, self.img_tol,
+                  self.img_pos):
             lay.addWidget(x)
         lay.addWidget(self._label("Con Mover (V) la arrastras; Ctrl+rueda cambia el tamaño. El tamaño es % del "
                                   "ancho de la foto; la opacidad, en Capas. Las capas de ajuste que pongas encima "
@@ -1678,14 +1724,17 @@ class EditsView(QWidget):
         if key in self.hardness:
             self.opt_hard.set_value(self.hardness[key])
         self.opt_str.setVisible(key in self.strength)
-        self.opt_str.lab.setText("Opacidad" if key in ("brush", "eraser") else "Fuerza")
+        self.opt_str.lab.setText("Opacidad" if key in ("brush", "eraser") else
+                                 ("Toleran." if key in ("wand", "bucket") else "Fuerza"))
         self.canvas.stroke_color = self.swatches.fg if key == "brush" else None
         if key != "move":
             self._tf_on = False
         self._sync_quad()
         if key in self.strength:
             self.opt_str.set_value(self.strength[key])
-        modes = {"light": LIGHT_MODES, "liquify": LIQ_MODES}.get(key)
+        wand_modes = [("contig", "Solo la zona contigua"), ("global", "Todo ese color en la foto")]
+        modes = {"light": LIGHT_MODES, "liquify": LIQ_MODES, "brush": BRUSH_MODES, "wand": wand_modes,
+                 "bucket": wand_modes}.get(key)
         self.opt_mode.setVisible(bool(modes))
         if modes:
             self.opt_mode.blockSignals(True)
@@ -1700,13 +1749,15 @@ class EditsView(QWidget):
                                "move": "Rueda: zoom · arrastrar: mano", "eyedrop": "Clic: color frontal",
                                "type": "Clic en la foto para escribir", "hand": "Arrastra para desplazar",
                                "zoom": "Clic acerca · Alt+clic aleja", "marquee": "", "lasso": "",
-                               "subject": "Clic en la foto"}.get(key, "[ ] tamaño"))
+                               "subject": "Clic en la foto", "wand": "Clic en la foto",
+                               "bucket": "Clic: rellena con el color frontal (capa de color con máscara)",
+                               "patch": "Rodea la zona y arrástrala hasta una parte buena"}.get(key, "[ ] tamaño"))
         self.canvas.brush_px = self.radius.get(key, 0) if brush else 0
         if key == "fill":
             self._preload_lama()
         self.canvas.marker = None
         self.canvas.setCursor(Qt.OpenHandCursor if key in ("move", "hand") else
-                              (Qt.PointingHandCursor if key in ("subject", "eyedrop") else
+                              (Qt.PointingHandCursor if key in ("subject", "eyedrop", "wand", "bucket") else
                                (Qt.IBeamCursor if key == "type" else Qt.CrossCursor)))
         # al elegir la herramienta se selecciona su capa (si existe)
         kind = TOOL_LAYER.get(key) if key not in ("brush", "eraser") else None  # el pincel pinta en la elegida
@@ -1847,6 +1898,12 @@ class EditsView(QWidget):
             return True
         if t in SELECT_TOOLS:
             return self._select_mouse(kind, x, y, xu, yu, e)
+        if t == "bucket":
+            if kind == "press":
+                self.bucket_fill(xu, yu)
+            return True
+        if t == "patch":
+            return self._patch_mouse(kind, x, y, xu, yu, e)
         if t in ("brush", "eraser"):
             return self._brush_mouse(kind, x, y, xu, yu, alt)
         if kind == "press":
@@ -1944,6 +2001,8 @@ class EditsView(QWidget):
             st["erase"] = True
         else:
             st["c"] = self.swatches.fg.name()
+            if self.mode.get("brush", "round") != "round":
+                st["b"] = self.mode["brush"]
         lay["strokes"].append(st)
         self._commit("Borrador" if t == "eraser" else "Pincel")
 
@@ -1991,6 +2050,19 @@ class EditsView(QWidget):
 
     def _move_overlay(self, kind, x, y, e=None) -> bool:
         lay = self._layer()
+        if lay and lay["kind"] == "adjust" and lay.get("adj") == "relight":  # Volver a iluminar: mover el foco
+            if kind in ("press", "move") and (kind == "press" or self._drag):
+                xu, yu = self._to_u(x, y)
+                lay["p"]["x"], lay["p"]["y"] = round(min(1.0, max(0.0, xu)), 4), round(min(1.0, max(0.0, yu)), 4)
+                self._drag = True
+                self.request(draft=True)
+                return True
+            if kind == "release" and self._drag:
+                self._drag = None
+                self._adj_force = True
+                self._commit("Mover la luz")
+                return True
+            return False
         if not lay or lay["kind"] not in MOVABLE:
             return False
         if lay.get("quad"):
@@ -2588,6 +2660,7 @@ class EditsView(QWidget):
             self.img_cut.blockSignals(False)
             self.img_tol.set_value(lay.get("tol", 12))
             self.img_tol.setVisible(lay.get("cut") == "color")
+            self.img_harm.set_value(lay.get("harmonize", 0))
             tf = bool(lay.get("quad"))
             for w in (self.img_w, self.img_angle, self.img_pos):
                 w.setEnabled(not tf)
@@ -2686,13 +2759,81 @@ class EditsView(QWidget):
         self._commit("Quitar fondo")
 
     # ---------------------------------------------------------- selecciones (como PhotoCraft / Photoshop)
-    def _select_mouse(self, kind, x, y, xu, yu, e) -> bool:
+    def _wand_shape(self, xu, yu, tool) -> dict:
+        return {"type": "wand", "pt": [round(xu, 5), round(yu, 5)], "tol": int(self.strength[tool]),
+                "contiguous": self.mode[tool] != "global"}
+
+    def bucket_fill(self, xu, yu):
+        """Bote de pintura: una capa «Relleno de color» con el color frontal y, de máscara, la zona de color
+        parecido al punto (varita). Así sigue siendo editable: color, tolerancia (rehaciendo) y modo de fusión."""
+        if not self.doc or not (0 <= xu <= 1 and 0 <= yu <= 1):
+            return
+        sel = self._layer()
+        n = 1 + sum(1 for l in self.doc["layers"] if l["kind"] == "adjust" and l.get("adj") == "solid")
+        lay = EE.add_layer(self.doc, "adjust", above=sel["id"] if sel and sel["kind"] not in EE.OVERLAY else None,
+                           adj="solid", p={"color": self.swatches.fg.name()})
+        lay["name"] = f"Bote de pintura {n}"
+        lay["mask"] = {"shapes": [dict(self._wand_shape(xu, yu, "bucket"), op="add")], "feather": 0.0}
+        self.layer_id = lay["id"]
+        self._adj_key = None
+        self._commit("Bote de pintura")
+
+    def _patch_mouse(self, kind, x, y, xu, yu, e) -> bool:
+        """Parche: sin selección (o pulsando fuera de ella) se rodea la zona con el lazo; pulsando dentro de la
+        selección se arrastra hasta la zona buena y, al soltar, se tapa con ella (corrector: la textura del
+        origen con el tono y el color del destino)."""
+        if kind == "press":
+            a = self._sel_alpha
+            inside = False
+            if self.sel and a is not None:
+                h, w = a.shape[:2]
+                px, py = int(min(max(xu, 0), 1) * (w - 1)), int(min(max(yu, 0), 1) * (h - 1))
+                inside = a[py, px] > 0.5
+            if inside:
+                self._patch = (x, y, [list(p) for p in self.canvas.sel_paths])
+                return True
+            self._patch = None
+            return self._select_mouse(kind, x, y, xu, yu, e, tool="lasso")
+        if self._patch is None:
+            return self._select_mouse(kind, x, y, xu, yu, e, tool="lasso")
+        x0, y0, paths = self._patch
+        dx, dy = x - x0, y - y0
+        if kind == "move":
+            self.canvas.sel_paths = [[(px + dx, py + dy) for px, py in poly] for poly in paths]
+            self.canvas.update()
+            return True
+        if kind == "release":
+            self._patch = None
+            c = self.box
+            sx, sy = dx * (c[2] - c[0]), dy * (c[3] - c[1])
+            if abs(sx) < 0.002 and abs(sy) < 0.002:
+                self.canvas.sel_paths = paths
+                self.canvas.update()
+                return True
+            a = self._sel_alpha if self._sel_alpha is not None else EE.selection_mask(self.base.shape, self.sel,
+                                                                                      self.base)
+            r = float(np.sqrt(max((a > 0.5).sum(), 1)) / max(a.shape) * 0.15)
+            lay = self._tool_layer("retouch")
+            lay["ops"].append({"id": uuid.uuid4().hex[:6], "tool": "heal", "r": round(max(r, 0.004), 5), "pts": [],
+                               "sel": copy.deepcopy(self.sel), "src": [round(sx, 5), round(sy, 5)]})
+            self.deselect()
+            self._commit("Parche")
+            return True
+        return False
+
+    def _select_mouse(self, kind, x, y, xu, yu, e, tool=None) -> bool:
         mods = e.modifiers() if e is not None else Qt.NoModifier
         op = "add" if mods & Qt.ShiftModifier else ("sub" if mods & Qt.AltModifier else self.sel_mode)
-        t = self.tool
+        t = tool or self.tool
+        if tool == "lasso" and kind == "press":
+            op = "new"  # el parche siempre empieza una selección nueva
         if t == "subject":
             if kind == "press":
                 self.select_subject(op)
+            return True
+        if t == "wand":
+            if kind == "press" and 0 <= xu <= 1 and 0 <= yu <= 1:
+                self._apply_selection(self._wand_shape(xu, yu, "wand"), op)
             return True
         if kind == "press":
             self._sel_op = op
@@ -3268,7 +3409,8 @@ class EditsView(QWidget):
             return
         self._save_doc()
         fmt = self.fmt.currentData()
-        side = {0: None, 1: 2048, 2: 1080}[self.size.currentIndex()]
+        side = {0: None, 1: 2048, 2: 1080, 3: None}[self.size.currentIndex()]
+        scale = 2 if self.size.currentIndex() == 3 else 1
         quality = self.quality.value()
         jobs = [(it, EE.load(self.folder, it.path) or EE.new_doc()) for it in targets]
         if self.cur and self.doc:
@@ -3280,7 +3422,7 @@ class EditsView(QWidget):
             for i, (it, doc) in enumerate(jobs):
                 self.export_progress.emit(i, len(jobs), f"Exportando {it.name}…")
                 try:
-                    out = EE.export(folder, it.path, doc, self._out_path(it, fmt), fmt, quality, side)
+                    out = EE.export(folder, it.path, doc, self._out_path(it, fmt), fmt, quality, side, scale)
                     if not out.endswith("." + EE.format_ext(fmt)[0]):
                         self.export_progress.emit(i, len(jobs), f"{it.name}: con transparencia, se guarda en "
                                                                 f"{os.path.splitext(out)[1][1:].upper()}")

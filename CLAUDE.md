@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 70 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 83 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -54,6 +54,12 @@ python -m unittest discover -s tests   # 70 pruebas, sin fotos reales ni red
   Interfaz al estilo de PhotoCraft (ArtCraft): `edits_ui.py` (panel de capas, Curvas/Niveles, pestañas) y
   `edits_adjust.py` (capas de ajuste y modos de fusión portados de PhotoCraft, MIT/Apache-2.0); selecciones
   y máscaras con `edits_engine.selection_mask`.
+  Herramientas al estilo del Photoshop actual, sin IA en la nube: ajustes Claridad, Borrar neblina (canal oscuro
+  + filtro guiado), Granulado, Volver a iluminar (foco movible con V), Reajuste (`A.LOOKS` con un regulador) y
+  Relleno de color; varita (`wand_mask`, a 1024 px), bote de pintura (capa «solid» con máscara de varita), parche
+  (op `heal` con `sel` y `src`), «Armonizar» en capas de imagen (`harmonize`, Lab), pinceles de medios naturales
+  (`BRUSHES`, `st["b"]`) y exportar «Ampliar ×2» (`upscale`, Lanczos + borde, por franjas). Pruebas en
+  `tests/test_edits_tools.py`.
 - `graphics.py` / `graphics_engine.py` — entorno **Graphics** (Canva + Illustrator): diseños JSON en
   `%APPDATA%\PhootFlow\diseños`, varias páginas, kit de marca (`diseños\marca.json`), plantillas, capas,
   grupos, imán, texto curvo, pluma y nodos, Buscatrazos, QR, quitar fondo

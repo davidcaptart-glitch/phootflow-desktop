@@ -475,7 +475,8 @@ def selection_outline(alpha: np.ndarray, box, max_px: int = 900) -> list:
 
 ADJ_ICONS = {"brightness": "☀", "levels": "▥", "curves": "∿", "exposure": "±", "vibrance": "▽",
              "hue_sat": "◑", "color_balance": "⚖", "black_white": "◧", "photo_filter": "◎", "invert": "◩",
-             "posterize": "▦", "threshold": "▬"}
+             "posterize": "▦", "threshold": "▬", "clarity": "◇", "dehaze": "≋", "grain": "⁘", "relight": "✺",
+             "look": "✧", "solid": "■"}
 
 
 def adjustments_grid(on_pick) -> QWidget:
@@ -765,3 +766,55 @@ class AdjustPanel(QWidget):
 
     def _ui_threshold(self):
         self._slider("Umbral", 1, 255, 1, self.p["level"], lambda v: self.p.update(level=int(v)), 128)
+
+    def _note(self, text):
+        lab = QLabel(text)
+        lab.setObjectName("meta")
+        lab.setWordWrap(True)
+        self.bl.addWidget(lab)
+
+    def _ui_clarity(self):
+        self._slider("Claridad", -100, 100, 1, self.p["amount"], lambda v: self.p.update(amount=v))
+        self._slider("Radio (% foto)", 0.3, 8, 0.1, self.p["radius"], lambda v: self.p.update(radius=v), 2.0)
+        self._note("Contraste local de los medios tonos: textura y volumen. En negativo, suaviza.")
+
+    def _ui_dehaze(self):
+        self._slider("Borrar neblina", -100, 100, 1, self.p["amount"], lambda v: self.p.update(amount=v))
+        self._note("Quita la bruma (cielos, paisajes, salones con humo). En negativo, añade atmósfera.")
+
+    def _ui_grain(self):
+        self._slider("Cantidad", 0, 100, 1, self.p["amount"], lambda v: self.p.update(amount=v))
+        self._slider("Tamaño", 0.4, 4, 0.1, self.p["size"], lambda v: self.p.update(size=v), 1.0)
+        self._slider("Rugosidad", 0, 100, 1, self.p["rough"], lambda v: self.p.update(rough=v), 50)
+        self._slider("Color", 0, 100, 1, self.p["color"], lambda v: self.p.update(color=v))
+        b = QPushButton("Otro grano")
+        b.setObjectName("ghost")
+        b.clicked.connect(lambda: (self.p.update(seed=int(self.p.get("seed", 11)) + 1), self._emit(True)))
+        self.bl.addWidget(b)
+
+    def _ui_relight(self):
+        self.bl.addWidget(self._color_button("color", "Color de la luz…"))
+        self._slider("Intensidad", 0, 200, 1, self.p["intensity"], lambda v: self.p.update(intensity=v))
+        self._slider("Alcance", 3, 120, 1, self.p["radius"], lambda v: self.p.update(radius=v), 35)
+        self._slider("Luz ambiente", -100, 100, 1, self.p["ambient"], lambda v: self.p.update(ambient=v))
+        self._slider("Relieve", 0, 100, 1, self.p["relief"], lambda v: self.p.update(relief=v), 40)
+        self._slider("Posición X", 0, 100, 0.5, self.p["x"] * 100, lambda v: self.p.update(x=v / 100), 50)
+        self._slider("Posición Y", 0, 100, 0.5, self.p["y"] * 100, lambda v: self.p.update(y=v / 100), 50)
+        self._note("Con Mover (V) arrastra el foco sobre la foto. Baja la luz ambiente para que la luz "
+                   "nueva mande; con una máscara, solo ilumina ahí.")
+
+    def _ui_look(self):
+        cb = QComboBox()
+        for k, label in A.LOOKS.items():
+            cb.addItem(label, k)
+        cb.setCurrentIndex(max(0, list(A.LOOKS).index(self.p.get("look", "neo_noir"))))
+        cb.currentIndexChanged.connect(lambda i: (self.p.update(look=cb.itemData(i)), self._emit(True)))
+        self.bl.addWidget(cb)
+        self._slider("Intensidad", 0, 150, 1, self.p["amount"], lambda v: self.p.update(amount=v), 70)
+        self._note("Un look completo con un solo regulador. Combínalo con la opacidad, una máscara o el modo "
+                   "de fusión de la capa.")
+
+    def _ui_solid(self):
+        self.bl.addWidget(self._color_button("color", "Color del relleno…"))
+        self._note("Capa de color liso. Con una máscara (por ejemplo, del bote de pintura) solo rellena esa "
+                   "zona; prueba los modos Color o Multiplicar.")

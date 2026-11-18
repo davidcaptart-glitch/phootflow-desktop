@@ -272,8 +272,8 @@ def stroke_mask(shape, pts, r_px: float) -> np.ndarray:
 def selection_mask(shape, spec: dict | None, img: np.ndarray | None = None, key: str = "") -> np.ndarray:
     """Alfa 0..1 de una selección (o de la máscara de una capa), en coordenadas 0..1 de la foto sin recortar.
 
-    spec = {"shapes": [{"op": add|sub|inter, "type": rect|ellipse|lasso|subject|all, "box": [x0, y0, x1, y1],
-            "pts": [[x, y], ...]}], "feather": radio del calado (fracción del lado largo), "invert": bool,
+    spec = {"shapes": [{"op": add|sub|inter, "type": rect|ellipse|lasso|subject|wand|all, "box": [x0, y0, x1, y1],
+            "pts": [[x, y], ...], (varita) "pt": [x, y], "tol", "contiguous"}],"feather": radio del calado (fracción del lado largo), "invert": bool,
             "strokes": [[x, y, r, ±1], ...] (pincel de máscara)}
     """
     h, w = shape[:2]
@@ -297,6 +297,9 @@ def selection_mask(shape, spec: dict | None, img: np.ndarray | None = None, key:
                             cv2.LINE_AA)
         elif t == "lasso" and len(sh.get("pts", [])) >= 3:
             cv2.fillPoly(m, [np.round(_px(sh["pts"], w, h)).astype(np.int32)], 1, cv2.LINE_AA)
+        elif t == "wand" and img is not None:
+            m = None
+            sa = wand_mask(img, sh)
         elif t == "subject" and img is not None:
             pr = person_probs(img, key)
             sub = (1 - pr[..., 0]) if pr is not None else object_alpha(img)
@@ -313,6 +316,35 @@ def selection_mask(shape, spec: dict | None, img: np.ndarray | None = None, key:
     if spec.get("invert"):
         a = 1 - a
     return np.clip(a, 0, 1).astype(np.float32)
+
+
+WAND_PX = 1024  # la varita trabaja a este tamaño: la misma selección en la vista y al exportar
+
+
+def wand_mask(img: np.ndarray, sh: dict) -> np.ndarray:
+    """Varita mágica / bote de pintura: los píxeles de color parecido al del punto `pt` (0..1 de la foto sin
+    recortar). `tol` 0..100; `contiguous`: solo la zona conectada (si no, todos los de ese color en la foto)."""
+    h, w = img.shape[:2]
+    f = min(1.0, WAND_PX / max(h, w))
+    sm = cv2.resize(img, (max(2, int(w * f)), max(2, int(h * f))), interpolation=cv2.INTER_AREA) if f < 1 else img
+    sm8 = (np.clip(sm, 0, 1) * 255 + 0.5).astype(np.uint8)
+    sm8 = cv2.GaussianBlur(sm8, (3, 3), 0)  # sin ruido: la varita no se corta por el grano
+    H, W = sm8.shape[:2]
+    x, y = sh.get("pt", [0.5, 0.5])
+    px, py = int(min(max(x, 0), 1) * (W - 1)), int(min(max(y, 0), 1) * (H - 1))
+    tol = float(sh.get("tol", 32)) * 2.55 * 0.5
+    if sh.get("contiguous", True):
+        mm = np.zeros((H + 2, W + 2), np.uint8)
+        cv2.floodFill(sm8.copy(), mm, (px, py), (0, 0, 0), (tol,) * 3, (tol,) * 3,
+                      4 | cv2.FLOODFILL_FIXED_RANGE | cv2.FLOODFILL_MASK_ONLY | (255 << 8))
+        m = mm[1:-1, 1:-1].astype(np.float32) / 255.0
+    else:
+        d = np.abs(sm8.astype(np.int16) - sm8[py, px].astype(np.int16)).max(-1)
+        m = (d <= tol).astype(np.float32)
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))  # tapa agujeritos sueltos
+    if f < 1:
+        m = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
+    return np.clip(m, 0, 1).astype(np.float32)
 
 
 def _soft(m: np.ndarray, sigma: float) -> np.ndarray:
@@ -1180,7 +1212,54 @@ def _stroke_alpha(H, W, st):
         a = cv2.GaussianBlur(a, (0, 0), sig)
         peak = 1.0 - np.exp(-((r * core) ** 2) / (2 * sig * sig))  # centro de un toque tras desenfocar
         a = np.minimum(1.0, a / max(0.05, peak))
+    if st.get("b", "round") != "round":
+        a = _brush_texture(a, st, r, side, dabs, x0, y0)
     return a * min(1.0, max(0.0, float(st.get("o", 1.0)))), x0, y0
+
+
+BRUSHES = {"round": "Redondo", "watercolor": "Acuarela", "oil": "Óleo", "charcoal": "Carboncillo",
+           "spray": "Aerógrafo (spray)", "marker": "Rotulador"}
+
+
+def _noise(shape, cell: float, seed: int) -> np.ndarray:
+    """Ruido suave 0..1 con granos de `cell` píxeles (se genera pequeño y se amplía: igual a cualquier tamaño)."""
+    h, w = shape
+    gh, gw = max(2, int(h / max(cell, 0.5)) + 2), max(2, int(w / max(cell, 0.5)) + 2)
+    n = np.random.default_rng(seed).random((gh, gw), dtype=np.float32)
+    return cv2.resize(n, (w, h), interpolation=cv2.INTER_CUBIC if cell > 1 else cv2.INTER_AREA)
+
+
+def _brush_texture(a: np.ndarray, st: dict, r: float, side: int, dabs, x0, y0) -> np.ndarray:
+    """Pinceles de medios naturales sobre el alfa de un trazo: acuarela (borde más oscuro y papel), óleo (cerdas
+    en la dirección del trazo), carboncillo (grano del papel), aerógrafo (puntitos) y rotulador (canto duro)."""
+    b = st.get("b")
+    seed = int(_sig(st.get("pts", [])[:3], b)[:8], 16)
+    px = side / 2000.0  # «píxel» de referencia: el mismo dibujo en la vista y al exportar
+    if b == "watercolor":
+        soft = cv2.GaussianBlur(a, (0, 0), max(0.5, r * 0.25))
+        edge = np.clip(a - cv2.GaussianBlur(a, (0, 0), max(0.5, r * 0.12)), 0, 1)
+        paper = _noise(a.shape, 3 * px, seed) * 0.6 + _noise(a.shape, 14 * px, seed + 1) * 0.4
+        return np.clip((soft * 0.55 + edge * 1.6) * (0.65 + 0.5 * paper), 0, 1)
+    if b == "oil":
+        if len(dabs) > 1:
+            dx, dy = dabs[-1][0] - dabs[0][0], dabs[-1][1] - dabs[0][1]
+            ang = float(np.degrees(np.arctan2(-dy, dx)))
+        else:
+            ang = 0.0
+        n = _noise(a.shape, 1.5 * px, seed)
+        streak = cv2.filter2D(n, -1, _motion_kernel(max(3.0, r * 1.2), ang))
+        streak = (streak - streak.min()) / max(1e-6, float(streak.max() - streak.min()))
+        hard = np.clip((a - 0.25) / 0.5, 0, 1)
+        return np.clip(hard * (0.55 + 0.7 * streak), 0, 1)
+    if b == "charcoal":
+        n = _noise(a.shape, 1.2 * px, seed) * 0.7 + _noise(a.shape, 6 * px, seed + 1) * 0.3
+        return np.clip((a * 1.25 - (1 - n) * 0.9), 0, 1)
+    if b == "spray":
+        dots = (_noise(a.shape, 0.9 * px, seed) < a * 0.45).astype(np.float32)
+        return np.clip(dots * 0.9 + cv2.GaussianBlur(a, (0, 0), max(0.5, r * 0.3)) * 0.12, 0, 1)
+    if b == "marker":
+        return np.clip((a - 0.35) / 0.3, 0, 1) * 0.85
+    return a
 
 
 def paint_rgba(shape, lay: dict) -> np.ndarray | None:
@@ -1342,6 +1421,41 @@ def _embed(rc, cx0, cy0, x0, y0, h, w):
     return out
 
 
+def harmonize(rgb: np.ndarray, a: np.ndarray, img: np.ndarray, box, amount: float) -> np.ndarray:
+    """Armonizar: acerca la luz y el color de una capa pegada a los del fondo que la rodea (transferencia de
+    medias y contrastes en Lab, como Reinhard et al. 2001, a medias para no teñir de más). `box`: x0, y0, w, h
+    del trozo `rgb` dentro de `img`."""
+    k = min(1.0, max(0.0, amount / 100.0))
+    sel = a > 0.5
+    if k <= 0 or sel.sum() < 16:
+        return rgb
+    H, W = img.shape[:2]
+    x0, y0, w, h = box
+    px, py = int(w * 0.6) + 8, int(h * 0.6) + 8  # el entorno: la caja de la capa ampliada
+    X0, Y0, X1, Y1 = max(0, x0 - px), max(0, y0 - py), min(W, x0 + w + px), min(H, y0 + h + py)
+    env = img[Y0:Y1, X0:X1]
+    keep = np.ones(env.shape[:2], bool)
+    keep[y0 - Y0:y0 - Y0 + h, x0 - X0:x0 - X0 + w] &= ~sel  # fuera de la propia capa
+    step = max(1, int(np.sqrt(env.shape[0] * env.shape[1] / 60000.0)))
+    bg = env[::step, ::step][keep[::step, ::step]]
+    if len(bg) < 16:
+        return rgb
+    lab_bg = cv2.cvtColor(bg.reshape(-1, 1, 3).astype(np.float32), cv2.COLOR_RGB2LAB).reshape(-1, 3)
+    lab = cv2.cvtColor(np.clip(rgb, 0, 1).astype(np.float32), cv2.COLOR_RGB2LAB)
+    fg = lab[sel]
+    mf, sf = fg.mean(0), fg.std(0) + 1e-3
+    mb, sb = lab_bg.mean(0), lab_bg.std(0) + 1e-3
+    # luminosidad: media y contraste hacia el fondo; color: la dominante del fondo, sin copiar su saturación
+    ratio = np.clip(sb / sf, 0.6, 1.5)
+    ratio[1:] = np.clip(ratio[1:], 0.8, 1.2)
+    target_m = np.array([mf[0] + (mb[0] - mf[0]) * 0.7, mf[1] + (mb[1] - mf[1]) * 0.55,
+                         mf[2] + (mb[2] - mf[2]) * 0.55], np.float32)
+    out = (lab - mf) * (1 + (ratio - 1) * 0.7) + target_m
+    out = lab + (out - lab) * k
+    out[..., 0] = np.clip(out[..., 0], 0, 100)
+    return np.clip(cv2.cvtColor(out.astype(np.float32), cv2.COLOR_LAB2RGB), 0, 1).astype(np.float32)
+
+
 def apply_image_group(img: np.ndarray, base: dict, clipped: list, frame, key: str = ""):
     """Capa de imagen o pintura `base` con las capas recortadas a ella (`clipped`, de abajo arriba) y sus efectos,
     compuesta sobre `img`. Solo se trabaja en la caja de la capa (más lo que se salgan los efectos).
@@ -1363,6 +1477,8 @@ def apply_image_group(img: np.ndarray, base: dict, clipped: list, frame, key: st
     h, w = rgba.shape[:2]
     sl = (slice(y0, y0 + h), slice(x0, x0 + w))
     rgb = np.ascontiguousarray(rgba[..., :3])
+    if float(base.get("harmonize", 0)) > 0:
+        rgb = harmonize(rgb, rgba[..., 3], img, (x0, y0, w, h), float(base["harmonize"]))
     for c in clipped:
         if not _layer_active(c):
             continue
@@ -1751,12 +1867,43 @@ def new_canvas(folder: str, width: int, height: int, color: str = "#ffffff", nam
 
 # ------------------------------------------------------------------ exportar
 
-def render_final(folder: str, photo_path: str, doc: dict, long_side: int | None = None):
-    """La foto revelada con todas sus capas a tamaño completo: (RGB float 0–1, alfa float o None)."""
+def upscale(img: np.ndarray, factor: int = 2, alpha: np.ndarray | None = None):
+    """Aumento de escala sin IA: Lanczos y luego se recupera el borde (máscara de enfoque solo sobre la luminosidad,
+    limitada para que no salgan halos) y una pizca de grano fino para que no parezca plástico."""
+    f = int(max(1, factor))
+    if f == 1:
+        return img, alpha
+    h, w = img.shape[:2]
+    big = np.empty((h * f, w * f, 3), np.float32)
+    rng = np.random.default_rng(5)
+    band, ov = 384, 12  # por franjas: una foto de 24 Mpx ampliada no cabe entera en memoria varias veces
+    for r0 in range(0, h, band):
+        a0, a1 = max(0, r0 - ov), min(h, r0 + band + ov)
+        part = cv2.resize(img[a0:a1], (w * f, (a1 - a0) * f), interpolation=cv2.INTER_LANCZOS4)
+        y = (0.2126 * part[..., 0] + 0.7152 * part[..., 1] + 0.0722 * part[..., 2]).astype(np.float32)
+        d1 = y - cv2.GaussianBlur(y, (0, 0), 0.6 * f)
+        d2 = y - cv2.GaussianBlur(y, (0, 0), 1.6 * f)
+        det = np.clip(d1 * 0.9 + d2 * 0.35, -0.08, 0.08)
+        g = rng.standard_normal(y.shape, dtype=np.float32)
+        det += (g - cv2.GaussianBlur(g, (0, 0), 1.0)) * 0.004
+        part = np.clip(part + det[..., None], 0, 1)
+        s0 = (r0 - a0) * f
+        n = (min(h, r0 + band) - r0) * f
+        big[r0 * f:r0 * f + n] = part[s0:s0 + n]
+    if alpha is not None:
+        alpha = np.clip(cv2.resize(alpha, (w * f, h * f), interpolation=cv2.INTER_CUBIC), 0, 1)
+    return big, alpha
+
+
+def render_final(folder: str, photo_path: str, doc: dict, long_side: int | None = None, scale: int = 1):
+    """La foto revelada con todas sus capas a tamaño completo: (RGB float 0–1, alfa float o None). `scale` 2
+    la amplía al doble (Aumento de escala)."""
     s = base_settings(folder, photo_path, doc)
     key = photo_path + "#full"
     base = render_base(photo_path, s, full=True, key=key)
     img, alpha = compose(base, doc, crop_box(s), key)
+    if scale > 1:
+        img, alpha = upscale(img, scale, alpha)
     if long_side and max(img.shape[:2]) > long_side:
         f = long_side / max(img.shape[:2])
         img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
@@ -1766,9 +1913,9 @@ def render_final(folder: str, photo_path: str, doc: dict, long_side: int | None 
 
 
 def export(folder: str, photo_path: str, doc: dict, out_path: str, fmt: str = "jpg", quality: int = 95,
-           long_side: int | None = None) -> str:
+           long_side: int | None = None, scale: int = 1) -> str:
     import export_formats as EF
-    img, alpha = render_final(folder, photo_path, doc, long_side)
+    img, alpha = render_final(folder, photo_path, doc, long_side, scale)
     if fmt == "jpg" and alpha is not None:
         fmt = "png"  # un JPG no guarda transparencia: se exporta en PNG
         out_path = os.path.splitext(out_path)[0] + ".png"

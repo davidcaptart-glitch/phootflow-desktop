@@ -29,7 +29,21 @@ ADJUSTMENTS = {  # clave: (nombre, parámetros por defecto)
     "invert": ("Invertir", dict()),
     "posterize": ("Posterizar", dict(levels=4)),
     "threshold": ("Umbral", dict(level=128)),
+    # propios de PhootFlow (como las capas nuevas de Photoshop: Claridad, Borrar neblina, Granulado...)
+    "clarity": ("Claridad", dict(amount=30.0, radius=2.0)),
+    "dehaze": ("Borrar neblina", dict(amount=40.0)),
+    "grain": ("Granulado", dict(amount=25.0, size=1.0, rough=50.0, color=0.0, seed=11)),
+    "relight": ("Volver a iluminar", dict(x=0.35, y=0.3, color="#ffd9a0", intensity=60.0, radius=35.0,
+                                          ambient=-20.0, relief=40.0)),
+    "look": ("Reajuste (looks)", dict(look="neo_noir", amount=70.0)),
+    "solid": ("Relleno de color", dict(color="#ff4fa0")),
 }
+# «Reajuste»: looks con un solo regulador de intensidad (como el Reajuste generativo, pero con fórmulas fijas)
+LOOKS = {"neo_noir": "Lluvia neo-noir", "golden": "Hora dorada", "teal_orange": "Cine (azul y naranja)",
+         "pastel": "Pastel suave", "faded": "Película antigua", "winter": "Invierno frío",
+         "sunset": "Atardecer magenta", "bw_drama": "B/N dramático", "matte": "Mate editorial",
+         "night": "Noche americana"}
+SPATIAL = ("clarity", "dehaze", "grain", "relight")  # dependen del tamaño o de la posición en la foto
 ORDER = list(ADJUSTMENTS)
 
 BLEND_MODES = {"normal": "Normal", "multiply": "Multiplicar", "screen": "Trama", "overlay": "Superponer",
@@ -348,6 +362,205 @@ def photo_filter(img, color, density, preserve):
     return f
 
 
+# ------------------------------------------------------------------ Claridad, Borrar neblina, Granulado y luz
+# Fórmulas propias. Todo lo que depende del tamaño va en fracción del lado largo, para que la vista de 2048 px y
+# la exportación a tamaño completo se vean igual.
+
+def _blur_fast(x: np.ndarray, sigma: float) -> np.ndarray:
+    """Desenfoque gaussiano; con radios grandes se hace a escala reducida (mismo resultado, mucho más rápido)."""
+    import cv2
+    sigma = max(0.3, float(sigma))
+    if sigma <= 8:
+        return cv2.GaussianBlur(x, (0, 0), sigma)
+    f = 4.0 / sigma
+    h, w = x.shape[:2]
+    sm = cv2.resize(x, (max(2, int(w * f)), max(2, int(h * f))), interpolation=cv2.INTER_AREA)
+    sm = cv2.GaussianBlur(sm, (0, 0), 4.0)
+    return cv2.resize(sm, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def guided(I: np.ndarray, p: np.ndarray, r: int, eps: float) -> np.ndarray:
+    """Filtro guiado (He et al., 2010) en escala de grises: suaviza `p` sin cruzar los bordes de `I`."""
+    import cv2
+    k = (2 * int(r) + 1,) * 2
+    box = lambda x: cv2.boxFilter(x, cv2.CV_32F, k, borderType=cv2.BORDER_REFLECT)  # noqa: E731
+    mI, mp = box(I), box(p)
+    a = (box(I * p) - mI * mp) / (box(I * I) - mI * mI + eps)
+    b = mp - a * mI
+    return box(a) * I + box(b)
+
+
+def _edge_aware_base(y: np.ndarray, sigma: float) -> np.ndarray:
+    """Base suave de `y` que respeta los bordes (sin halos), a escala reducida si el radio es grande."""
+    import cv2
+    h, w = y.shape
+    f = min(1.0, 6.0 / max(sigma, 1e-6)) if sigma > 6 else 1.0
+    sm = cv2.resize(y, (max(4, int(w * f)), max(4, int(h * f))), interpolation=cv2.INTER_AREA) if f < 1 else y
+    base = guided(sm, sm, max(1, int(round(sigma * f))), 1e-3)
+    if f < 1:
+        # se vuelve a tamaño completo guiando con la imagen grande (los bordes siguen nítidos)
+        base = cv2.resize(base, (w, h), interpolation=cv2.INTER_LINEAR)
+        base = guided(y, base, max(1, int(round(2 / f))), 2e-3)
+    return base
+
+
+def clarity(img, amount, radius):
+    """Contraste local de los medios tonos (detalle de tamaño medio); en negativo, suaviza. La base respeta los
+    bordes, así que no salen halos alrededor de las siluetas."""
+    if amount == 0:
+        return img
+    y = lum(img).astype(np.float32)
+    sig = max(1.0, float(radius) / 100.0 * max(img.shape[:2]))
+    d = y - _edge_aware_base(y, sig)
+    w = np.clip(1 - (2 * y - 1) ** 2, 0, 1) ** 0.7  # sin tocar apenas negros ni blancos
+    k = amount / 100.0 * (1.6 if amount > 0 else 0.9)
+    return np.clip(img + (k * d * w)[..., None], 0, 1).astype(np.float32)
+
+
+def dehaze(img, amount):
+    """Quita (o añade, en negativo) neblina con el canal oscuro (He et al., 2009), calculado a 512 px."""
+    import cv2
+    a = float(amount) / 100.0
+    if a == 0:
+        return img
+    H, W = img.shape[:2]
+    f = min(1.0, 512.0 / max(H, W))
+    sm = cv2.resize(img, (max(2, int(W * f)), max(2, int(H * f))), interpolation=cv2.INTER_AREA) if f < 1 else img
+    k = max(3, int(max(sm.shape[:2]) * 0.02) | 1)
+    ker = np.ones((k, k), np.uint8)
+    dark = cv2.erode(np.ascontiguousarray(sm.min(-1)), ker)
+    n = max(1, dark.size // 1000)
+    idx = np.argpartition(dark.ravel(), -n)[-n:]
+    A = np.clip(sm.reshape(-1, 3)[idx].mean(0), 0.45, 1.0).astype(np.float32)  # luz de la neblina
+    # transmisión con el canal oscuro de cada píxel (sin erosionar: la erosión deja halos junto a lo oscuro),
+    # alisada con el filtro guiado para que no se vea el ruido
+    t = 1 - 0.95 * np.ascontiguousarray((sm / A).min(-1).astype(np.float32))
+    t = guided(np.ascontiguousarray(lum(sm).astype(np.float32)), t, max(2, k // 2), 2e-3)
+    t = cv2.resize(t, (W, H), interpolation=cv2.INTER_LINEAR)
+    if f < 1:
+        t = guided(lum(img).astype(np.float32), t, max(2, int(round(3 / f))), 1e-3)
+    t = np.clip(t, 0.05, 1)
+    if a > 0:
+        tt = np.maximum(1 - a * (1 - t), 0.3)[..., None]
+        out = (img - A) / tt + A
+        # quitar neblina dispara la saturación: se devuelve parte del color original (como hace Lightroom)
+        y0, y1 = lum(img)[..., None], lum(out)[..., None]
+        out = y1 + ((out - y1) * 0.6 + (img - y0) * 0.4)
+    else:
+        out = img + (A - img) * (-a) * 0.6 * (0.4 + (1 - t)[..., None])
+    return np.clip(out, 0, 1).astype(np.float32)
+
+
+def grain(img, amount, size, rough, color, seed):
+    """Grano de película: más visible en los medios tonos, del mismo aspecto a cualquier resolución."""
+    import cv2
+    if amount <= 0:
+        return img
+    H, W = img.shape[:2]
+    cell = max(0.4, float(size)) * max(H, W) / 3000.0  # píxeles por grano
+    gh, gw = max(2, int(round(H / cell))), max(2, int(round(W / cell)))
+    rng = np.random.default_rng(int(seed))
+    nc = 3 if color > 0 else 1
+    n = rng.standard_normal((gh, gw, nc), dtype=np.float32)
+    soft = 0.6 + (1 - float(rough) / 100.0) * 1.2  # menos rugosidad: grano más redondo
+    n = cv2.GaussianBlur(n, (0, 0), soft).reshape(gh, gw, nc)
+    n /= n.std() + 1e-6
+    g = cv2.resize(n, (W, H), interpolation=cv2.INTER_CUBIC if cell > 1 else cv2.INTER_AREA).reshape(H, W, nc)
+    if nc == 3:
+        mono = g.mean(-1, keepdims=True)
+        g = mono + (g - mono) * (float(color) / 100.0)
+    y = lum(img)[..., None]
+    w = 0.25 + 3.0 * y * (1 - y)
+    return np.clip(img + float(amount) / 100.0 * 0.11 * g * w, 0, 1).astype(np.float32)
+
+
+def relight(img, p):
+    """Volver a iluminar: un foco de luz (posición, color, intensidad y alcance) en luz lineal, con «relieve»
+    sacado de la propia foto (las zonas que miran hacia la luz se iluminan más) y luz ambiente."""
+    import cv2
+    H, W = img.shape[:2]
+    f = min(1.0, 512.0 / max(H, W))
+    hs, ws = max(2, int(H * f)), max(2, int(W * f))
+    yy, xx = np.mgrid[0:hs, 0:ws].astype(np.float32)
+    cx, cy = float(p.get("x", 0.35)) * ws, float(p.get("y", 0.3)) * hs
+    vx, vy = cx - xx, cy - yy
+    dist = np.hypot(vx, vy) + 1e-6
+    rad = max(0.02, float(p.get("radius", 35)) / 100.0) * max(hs, ws)
+    fall = 1.0 / (1.0 + (dist / rad) ** 2)
+    sm = cv2.resize(img, (ws, hs), interpolation=cv2.INTER_AREA) if f < 1 else img
+    L = cv2.GaussianBlur(np.ascontiguousarray(lum(sm).astype(np.float32)), (0, 0), 2.0)
+    gx = cv2.Sobel(L, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(L, cv2.CV_32F, 0, 1, ksize=3)
+    shade = (gx * vx + gy * vy) / dist
+    shade = np.clip(shade / (3 * np.abs(shade).std() + 1e-6), -1, 1)
+    gain = fall * (1 + float(p.get("relief", 40)) / 100.0 * 0.6 * shade)
+    gain = cv2.resize(gain.astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR)[..., None]
+    col = srgb_to_lin(_hex(p.get("color", "#ffd9a0")))
+    col = col / max(float(col.max()), 1e-6)
+    lin = srgb_to_lin(img)
+    amb = 2.0 ** (float(p.get("ambient", -20)) / 100.0 * 1.5)
+    I = float(p.get("intensity", 60)) / 100.0 * 3.0
+    out = lin * amb + lin * I * gain * col + I * gain * col * 0.015
+    return lin_to_srgb(out)
+
+
+def _split(img, shadows, highlights, amt, balance=0.5):
+    """Virado partido: un color en las sombras y otro en las luces."""
+    y = lum(img)[..., None]
+    ws = np.clip(1 - y / balance, 0, 1) ** 1.2
+    wh = np.clip((y - balance) / (1 - balance), 0, 1) ** 1.2
+    return np.clip(img + (ws * (_hex(shadows) - 0.5) + wh * (_hex(highlights) - 0.5)) * amt, 0, 1)
+
+
+def _contrast(img, c):
+    return _lut_apply(img, brightness_contrast_lut(0.0, c))
+
+
+def _fade(img, black, white=1.0):
+    return black + img * (white - black)
+
+
+def look(img, name, amount):
+    """Un look con regulador: 0 = la foto tal cual, 100 = el look completo (hasta 150 lo exagera)."""
+    x = img
+    if name == "neo_noir":
+        x = vibrance(x, -40, -35)
+        x = _contrast(x, 45)
+        x = _split(x, "#0f5a78", "#a6eaff", 0.4)
+        x = np.power(np.clip(x, 0, 1), 1.45)
+    elif name == "golden":
+        x = photo_filter(x, _hex("#ec8a00"), 38, True)
+        x = vibrance(x, 25, 0)
+        x = _fade(_contrast(x, 10), 0.03)
+    elif name == "teal_orange":
+        x = _split(x, "#0b7d8a", "#ffa257", 0.5)
+        x = vibrance(_contrast(x, 15), 15, 0)
+    elif name == "pastel":
+        x = _fade(_contrast(x, -30), 0.08)
+        x = vibrance(x, 0, -25)
+        x = np.power(np.clip(_split(x, "#c4a6ff", "#ffd3de", 0.3), 0, 1), 0.9)
+    elif name == "faded":
+        x = _fade(_contrast(vibrance(x, 0, -30), -10), 0.1, 0.93)
+        x = photo_filter(x, _hex("#e8c07a"), 22, True)
+    elif name == "winter":
+        x = photo_filter(x, _hex("#006dff"), 28, True)
+        x = np.power(np.clip(vibrance(x, 0, -15), 0, 1), 0.92)
+    elif name == "sunset":
+        x = _split(x, "#5a1e6e", "#ff9a4a", 0.5)
+        x = vibrance(_contrast(x, 10), 25, 0)
+    elif name == "bw_drama":
+        x = black_white(x, [40, 60, 40, 60, 20, 80])
+        x = np.power(np.clip(_contrast(x, 60), 0, 1), 1.1)
+    elif name == "matte":
+        x = _fade(_contrast(vibrance(x, 0, -10), 15), 0.07, 0.96)
+    elif name == "night":
+        x = lin_to_srgb(srgb_to_lin(x) * 0.22)
+        x = photo_filter(vibrance(x, 0, -50), _hex("#1e4bff"), 55, False)
+        x = _contrast(x, 20)
+    a = float(amount) / 100.0
+    return np.clip(img + (np.clip(x, 0, 1) - img) * a, 0, 1).astype(np.float32)
+
+
 # ------------------------------------------------------------------ aplicar un ajuste
 
 def apply(img: np.ndarray, kind: str, p: dict) -> np.ndarray:
@@ -400,6 +613,19 @@ def apply(img: np.ndarray, kind: str, p: dict) -> np.ndarray:
         lvl = float(p.get("level", 128))
         y = 0.299 * img[..., 0] + 0.587 * img[..., 1] + 0.114 * img[..., 2]
         return np.repeat((y * 255 >= lvl).astype(np.float32)[..., None], 3, -1)
+    if kind == "clarity":
+        return clarity(img, float(p.get("amount", 30)), float(p.get("radius", 2.0)))
+    if kind == "dehaze":
+        return dehaze(img, float(p.get("amount", 40)))
+    if kind == "grain":
+        return grain(img, float(p.get("amount", 25)), float(p.get("size", 1.0)), float(p.get("rough", 50)),
+                     float(p.get("color", 0)), int(p.get("seed", 11)))
+    if kind == "relight":
+        return relight(img, p)
+    if kind == "look":
+        return look(img, p.get("look", "neo_noir"), float(p.get("amount", 70)))
+    if kind == "solid":
+        return np.broadcast_to(_hex(p.get("color", "#ff4fa0")), img.shape).astype(np.float32).copy()
     return img
 
 
