@@ -603,9 +603,77 @@ def _dhash(gray: np.ndarray) -> int:
     return int("".join("1" if b else "0" for b in bits), 2)
 
 
+SUBJECT_CROP = "Persona"  # recorte acercado a la persona principal, con la proporción de la cámara
+SUBJECT_MIN_AREA = 0.28    # no acercar más: se pierde resolución y el ambiente del evento
+_SUBJECT_PREFERRED = (SUBJECT_CROP, "4:5", "5:4", "2:3", "3:2", "1:1")
+
+
+def main_subject(faces: list, w: int, h: int):
+    """Caja (x0, y0, x1, y1, alto de cara) de la persona (o pareja) principal, o None si no hay una clara.
+    Principal = las caras de al menos la mitad del tamaño de la mayor, como mucho 3, y que no llenen ya la foto."""
+    if not faces:
+        return None
+    fs = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+    big = fs[0][2] * fs[0][3]
+    main = [f for f in fs if f[2] * f[3] >= 0.5 * big]
+    if len(main) > 3:
+        return None  # grupo: mejor que salgan todos
+    fh = float(np.mean([f[3] for f in main]))
+    if fh > 0.2 * h:
+        return None  # ya está cerca: no hace falta acercar
+    x0 = min(f[0] for f in main)
+    y0 = min(f[1] for f in main)
+    x1 = max(f[0] + f[2] for f in main)
+    y1 = max(f[1] + f[3] for f in main)
+    if (x1 - x0) > 0.6 * w:
+        return None  # las caras están repartidas por toda la foto
+    return x0, y0, x1, y1, fh
+
+
+def subject_crop(subj, w: int, h: int, r: float) -> tuple:
+    """Recorte de proporción `r` (ancho/alto) sobre la persona principal: de la cabeza a medio muslo, con aire
+    alrededor, los ojos en el tercio superior y sin cortar nunca la cabeza. Normalizado 0..1."""
+    x0, y0, x1, y1, fh = subj
+    fw = 0.85 * fh  # ancho de una cara (aprox.)
+    top = y0 - 0.6 * fh
+    bottom = min(h, y1 + 4.5 * fh)
+    body_w = (x1 - x0) + 2.2 * fw
+    ch = max((bottom - top) * 1.15, body_w * 1.7 / r)
+    cw = ch * r
+    if cw * ch < SUBJECT_MIN_AREA * w * h:
+        s = math.sqrt(SUBJECT_MIN_AREA * w * h / (cw * ch))
+        cw, ch = cw * s, ch * s
+    if cw > w:
+        cw, ch = w, w / r
+    if ch > h:
+        ch, cw = h, h * r
+    eyes = y0 + 0.45 * fh
+    cy0 = min(eyes - 0.30 * ch, top - 0.03 * ch)  # ojos al tercio y aire sobre la cabeza
+    cx0 = (x0 + x1) / 2 - cw / 2
+    cx0 = min(max(0.0, cx0), w - cw)
+    cy0 = min(max(0.0, cy0), h - ch)
+    return (cx0 / w, cy0 / h, (cx0 + cw) / w, (cy0 + ch) / h)
+
+
 def plan_crops(gray: np.ndarray, faces: list) -> tuple[dict, dict, str]:
-    """Para cada formato, el recorte más grande posible colocado donde está el interés."""
+    """Para cada formato, el recorte colocado donde está el interés. Si hay una persona (o pareja) principal,
+    el recorte se acerca a ella dejando ver el entorno; si no, es el más grande posible de ese formato."""
     h, w = gray.shape
+    subj = main_subject(faces, w, h)
+    if subj is not None:
+        crops, scores = {"Original": (0.0, 0.0, 1.0, 1.0)}, {"Original": 1.0}
+        x0, y0, x1, y1, fh = subj
+        box = (x1 - x0 + 2.2 * fh) * (min(h, y1 + 4.5 * fh) - (y0 - 0.6 * fh))
+        for name, (rw, rh) in list(RATIOS.items()) + [(SUBJECT_CROP, (w, h))]:
+            c = subject_crop(subj, w, h, rw / rh)
+            crops[name] = c
+            area = (c[2] - c[0]) * (c[3] - c[1]) * w * h
+            fill = min(1.0, box / max(area, 1.0))
+            # el formato de la cámara es el preferido salvo que otro encuadre a la persona bastante mejor
+            bonus = 0.15 if name == SUBJECT_CROP else 0.0
+            scores[name] = round(1.0 + fill + bonus, 3) if name in _SUBJECT_PREFERRED else round(0.5 + fill, 3)
+        best = max(scores, key=scores.get)
+        return crops, scores, best
     gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0)
     gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1)
     k = max(3, int(0.03 * max(h, w)))
@@ -1386,7 +1454,7 @@ _CACHE_SKIP = {"thumb", "preview", "keep", "reason", "reviewed"}
 def _sig(ph: Photo, st: Settings) -> str:
     try:
         stt = os.stat(ph.path)
-        base = f"{os.path.basename(ph.path)}|{stt.st_size}|{stt.st_mtime_ns}|{st.straighten}|{st.ev_comp:.2f}|v4"
+        base = f"{os.path.basename(ph.path)}|{stt.st_size}|{stt.st_mtime_ns}|{st.straighten}|{st.ev_comp:.2f}|v5"
     except OSError:
         return ""
     return hashlib.sha1(base.encode()).hexdigest()[:16]

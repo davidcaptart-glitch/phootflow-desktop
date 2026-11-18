@@ -927,6 +927,19 @@ class CropAndReview(unittest.TestCase):
         self.assertEqual(CV.guess_ratio([0.0, 0.0, 1.0, 1.0], (6000, 4000))[0], "3:2")
         self.assertIsNone(CV.ratio_value("Libre", False, (6000, 4000)))
 
+    def test_smart_crop_frames_main_person(self):
+        w, h = 1600, 1067
+        face = (1100, 380, 70, 80)  # una persona pequeña a la derecha
+        crops, scores, best = E.plan_crops(np.zeros((h, w), np.float32), [face, (200, 400, 30, 34)])
+        self.assertNotEqual(best, "Original")
+        x0, y0, x1, y1 = crops[best]
+        self.assertLessEqual(y0 * h, face[1] - 0.5 * face[3])               # no corta la cabeza
+        self.assertTrue(x0 * w < face[0] and x1 * w > face[0] + face[2])    # la persona dentro
+        self.assertGreaterEqual((x1 - x0) * (y1 - y0), E.SUBJECT_MIN_AREA - 0.01)  # con entorno
+        self.assertLess((x1 - x0) * (y1 - y0), 0.7)                          # y acercándose de verdad
+        group = [(100 + 200 * i, 400, 60, 70) for i in range(6)]
+        self.assertIsNone(E.main_subject(group, w, h))                       # grupo: que salgan todos
+
     def test_review_is_saved_and_restored(self):
         d = tempfile.mkdtemp()
         photos = []
