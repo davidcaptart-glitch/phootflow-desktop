@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 112 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 118 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -103,6 +103,10 @@ python -m unittest discover -s tests   # 112 pruebas, sin fotos reales ni red
   Ctrl+Mayús+I), Edits (capas `particles` y `artistic`, Doble exposición con capas normales, exportar ×2 con IA,
   ficha de capa al pasar el ratón).
 - `cropview.py` — marco de recorte interactivo común (Studio con R; revisión de Events con C: recorte «Personalizado»).
+  Enderezar es parte del marco (`on_angle`): arrastrar fuera del marco gira, Ctrl+arrastrar o «Nivel» traza el
+  horizonte (`level_angle`), vista previa instantánea girando la imagen mostrada (`paint_image`, `cover_scale`)
+  hasta que el anfitrión revela y llama a `rendered(ángulo)`. Regulador, Auto (`E.detect_tilt`) y 0° junto al
+  recorte en Studio (sincronizado con Geometría) y en la revisión (`ph.angle`, o el ángulo de Studio).
 - `propagate.py` — propagar la edición de Studio/Edits de una foto a otras de Events (`Propagator`: grupos de ajustes y capas de Edits).
   La revisión de Events se guarda sola en `<salida>/.phootflow/revision.json` (`save_review`/`load_review`) y sigue por la primera sin revisar.
 - `luts.py` — LUT .cube por tipo de sesión; `eyes.py` (MediaPipe) y `scene_ai.py` (CLIP, onnxruntime): IA local.

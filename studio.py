@@ -204,7 +204,7 @@ class Canvas(QWidget):
 
     def mousePressEvent(self, e):
         if self.crop.active and e.button() == Qt.LeftButton:
-            self.crop.press(e.position(), self.img_rect)
+            self.crop.press(e.position(), self.img_rect, e.modifiers())
             return
         if self._wants_pan(e) and not (self.cmp.split and self._near_line(e)):
             self.zoom.start_pan(e.position())
@@ -271,7 +271,8 @@ class Canvas(QWidget):
         r = self.zoom.rect(area, pm.size())
         self.img_rect = r
         p.setClipRect(area)
-        CMP.paint(p, r, pm, self.before, self.cmp)
+        if not (self.crop.active and self.crop.paint_image(p, r, pm)):
+            CMP.paint(p, r, pm, self.before, self.cmp)
         if not self.cmp.active:
             self.zoom.draw_tile(p, r)
         self.crop.paint(p, r)
@@ -1269,11 +1270,103 @@ class StudioView(QWidget):
         row.addWidget(self.ratio_cb, 1)
         row.addWidget(self.b_flip)
         sec.lay.addLayout(row)
-        hint = QLabel("Arrastra el marco para moverlo, y las esquinas o los lados para cambiar el tamaño.")
+        self.crop_angle = SliderRow("crop_angle", "Enderezar", -45, 45, 0.1, 0)
+        self.crop_angle.changed.connect(self._crop_angle_slider)
+        sec.lay.addWidget(self.crop_angle)
+        row = QHBoxLayout()
+        self.b_level = _btn("  Nivel", "ghost", "Traza una línea sobre el horizonte o una vertical y la foto se pone "
+                                                "recta (también con Ctrl + arrastrar sobre la foto)")
+        self.b_level.setIcon(I.icon("sliders", 16))
+        self.b_level.setCheckable(True)
+        self.b_level.toggled.connect(self._level_mode)
+        b_auto = _btn("  Auto", "ghost", "Enderezar solo: busca las verticales de la foto")
+        b_auto.setIcon(I.icon("auto", 16))
+        b_auto.clicked.connect(self._auto_straighten)
+        b_zero = _btn("0°", "ghost", "Quitar el giro")
+        b_zero.clicked.connect(lambda: self._crop_angle(0.0, "end", history=True))
+        row.addWidget(self.b_level, 1)
+        row.addWidget(b_auto, 1)
+        row.addWidget(b_zero)
+        sec.lay.addLayout(row)
+        hint = QLabel("Arrastra el marco para moverlo, y las esquinas o los lados para cambiar el tamaño. "
+                      "Arrastra fuera del marco para girar la foto; Ctrl + arrastrar (o «Nivel») traza el horizonte.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         sec.lay.addWidget(hint)
         return sec
+
+    # ---------------------------------------------------------- enderezar (parte del recorte)
+    def _cur_angle(self) -> float:
+        return float(self.cur.settings.get("angle", 0) or 0) if self.cur else 0.0
+
+    def _crop_angle(self, a, phase, history=False):
+        """Ángulo nuevo desde el marco (girar fuera de él, nivel), el regulador, Auto o 0°."""
+        if not self.cur:
+            return
+        if phase == "start":
+            self._push_history("Enderezar")
+            return
+        a = round(max(-45.0, min(45.0, float(a))), 2)
+        if history:
+            self._push_history("Enderezar")
+        if self.crop_mode:
+            self.canvas.crop.target = a
+            self.canvas.update()
+        self.cur.settings["angle"] = a
+        self._sync_angle_rows(a)
+        self._refresh_history()
+        self.request(draft=False)
+        self._save_timer.start(400)
+
+    def _sync_angle_rows(self, a):
+        for r in (self.rows.get("angle"), getattr(self, "crop_angle", None)):
+            if r is not None:
+                r.blockSignals(True)
+                r.set_value(a)
+                r.blockSignals(False)
+
+    def _crop_angle_slider(self, _key, value, final):
+        if not self.cur:
+            return
+        if self.crop_mode:  # vista previa al momento mientras se arrastra
+            self.canvas.crop.target = float(value)
+            self.canvas.update()
+        if final:
+            self._crop_angle(value, "end", history=True)
+        else:
+            self.cur.settings["angle"] = float(value)
+            r = self.rows.get("angle")
+            if r is not None:
+                r.blockSignals(True)
+                r.set_value(value)
+                r.blockSignals(False)
+            if not self.crop_mode:
+                self.request(draft=True)
+
+    def _level_mode(self, on):
+        if on and not self.crop_mode:
+            self.b_crop.setChecked(True)
+        self.canvas.crop.level_mode = bool(on) and self.crop_mode
+        self.status.setText("Nivel: traza una línea sobre el horizonte o sobre una vertical" if on else
+                            ("Recorte: arrastra el marco · fuera del marco gira · Intro aplica · Esc cancela"
+                             if self.crop_mode else ""))
+        self.canvas.update()
+
+    def _auto_straighten(self):
+        if not self.cur or self.cur.path not in self._proxy:
+            return
+        lin = self._proxy[self.cur.path][0]
+        f = 1600 / max(lin.shape[:2])
+        if f < 1:
+            lin = cv2.resize(lin, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        srgb = np.where(lin <= 0.0031308, lin * 12.92, 1.055 * np.power(np.maximum(lin, 0), 1 / 2.4) - 0.055)
+        g8 = (np.clip(cv2.cvtColor(srgb.astype(np.float32), cv2.COLOR_RGB2GRAY), 0, 1) * 255).astype(np.uint8)
+        a = E.detect_tilt(g8)
+        if self.crop_mode:
+            self.canvas.crop.target = a
+        self._crop_angle(a, "end", history=True)
+        self.status.setText(f"Enderezado automático: {-a:+.1f}°" if abs(a) > 0.05 else
+                            "No hay verticales claras: la foto se queda como está.")
 
     def _view_size(self):
         fw, fh = E.full_size(self.cur.path) if self.cur else (3, 2)
@@ -1308,12 +1401,16 @@ class StudioView(QWidget):
             self.ratio_cb.setCurrentText(name)
             self.b_flip.setChecked(flip)
             self.canvas.zoom.pct = None
-            self.canvas.crop.start(self._crop_undo)
+            self.canvas.crop.start(self._crop_undo, angle=self._cur_angle())
             self.canvas.crop.rn = self._ratio()
+            self.canvas.crop.on_angle = self._crop_angle
+            self._sync_angle_rows(self._cur_angle())
             self.pages.setCurrentIndex(4)
             self._tab_btns[4].setChecked(True)
-            self.status.setText("Recorte: arrastra el marco · Intro aplica · Esc cancela")
+            self.status.setText("Recorte: arrastra el marco · fuera del marco gira · Ctrl+arrastrar: nivel · "
+                                "Intro aplica · Esc cancela")
         else:
+            self.b_level.setChecked(False)
             self.canvas.crop.stop()
             self.status.setText("")
         self.request(draft=False)
@@ -1787,6 +1884,7 @@ class StudioView(QWidget):
         if not self.cur or self.cur.path not in self._proxy:
             return
         self._req += 1
+        self._req_angle = (self._req, self._cur_angle())
         self._jobs.put((self._req, self.cur.path, copy.deepcopy(self.cur.settings), draft,
                         self.mask_i if self.mask_show else None, self.canvas.cmp.active, self.crop_mode))
         if draft:
@@ -1862,6 +1960,11 @@ class StudioView(QWidget):
         before = info[1] if isinstance(info, tuple) else None
         if before is not None:
             self.canvas.before = _pixmap(before)
+        ra = getattr(self, "_req_angle", None)
+        if self.canvas.crop.active and ra and n == ra[0]:
+            self.canvas.crop.angle = ra[1]  # la imagen nueva ya viene girada
+            if self.canvas.crop._rot is None:
+                self.canvas.crop.target = self._cur_angle()
         self.canvas.set(pm=pm, msg="" if not draft else "vista rápida")
         self.hist.set(img)
         self.nav.setPixmap(pm.scaled(self.nav.width() - 4, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -1903,6 +2006,8 @@ class StudioView(QWidget):
         self.bw_cb.blockSignals(False)
         self.bw_style.setCurrentText(s.get("bw_style") or "Editorial")
         self._sync_bw_ui(bool(s.get("bw")))
+        if hasattr(self, "crop_angle"):
+            self._sync_angle_rows(float(s.get("angle", 0) or 0))
         i = self.lut_cb.findData(s.get("lut") or None)
         self.lut_cb.setCurrentIndex(max(0, i))
         self._show_rating()
@@ -1924,6 +2029,14 @@ class StudioView(QWidget):
             self._push_history(f"{name} {value:+g}" if isinstance(value, (int, float)) and not isinstance(value, bool)
                                else f"{name}")
         self.cur.settings[key] = value
+        if key == "angle":
+            if self.crop_mode:
+                self.canvas.crop.target = float(value)
+                self.canvas.update()
+            if hasattr(self, "crop_angle"):
+                self.crop_angle.blockSignals(True)
+                self.crop_angle.set_value(value)
+                self.crop_angle.blockSignals(False)
         self.request(draft=not final)
         self._save_timer.start(600)
         self.film.viewport().update()

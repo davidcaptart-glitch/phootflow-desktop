@@ -9,7 +9,7 @@ from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout,
                                QLabel, QListView, QListWidget, QListWidgetItem, QPushButton, QRadioButton,
-                               QSizePolicy, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
+                               QSizePolicy, QSlider, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
 
 import compare as CMP
 import cropview as CV
@@ -121,7 +121,7 @@ class Big(QWidget):
 
     def mousePressEvent(self, e):
         if self.crop.active and e.button() == Qt.LeftButton:
-            self.crop.press(e.position(), self.r)
+            self.crop.press(e.position(), self.r, e.modifiers())
             return
         if self.zoom.active and (e.button() == Qt.MiddleButton or not self.cmp.split):
             self.zoom.start_pan(e.position())
@@ -155,7 +155,8 @@ class Big(QWidget):
             r = self.zoom.rect(area, self.pm.size())
             self.r = r
             p.setClipRect(area)
-            CMP.paint(p, r, self.pm, self.before, self.cmp)
+            if not (self.crop.active and self.crop.paint_image(p, r, self.pm)):
+                CMP.paint(p, r, self.pm, self.before, self.cmp)
             if not self.cmp.active and not self.crop.active:
                 self.zoom.draw_tile(p, r)
             self.crop.paint(p, r)
@@ -319,6 +320,28 @@ class ReviewDialog(QDialog):
         crow.addWidget(self.ratio_cb, 1)
         crow.addWidget(self.b_flip)
         self.big.crop.on_change = self._on_crop
+        self.big.crop.on_angle = self._crop_angle
+        arow = QHBoxLayout()
+        self.ang = QSlider(Qt.Horizontal)
+        self.ang.setRange(-450, 450)  # décimas de grado
+        self.ang.setToolTip("Enderezar (también arrastrando fuera del marco)")
+        self.ang.valueChanged.connect(self._ang_moved)
+        self.ang.sliderReleased.connect(lambda: self._crop_angle(-self.ang.value() / 10, "end"))
+        self.ang_lbl = QLabel("0,0°")
+        self.ang_lbl.setObjectName("muted")
+        self.ang_lbl.setFixedWidth(44)
+        self.b_level = _ibtn("sliders", "Nivel: traza una línea sobre el horizonte o una vertical (o Ctrl + arrastrar)",
+                             True)
+        self.b_level.toggled.connect(self._level_mode)
+        b_auto = _ibtn("auto", "Enderezar solo (busca las verticales)")
+        b_auto.clicked.connect(self._auto_straighten)
+        b_zero = _btn("0°", "ghost", "Quitar el giro")
+        b_zero.clicked.connect(lambda: self._crop_angle(0.0, "end"))
+        arow.addWidget(QLabel("Enderezar"))
+        arow.addWidget(self.ang, 1)
+        arow.addWidget(self.ang_lbl)
+        for b_ in (self.b_level, b_auto, b_zero):
+            arow.addWidget(b_)
         self.crops = QListWidget()
         self.crops.setViewMode(QListView.IconMode)
         self.crops.setResizeMode(QListView.Adjust)
@@ -348,6 +371,7 @@ class ReviewDialog(QDialog):
         sv.addWidget(self.bw_list)
         sv.addWidget(crops_t)
         sv.addLayout(crow)
+        sv.addLayout(arow)
         sv.addWidget(self.crops, 1)
         mid.addWidget(side)
         v.addLayout(mid, 1)
@@ -434,7 +458,7 @@ class ReviewDialog(QDialog):
     # ---------------------------------------------------------- foto actual
     def _base(self, ph):
         """Foto revelada entera (sin recortar) con el estilo de la sesión, en color o B/N."""
-        key = (ph.path, round(ph.ev, 2), round(ph.angle, 2), self.is_studio(ph))
+        key = (ph.path, round(ph.ev, 2), round(self._angle_of(ph), 2), self.is_studio(ph))
         if key not in self._cache:
             a = self.studio_render_fn(ph, False) if self.is_studio(ph) else self.render_fn(ph, False)
             self._cache[key] = a
@@ -500,7 +524,7 @@ class ReviewDialog(QDialog):
             name, flip = ("Original", False) if orig else CV.guess_ratio(cur, size)
             self.ratio_cb.setCurrentText(name)
             self.b_flip.setChecked(flip)
-            self.big.crop.start(list(cur))
+            self.big.crop.start(list(cur), angle=self._angle_of(ph))
             self.big.crop.rn = self._ratio()
         if self.crop_on:
             self.big.zoom.pct, self.big.zoom.provider = None, None
@@ -514,6 +538,7 @@ class ReviewDialog(QDialog):
             self.big.zoom.schedule()
         else:
             self.big.zoom.provider = None
+        self._show_angle(self._angle_of(ph))
         self._fill_crops(ph, base, ss)
         self._fill_bw(ph, color if self.bw and not studio else crop(base, box), studio, ss)
         self._refresh_prop()
@@ -524,7 +549,7 @@ class ReviewDialog(QDialog):
 
     def _studio_bw(self, ph, ss):
         """Revelado de Studio en B/N (sin recortar), tal como se exportará."""
-        key = (ph.path, "bw", ss.get("bw_style"), round(ph.angle, 2))
+        key = (ph.path, "bw", ss.get("bw_style"), round(float(ss.get("angle", 0) or 0), 2))
         if key not in self._cache:
             self._cache[key] = self.studio_render_fn(ph, True)
             if len(self._cache) > 40:
@@ -686,8 +711,79 @@ class ReviewDialog(QDialog):
         v = CV.ratio_value(self.ratio_cb.currentText(), self.b_flip.isChecked(), size)
         return None if v is None else v * size[1] / size[0]
 
+    # ---------------------------------------------------------- enderezar (parte del recorte)
+    def _angle_of(self, ph) -> float:
+        ss = self._studio_s(ph) if self.is_studio(ph) else None
+        return float(ss.get("angle", 0) or 0) if ss is not None else float(ph.angle or 0)
+
+    def _show_angle(self, a):
+        self.ang.blockSignals(True)
+        self.ang.setValue(int(round(-a * 10)))  # en pantalla: a la derecha = horario, como Lightroom
+        self.ang.blockSignals(False)
+        self.ang_lbl.setText(f"{-a:+.1f}°".replace(".", ","))
+
+    def _ang_moved(self, v):
+        a = -v / 10
+        self.ang_lbl.setText(f"{-a:+.1f}°".replace(".", ","))
+        if not self.crop_on:
+            self.b_crop.setChecked(True)
+        self.big.crop.target = a  # vista previa al momento
+        self.big.update()
+        if not self.ang.isSliderDown():  # teclado o rueda: se aplica ya
+            self._crop_angle(a, "end")
+
+    def _crop_angle(self, a, phase):
+        """Ángulo nuevo desde el marco (girar fuera de él, nivel), el regulador, Auto o 0°."""
+        ph = self.cur()
+        if not ph or phase != "end":
+            return
+        a = round(max(-45.0, min(45.0, float(a))), 2)
+        if not self.crop_on:
+            self.b_crop.setChecked(True)
+        if abs(a - self._angle_of(ph)) < 1e-3:
+            self.big.crop.rendered(a)
+            return self._show_angle(a)
+        ss = self._studio_s(ph) if self.is_studio(ph) else None
+        if ss is not None:
+            import studio_engine as SE
+            ss["angle"] = a
+            try:
+                SE.save(self.prop.folder, ph.path, ss)
+            except OSError:
+                pass
+        else:
+            ph.angle = a
+        self.big.crop.target = a
+        self._show_angle(a)
+        self.on_change()
+        self.big.repaint()  # se ve girada mientras se revela
+        self.show_photo()
+        self.big.crop.rendered(a)
+
+    def _level_mode(self, on):
+        if on and not self.crop_on:
+            self.b_crop.setChecked(True)
+        self.big.crop.level_mode = bool(on) and self.crop_on
+        self.big.update()
+
+    def _auto_straighten(self):
+        ph = self.cur()
+        if not ph:
+            return
+        import cv2
+        base = self._base(ph)  # ya girada: lo que falte se suma al giro actual
+        g = base.astype(np.float32) / 255.0 if base.dtype == np.uint8 else base
+        f = 1600 / max(g.shape[:2])
+        if f < 1:
+            g = cv2.resize(g, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        g8 = (np.clip(cv2.cvtColor(np.ascontiguousarray(g, dtype=np.float32), cv2.COLOR_RGB2GRAY), 0, 1) * 255
+              ).astype(np.uint8)
+        self._crop_angle(self._angle_of(ph) + E.detect_tilt(g8), "end")
+
     def set_crop_mode(self, on):
         self.crop_on, self._crop_for = on, None
+        if not on and hasattr(self, "b_level"):
+            self.b_level.setChecked(False)
         for sc in self._done_keys:
             sc.setEnabled(on)
         if not on:
