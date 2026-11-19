@@ -1771,7 +1771,8 @@ class Main(QMainWindow):
             if f < 1:
                 import cv2
                 lin = cv2.resize(lin, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
-            return SE.render(lin, dict(s, bw=False))
+            # bw=True: tal como se exportará (con su B/N de Studio si lo tiene); el recorte lo aplica la revisión
+            return SE.render(lin, s if bw else dict(s, bw=False), crop=False)
 
         dlg = review.ReviewDialog(self, render_fn, studio_fn,
                                   lambda ph: os.path.normcase(ph.path) in overrides, start,

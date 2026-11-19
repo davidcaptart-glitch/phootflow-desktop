@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 83 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 112 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -40,6 +40,11 @@ python -m unittest discover -s tests   # 83 pruebas, sin fotos reales ni red
   antes/después, histograma, paneles de sliders, historial, presets, exportar) y el revelado no destructivo
   `render(lin, ajustes)`. Ajustes por foto en `<carpeta>/.phootflow/studio/<foto>.json`. Proxy de 2048 px y
   borrador de 1024 px mientras se arrastra. `Shell` (app.py) aloja Events (`Main`) y Studio con el interruptor.
+  Máscaras (`masks.py`): zonas en `m["parts"]` de cualquier tipo que suman, restan o intersecan (`build` combina,
+  `build_one` una zona), `invert` por zona e `invert_all` para la máscara; color dentro de la máscara (HSL por
+  colores, gradación por tonos, presencia y curva tonal); guías sobre el lienzo (`_paint_gizmo`: líneas de la lineal,
+  elipse de la radial, círculo del punto) que se arrastran. Botón «B/N» (V) en la barra. En la revisión de Events,
+  las fotos de Studio se recortan y pasan a B/N guardándolo en su edición de Studio.
 - `edits.py` / `edits_engine.py` — entorno **Edits** (tipo Photoshop): `EditsView` (herramientas, lienzo con zoom,
   capas, propiedades, historial, exportar) y el motor de capas paramétricas (`compose`, `Compositor` con caché
   por prefijo): corrector/tampón/relleno, piel, ojos y luz, licuar, fondo (persona IA, objeto GrabCut o color),

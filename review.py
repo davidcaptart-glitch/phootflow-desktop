@@ -28,6 +28,9 @@ def _pm(a: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(QImage(a.data, w, h, 3 * w, QImage.Format_RGB888).copy())
 
 
+STUDIO_COLOR = "Color"
+
+
 def crop(a: np.ndarray, box) -> np.ndarray:
     x0, y0, x1, y1 = box
     h, w = a.shape[:2]
@@ -177,7 +180,11 @@ class ReviewDialog(QDialog):
         super().__init__(main)
         self.on_change = on_change or (lambda: None)  # guarda la revisión (se puede seguir otro día)
         self.prop = prop                              # propagate.Propagator: copiar la edición a otras fotos
-        self.clip = None
+        # portapapeles de ediciones, como el de Windows: dura mientras la carpeta esté abierta (aunque se cierre
+        # y se vuelva a abrir la revisión o se pase por Studio), se pega cuantas veces haga falta y copiar otra
+        # edición lo sustituye
+        held = getattr(main, "_edit_clip", None)
+        self.clip = held[1] if held and prop is not None and held[0] == prop.folder else None
         self.crop_on, self._crop_for = False, None
         self.setWindowTitle("Revisión antes de exportar")
         self.setWindowState(Qt.WindowMaximized)
@@ -275,7 +282,7 @@ class ReviewDialog(QDialog):
         prow = QHBoxLayout()
         self.b_pcopy = _ibtn("dupes", "Copiar la edición de Studio/Edits de esta foto, eligiendo qué (Ctrl+C)",
                              text="Copiar")
-        self.b_ppaste = _ibtn("paste", "Pegar la edición copiada aquí, aprobar y pasar a la siguiente (Ctrl+V)",
+        self.b_ppaste = _ibtn("paste", "Pegar la edición copiada en esta foto y aprobarla; te quedas en ella para ver el resultado (Ctrl+V)",
                               text="Pegar")
         self.b_papply = _ibtn("sync", "Aplicar la edición copiada a varias fotos a la vez", text="A varias…")
         self.b_pcopy.clicked.connect(self._copy_edit)
@@ -452,9 +459,8 @@ class ReviewDialog(QDialog):
             bits.append("Editada en Studio: se exportará con esa edición.")
         self.info.setText("\n".join(bits))
         base = self._base(ph)
-        if studio and self.crop_on:
-            self.b_crop.setChecked(False)
-        box = (0.0, 0.0, 1.0, 1.0) if studio or self.crop_on else ph.crops.get(ph.best, (0.0, 0.0, 1.0, 1.0))
+        ss = self._studio_s(ph) if studio else None
+        box = (0.0, 0.0, 1.0, 1.0) if self.crop_on else self._cur_box(ph, ss)
         color = crop(base, box)
         if not studio:
             color = E.apply_look(color.astype(np.float32) / 255.0 if color.dtype == np.uint8 else color,
@@ -462,7 +468,12 @@ class ReviewDialog(QDialog):
         img = color
         bws = self.photo_bw(ph)
         label = f"Formato: {'Studio' if studio else ph.best}" + ("" if studio else f"  ·  Look {self.photo_look(ph)}")
-        if self.bw:
+        if ss is not None and ss.get("bw"):  # B/N hecho en Studio: se ve (y se exporta) tal cual
+            img = crop(self._studio_bw(ph, ss), box)
+            label += f"  ·  B/N {ss.get('bw_style') or 'Editorial'}"
+        elif studio:
+            label += "  ·  color"
+        elif self.bw:
             if bws == E.BW_NONE:
                 label += "  ·  sin versión B/N"
             else:
@@ -477,12 +488,16 @@ class ReviewDialog(QDialog):
                     self._before.pop(next(iter(self._before)))
             before = _pm(crop(b, box))
         self.big.set(_pm(img), label, rejected=not ph.keep, before=before)
-        self.b_crop.setEnabled(not studio)
+        self.b_crop.setEnabled(not studio or ss is not None)
+        if studio and ss is None and self.crop_on:
+            self.b_crop.setChecked(False)
         if self.crop_on and self._crop_for != ph.path:
             self._crop_for = ph.path
             size = (base.shape[1], base.shape[0])
-            cur = ph.crops.get(ph.best, (0.0, 0.0, 1.0, 1.0))
-            name, flip = CV.guess_ratio(cur, size) if ph.best != "Original" else ("Original", False)
+            cur = self._cur_box(ph, ss)
+            full = tuple(cur) == (0.0, 0.0, 1.0, 1.0)
+            orig = (ss.get("crop_ratio") == "Original" or full) if ss is not None else ph.best == "Original"
+            name, flip = ("Original", False) if orig else CV.guess_ratio(cur, size)
             self.ratio_cb.setCurrentText(name)
             self.b_flip.setChecked(flip)
             self.big.crop.start(list(cur))
@@ -499,19 +514,47 @@ class ReviewDialog(QDialog):
             self.big.zoom.schedule()
         else:
             self.big.zoom.provider = None
-        self._fill_crops(ph, base, studio)
-        self._fill_bw(ph, color if self.bw else crop(base, box), studio)
+        self._fill_crops(ph, base, ss)
+        self._fill_bw(ph, color if self.bw and not studio else crop(base, box), studio, ss)
         self._refresh_prop()
 
-    def _fill_crops(self, ph, base, studio):
+    def _studio_s(self, ph):
+        """Ajustes de Studio de la foto (los mismos que se exportarán) o None."""
+        return self.prop.studio_of(ph) if self.prop is not None else None
+
+    def _studio_bw(self, ph, ss):
+        """Revelado de Studio en B/N (sin recortar), tal como se exportará."""
+        key = (ph.path, "bw", ss.get("bw_style"), round(ph.angle, 2))
+        if key not in self._cache:
+            self._cache[key] = self.studio_render_fn(ph, True)
+            if len(self._cache) > 40:
+                self._cache.pop(next(iter(self._cache)))
+        return self._cache[key]
+
+    def _cur_box(self, ph, ss=None):
+        """Recorte vigente: el de Studio si la foto está editada allí; si no, el elegido en Events."""
+        if ss is not None:
+            return tuple(float(v) for v in (ss.get("crop") or (0.0, 0.0, 1.0, 1.0)))
+        return ph.crops.get(ph.best, (0.0, 0.0, 1.0, 1.0))
+
+    def _set_studio_crop(self, ph, ss, box, ratio):
+        """El recorte hecho aquí en una foto editada en Studio va a su edición de Studio (y se exporta así)."""
+        import studio_engine as SE
+        ss["crop"] = [round(float(v), 4) for v in box]
+        ss["crop_ratio"] = ratio
+        try:
+            SE.save(self.prop.folder, ph.path, ss)
+        except OSError:
+            pass
+
+    def _fill_crops(self, ph, base, ss=None):
         self.crops.clear()
-        if studio:
-            self.crops.addItem(QListWidgetItem("El recorte se ajusta en Studio"))
-            return
         from PySide6.QtGui import QIcon
         small = base[::4, ::4] if max(base.shape[:2]) > 1200 else base
+        cur = self._cur_box(ph, ss)
         for name, box in ph.crops.items():
-            it = QListWidgetItem(QIcon(_pm(crop(small, box))), ("● " if name == ph.best else "") + name)
+            sel = (name == ph.best) if ss is None else                 all(abs(float(a) - float(b)) < 1e-3 for a, b in zip(box, cur))
+            it = QListWidgetItem(QIcon(_pm(crop(small, box))), ("● " if sel else "") + name)
             it.setData(ROLE, name)
             it.setToolTip("Recorte sugerido" if name == ph.best else f"Usar {name}")
             self.crops.addItem(it)
@@ -522,11 +565,12 @@ class ReviewDialog(QDialog):
     def photo_look(self, ph) -> str:
         return ph.look or self.look or "Natural"
 
-    def _fill_bw(self, ph, img, studio=False):
-        """Propuestas de estilo para esta foto: estilos de B/N en la vista B/N, looks de color en la de color."""
+    def _fill_bw(self, ph, img, studio=False, ss=None):
+        """Propuestas de estilo para esta foto: estilos de B/N en la vista B/N, looks de color en la de color.
+        En las editadas en Studio: color o un estilo de B/N, que se guarda en su edición de Studio."""
         from PySide6.QtGui import QIcon
         self.bw_list.clear()
-        if studio and not self.bw:
+        if studio and ss is None:
             self.bw_t.setText("LOOK: SE AJUSTA EN STUDIO")
             return
         small = img.astype(np.float32) / 255.0 if img.dtype == np.uint8 else img
@@ -534,6 +578,17 @@ class ReviewDialog(QDialog):
         if f < 1:
             import cv2
             small = cv2.resize(small, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+        if ss is not None:
+            self.bw_t.setText("COLOR O BLANCO Y NEGRO (STUDIO)")
+            cur = (ss.get("bw_style") or "Editorial") if ss.get("bw") else STUDIO_COLOR
+            for name in [STUDIO_COLOR] + list(E.BW_STYLES):
+                pic = small if name == STUDIO_COLOR else E.bw_editorial(small, seed=1, style=name)
+                it = QListWidgetItem(QIcon(_pm(pic)), ("● " if name == cur else "") + name)
+                it.setData(ROLE, name)
+                it.setToolTip("Retócala luego en Studio (botón B/N, tecla V)" if name != STUDIO_COLOR else
+                              "Dejarla en color")
+                self.bw_list.addItem(it)
+            return
         if self.bw:
             self.bw_t.setText("ESTILO B/N DE ESTA FOTO")
             cur, session, names = self.photo_bw(ph), self.bw_style, list(E.BW_STYLES) + [E.BW_NONE]
@@ -553,7 +608,17 @@ class ReviewDialog(QDialog):
         name = it.data(ROLE)
         if not ph or not name:
             return
-        if self.bw:
+        ss = self._studio_s(ph) if self.is_studio(ph) else None
+        if ss is not None:
+            import studio_engine as SE
+            ss["bw"] = name != STUDIO_COLOR
+            if ss["bw"]:
+                ss["bw_style"] = name
+            try:
+                SE.save(self.prop.folder, ph.path, ss)
+            except OSError:
+                pass
+        elif self.bw:
             ph.bw_style = "" if name == self.bw_style else name
         else:
             ph.look = "" if name == self.look else name
@@ -564,7 +629,11 @@ class ReviewDialog(QDialog):
         name = it.data(ROLE)
         ph = self.cur()
         if ph and name and name in ph.crops:
-            ph.best = name
+            ss = self._studio_s(ph) if self.is_studio(ph) else None
+            if ss is not None:
+                self._set_studio_crop(ph, ss, ph.crops[name], name)
+            else:
+                ph.best = name
             self._crop_for = None
             self.on_change()
             self.show_photo()
@@ -637,10 +706,14 @@ class ReviewDialog(QDialog):
         ph = self.cur()
         if phase != "end" or not ph or self.big.crop.rect is None:
             return
-        ph.crops[E.CUSTOM_CROP] = tuple(round(float(v), 4) for v in self.big.crop.rect)
-        ph.best = E.CUSTOM_CROP
+        ss = self._studio_s(ph) if self.is_studio(ph) else None
+        if ss is not None:
+            self._set_studio_crop(ph, ss, self.big.crop.rect, self.ratio_cb.currentText())
+        else:
+            ph.crops[E.CUSTOM_CROP] = tuple(round(float(v), 4) for v in self.big.crop.rect)
+            ph.best = E.CUSTOM_CROP
         self.on_change()
-        self._fill_crops(ph, self._base(ph), False)
+        self._fill_crops(ph, self._base(ph), ss)
 
     # ---------------------------------------------------------- propagar la edición de Studio / Edits
     def _refresh_prop(self):
@@ -652,7 +725,8 @@ class ReviewDialog(QDialog):
         self.b_ppaste.setEnabled(self.clip is not None and ph is not None)
         self.b_papply.setEnabled(self.clip is not None)
         if self.clip:
-            self.prop_info.setText(f"Copiada de {self.clip['src']}: {self.clip['desc']}.")
+            self.prop_info.setText(f"Copiada de {self.clip['src']}: {self.clip['desc']}. Pégala (Ctrl+V) en "
+                                   "todas las que quieras; si copias otra, sustituye a esta.")
         else:
             self.prop_info.setText("Edita una foto en Studio o en Edits, apruébala y pulsa «Copiar…» para "
                                    "llevar esa edición a otras fotos." if not has else
@@ -664,7 +738,10 @@ class ReviewDialog(QDialog):
             return
         d = CopyDialog(self, self.prop, ph)
         if d.exec() == QDialog.Accepted:
-            self.clip = self.prop.make_clip(ph, d.groups(), d.layer_ids())
+            clip = self.prop.make_clip(ph, d.groups(), d.layer_ids())
+            if clip:  # la nueva sustituye a la anterior
+                self.clip = clip
+                self.main._edit_clip = (self.prop.folder, clip)
             self._refresh_prop()
 
     def _after_apply(self, n):
@@ -680,7 +757,9 @@ class ReviewDialog(QDialog):
         self.prop.apply(self.clip, [ph])
         ph.keep, ph.reviewed, ph.reason = True, True, ""
         self._after_apply(1)
-        self.step(1)
+        self.show_photo()  # te quedas en la foto para ver el resultado (→ para pasar a la siguiente)
+        self._state_buttons()
+        self.prop_info.setText(f"Pegada en {ph.name}. Pasa a la siguiente con → y vuelve a pegar (Ctrl+V).")
 
     def _apply_edit(self):
         if self.prop is None or not self.clip:

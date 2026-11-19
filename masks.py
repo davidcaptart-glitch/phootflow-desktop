@@ -16,6 +16,11 @@ Tipos:
             y se parece en color, sin seleccionar a mano.
 - IA (MediaPipe selfie_multiclass, Apache-2.0): "person", "face", "skin", "hair", "clothes", "background"
 
+Componentes (como en Lightroom): una máscara puede llevar en `"parts"` más zonas de cualquier tipo que se
+combinan con la principal, en orden: `{"type", "params", "invert", "mode": "add" | "sub" | "inter",
+"enabled"}`. Sumar = unión, restar = quita esa zona, intersecar = solo lo común. `"invert"` invierte cada
+componente (el de la máscara, su zona principal) e `"invert_all"` la máscara ya combinada.
+
 Todas devuelven un alfa float32 0..1 del tamaño de la imagen (sin girar ni recortar). Los ajustes se
 aplican sobre la imagen ya revelada (sRGB 0..1) y se funden con el alfa.
 """
@@ -61,6 +66,28 @@ ADJ = [("exposure", "Exposición", -3, 3, 0.05, 0), ("contrast", "Contraste", -1
        ("temp", "Temperatura", -100, 100, 1, 0), ("tint", "Matiz", -100, 100, 1, 0),
        ("saturation", "Saturación", -100, 100, 1, 0), ("clarity", "Claridad", -100, 100, 1, 0),
        ("sharpness", "Nitidez", -100, 100, 1, 0)]
+
+# color dentro de la máscara: mezcla por colores (HSL) y gradación por tonos, como los generales de Studio
+HSL_BANDS = [("red", "Rojo"), ("orange", "Naranja"), ("yellow", "Amarillo"), ("green", "Verde"),
+             ("aqua", "Aguamarina"), ("blue", "Azul"), ("purple", "Púrpura"), ("magenta", "Magenta")]
+GRADE = [("grade_sh_hue", "Sombras · tono", 0, 360, 1, 0), ("grade_sh_sat", "Sombras · saturación", 0, 100, 1, 0),
+         ("grade_mid_hue", "Medios · tono", 0, 360, 1, 0), ("grade_mid_sat", "Medios · saturación", 0, 100, 1, 0),
+         ("grade_hi_hue", "Luces · tono", 0, 360, 1, 0), ("grade_hi_sat", "Luces · saturación", 0, 100, 1, 0),
+         ("grade_blend", "Fusión", 0, 100, 1, 50), ("grade_balance", "Equilibrio", -100, 100, 1, 0)]
+# presencia y curva tonal dentro de la máscara (como los paneles de Studio)
+PRESENCE = [("texture", "Textura", -100, 100, 1, 0), ("clarity", "Claridad", -100, 100, 1, 0),
+            ("dehaze", "Eliminar neblina", -100, 100, 1, 0), ("vibrance", "Intensidad", -100, 100, 1, 0),
+            ("saturation", "Saturación", -100, 100, 1, 0)]
+CURVE = [("curve_highlights", "Iluminaciones", -100, 100, 1, 0), ("curve_lights", "Claros", -100, 100, 1, 0),
+         ("curve_darks", "Oscuros", -100, 100, 1, 0), ("curve_shadows", "Sombras", -100, 100, 1, 0)]
+NEUTRAL_ADJ = {"grade_blend": 50}  # valores que no son 0 en reposo
+
+
+def adj_active(adj: dict) -> bool:
+    """¿La máscara cambia algo? (los tonos de la gradación y la fusión solos no hacen nada)."""
+    return any(v != NEUTRAL_ADJ.get(k, 0) for k, v in (adj or {}).items()
+               if not k.endswith("_hue") and k not in ("grade_blend", "grade_balance"))
+
 
 _CFG = {"model_dir": ""}
 _TLS = threading.local()
@@ -413,8 +440,40 @@ def _refine(alpha: np.ndarray, guide: np.ndarray) -> np.ndarray:
 
 # ------------------------------------------------------------------ construir el alfa
 
+COMBINE = {"add": "Sumar", "sub": "Restar", "inter": "Intersecar"}
+
+
+def new_part(kind: str, mode: str = "add") -> dict:
+    """Componente para sumar, restar o intersecar con una máscara."""
+    m = new_mask(kind)
+    return {"name": m["name"], "type": kind, "params": m["params"], "invert": False, "mode": mode, "enabled": True}
+
+
 def build(m: dict, base: np.ndarray, key: str = "") -> np.ndarray:
-    """Alfa 0..1 (H, W) de la máscara `m` sobre la imagen `base` (sRGB 0..1, sin girar ni recortar)."""
+    """Alfa 0..1 (H, W) de la máscara `m` sobre la imagen `base` (sRGB 0..1, sin girar ni recortar): la zona
+    principal combinada con sus componentes (`parts`), invertida si `invert_all`, por la cantidad."""
+    a = build_one(m, base, key)
+    for c in m.get("parts") or []:
+        if not c.get("enabled", True):
+            continue
+        try:
+            pa = build_one(c, base, key)
+        except Exception:
+            continue
+        mode = c.get("mode", "add")
+        if mode == "sub":
+            a = a * (1 - pa)
+        elif mode == "inter":
+            a = a * pa
+        else:
+            a = np.maximum(a, pa)
+    if m.get("invert_all"):
+        a = 1 - a
+    return np.clip(a * (m.get("amount", 100) / 100), 0, 1).astype(np.float32)
+
+
+def build_one(m: dict, base: np.ndarray, key: str = "") -> np.ndarray:
+    """Alfa 0..1 de una sola zona (la principal de una máscara o un componente), con su `invert`."""
     h, w = base.shape[:2]
     t, p = m.get("type"), m.get("params", {})
     yy, xx = None, None
@@ -479,7 +538,7 @@ def build(m: dict, base: np.ndarray, key: str = "") -> np.ndarray:
         a = np.zeros((h, w), np.float32)
     if m.get("invert"):
         a = 1 - a
-    return np.clip(a * (m.get("amount", 100) / 100), 0, 1).astype(np.float32)
+    return np.clip(a, 0, 1).astype(np.float32)
 
 
 def point_alpha(base: np.ndarray, p: dict) -> np.ndarray:
@@ -548,14 +607,36 @@ def adjust(y: np.ndarray, adj: dict) -> np.ndarray:
     if adj.get("clarity"):
         base = cv2.GaussianBlur(lum, (0, 0), max(2.0, 0.012 * side))
         d += (lum - base) * 0.9 * adj["clarity"] / 100
+    if adj.get("texture"):  # detalle medio-fino: piel, telas, hojas
+        base = cv2.GaussianBlur(lum, (0, 0), max(1.0, 0.003 * side))
+        d += (lum - base) * 0.8 * adj["texture"] / 100
     if adj.get("sharpness"):
         base = cv2.GaussianBlur(lum, (0, 0), max(0.6, 0.0012 * side))
         d += (lum - base) * 1.4 * adj["sharpness"] / 100
     if d.any():
         out = out + d[..., None]
+    if adj.get("dehaze"):  # canal oscuro suavizado: quita (o añade) el velo de la zona
+        out = np.clip(out, 0, 1)
+        k = adj["dehaze"] / 100
+        dc = cv2.GaussianBlur(cv2.erode(out.min(-1), np.ones((7, 7), np.uint8)), (0, 0), max(2.0, 0.01 * side))
+        if k > 0:
+            v = (0.7 * k * dc)[..., None]
+            out = (out - v) / np.maximum(1 - v, 0.25)
+        else:
+            out = out + (-k) * 0.45 * (0.8 - out) * (0.4 + dc[..., None])
     if adj.get("saturation"):
         g = (0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2])[..., None]
         out = g + (out - g) * (1 + adj["saturation"] / 100)
+    hsl_on = any(adj.get(f"hsl_{b}_{p}") for b, _ in HSL_BANDS for p in "hsl")
+    grade_on = any(adj.get(k) for k in ("grade_sh_sat", "grade_mid_sat", "grade_hi_sat"))
+    curve_on = any(adj.get(k) for k, *_ in CURVE)
+    if hsl_on or grade_on or curve_on or adj.get("vibrance"):  # la etapa de color y curva de Studio
+        import studio_engine as SE
+        s = {k: 0 for k in SE.DEFAULTS if k.startswith(("hsl_", "grade_", "curve_"))}
+        s.update(vibrance=0, saturation=0, grade_blend=50)
+        s.update({k: v for k, v in adj.items() if k.startswith(("hsl_", "grade_", "curve_"))})
+        s["vibrance"] = adj.get("vibrance", 0)
+        out = SE.color_stage(_lin(np.clip(out, 0, 1)).astype(np.float32), s)
     return np.clip(out, 0, 1).astype(np.float32)
 
 
@@ -563,7 +644,7 @@ def apply_all(y: np.ndarray, masks: list, key: str = "") -> np.ndarray:
     """Aplica todas las máscaras activas, en orden, sobre `y` (sRGB 0..1)."""
     for m in masks or []:
         adj = m.get("adj", {})
-        if not any(adj.values()) or not m.get("enabled", True):
+        if not adj_active(adj) or not m.get("enabled", True):
             continue
         try:
             a = build(m, y, key)

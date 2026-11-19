@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import io
 import os
 import queue
@@ -11,7 +12,7 @@ from collections import OrderedDict
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QByteArray, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QMenu,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListView, QListWidget,
@@ -157,6 +158,8 @@ class Canvas(QWidget):
         self.msg = "Abre una carpeta y elige una foto"
         self.img_rect = QRectF()
         self.on_mouse = None  # callback(evento, x, y) con x, y en 0..1 sobre la foto mostrada
+        self.overlay = None   # overlay(painter, rect_foto): guías de la máscara (líneas, elipse, punto)
+        self.on_hover = None  # on_hover(x, y) -> cursor (Qt.CursorShape) o None
         self.setMouseTracking(True)
 
     def _norm(self, e):
@@ -228,6 +231,9 @@ class Canvas(QWidget):
         n = self._norm(e)
         if n and self.on_mouse and e.buttons():
             self.on_mouse("move", *n, bool(e.buttons() & Qt.RightButton))
+        elif n and self.on_hover and not e.buttons():
+            cur = self.on_hover(*n)
+            self.setCursor(cur if cur is not None else Qt.ArrowCursor)
 
     def mouseReleaseEvent(self, e):
         if self.zoom.panning:
@@ -269,6 +275,11 @@ class Canvas(QWidget):
         if not self.cmp.active:
             self.zoom.draw_tile(p, r)
         self.crop.paint(p, r)
+        if self.overlay and not self.crop.active and not self.cmp.active:
+            p.save()
+            p.setClipRect(r.intersected(area))
+            self.overlay(p, r)
+            p.restore()
         p.setClipping(False)
         self.zoom.draw_badge(p, area, pm.size(), busy=self.zoom.active and self.zoom.tile is None
                              and self.zoom.pct * max(1, self.zoom.full_size[0]) > pm.width() * 1.15)
@@ -429,6 +440,8 @@ class StudioView(QWidget):
         self._before_cache: dict = {}
         threading.Thread(target=self._render_loop, daemon=True).start()
         self.mask_i: int | None = None      # máscara seleccionada
+        self.comp_i = 0                     # zona elegida de esa máscara (0 = su zona principal)
+        self._pending_comp = 0
         self.mask_show = False              # superponer la máscara seleccionada
         self.crop_mode = False              # marco de recorte sobre la foto entera
         self._crop_undo = None
@@ -463,6 +476,7 @@ class StudioView(QWidget):
                       ("P", lambda: self.set_flag(1)), ("X", lambda: self.set_flag(-1)), ("U", lambda: self.set_flag(0)),
                       ("Ctrl+E", self.export_dialog), ("Y", self.next_split),
                       ("R", lambda: self.b_crop.toggle()),
+                      ("V", lambda: self.set_bw_mode(not self.bw_cb.isChecked())),
                       ("Z", lambda: (self.canvas.zoom.toggle(None, self.canvas._area(), self.canvas.pm.size())
                                      if self.canvas.pm is not None else None))):
             QShortcut(QKeySequence(k), self, fn)
@@ -587,12 +601,14 @@ class StudioView(QWidget):
         v.addWidget(bw)
         self.canvas = Canvas()
         self.canvas.on_mouse = self._canvas_mouse
+        self.canvas.overlay = self._paint_gizmo
+        self.canvas.on_hover = self._gizmo_cursor
         self.canvas.crop.on_change = self._on_crop
         self.canvas.zoom.provider = self._tile
         self._full: tuple | None = None
         self.canvas.mask_drawing = lambda: bool(
             self.cur and self.mask_i is not None and self.mask_i < len(self._masks())
-            and self._masks()[self.mask_i]["type"] in ("radial", "linear", "brush"))
+            and (self._comp() or {}).get("type") in ("radial", "linear", "brush", "point"))
         v.addWidget(self.canvas, 1)
         # barra de herramientas bajo la foto (Lightroom): vista, valoración, marcas y acciones
         bar = QFrame()
@@ -607,6 +623,11 @@ class StudioView(QWidget):
         self.b_crop_bar = _ibtn("crop", "Recortar: mover y cambiar el tamaño del marco (R)", True)
         self.b_crop_bar.clicked.connect(lambda on: self.b_crop.setChecked(on))
         hb.addWidget(self.b_crop_bar)
+        self.b_bw_bar = _ibtn("bw", "Blanco y negro (V): pasa la foto a B/N y retócala en B/N. La mezcla B/N "
+                                    "(cuánto aclara u oscurece cada color) está en Color › HSL › Luminancia", True)
+        self.b_bw_bar.setText(" B/N")
+        self.b_bw_bar.clicked.connect(self.set_bw_mode)
+        hb.addWidget(self.b_bw_bar)
         hb.addSpacing(8)
         self.stars = []
         for n in range(1, 6):
@@ -741,7 +762,7 @@ class StudioView(QWidget):
                     sec.lay.addWidget(lut_k)
                     row = QHBoxLayout()
                     self.bw_cb = QCheckBox("Blanco y negro")
-                    self.bw_cb.toggled.connect(lambda on: (self._set("bw", on, True), self.bw_style.setEnabled(on)))
+                    self.bw_cb.toggled.connect(lambda on: (self._set("bw", on, True), self._sync_bw_ui(on)))
                     self.bw_style = QComboBox()
                     self.bw_style.addItems(list(E.BW_STYLES))
                     self.bw_style.activated.connect(lambda _: self._set("bw_style", self.bw_style.currentText(), True))
@@ -749,6 +770,7 @@ class StudioView(QWidget):
                     row.addWidget(self.bw_style, 1)
                     sec.lay.addLayout(row)
                     bv.addWidget(sec)
+                    self._bw_sec = sec
                 elif t == "_hsl":
                     hsl = Section("Mezcla de color (HSL)")
                     tb = QTabWidget()
@@ -765,6 +787,7 @@ class StudioView(QWidget):
                         tb.addTab(pg, nm)
                     hsl.lay.addWidget(tb)
                     bv.addWidget(hsl)
+                    self._hsl_sec, self._hsl_tabs = hsl, tb
                 else:
                     sec = Section(t)
                     sliders(sec, panels[t])
@@ -832,26 +855,21 @@ class StudioView(QWidget):
         row = QHBoxLayout()
         add = _btn("  Añadir máscara", "ghost")
         add.setIcon(I.icon("plus", 16))
-        menu = QMenu(add)
-        groups = [("Manual", M.MANUAL_TYPES), ("Personas (IA)", M.AI_TYPES),
-                  ("Cara (IA)", {**{k: v[0] for k, v in M.FACE_PARTS.items()}, **M.FACE_EXTRA}), ("Otros", M.OTHER_TYPES)]
-        for title, items in groups:
-            menu.addSection(title)
-            for k, label in items.items():
-                menu.addAction(label, lambda k=k: self.add_mask(k))
-        add.setMenu(menu)
+        add.setMenu(self._type_menu(add, self.add_mask))
         self.b_mon = _ibtn("power", "Activar o desactivar el efecto de esta máscara (H)", True)
         self.b_mon.clicked.connect(self._toggle_mask_on)
         self.b_mshow = _ibtn("eye", "Ver en magenta la zona que coge la máscara (O). Se oculta sola al mover un "
                                     "ajuste, para ver el resultado.")
         self.b_mshow.setCheckable(True)
         self.b_mshow.toggled.connect(self._toggle_mask_view)
-        self.b_minv = _ibtn("invert", "Invertir la máscara")
+        self.b_minv = _ibtn("invert", "Invertir la máscara entera (con lo sumado y restado)")
         self.b_minv.clicked.connect(self._invert_mask)
+        self.b_mdup = _ibtn("dupes", "Duplicar la máscara (con sus zonas y ajustes)")
+        self.b_mdup.clicked.connect(self._duplicate_mask)
         self.b_mdel = _ibtn("trash", "Borrar la máscara")
         self.b_mdel.clicked.connect(self._delete_mask)
         row.addWidget(add, 1)
-        for b in (self.b_mon, self.b_mshow, self.b_minv, self.b_mdel):
+        for b in (self.b_mon, self.b_mshow, self.b_minv, self.b_mdup, self.b_mdel):
             row.addWidget(b)
         sec.lay.addLayout(row)
         self.mask_list = QListWidget()
@@ -860,6 +878,46 @@ class StudioView(QWidget):
         self.mask_list.itemChanged.connect(self._mask_checked)
         self.mask_list.setToolTip("La casilla activa o desactiva cada máscara (para comparar con y sin ella)")
         sec.lay.addWidget(self.mask_list)
+        # zonas de la máscara: otras de cualquier tipo que suman, restan o intersecan con la principal
+        self.comp_box = QWidget()
+        cb = QVBoxLayout(self.comp_box)
+        cb.setContentsMargins(0, 2, 0, 0)
+        cb.setSpacing(4)
+        crow = QHBoxLayout()
+        self.b_cadd = _btn("  Sumar", "ghost", "Añadir otra zona a esta máscara (cualquier tipo: pincel, lineal, IA…)")
+        self.b_cadd.setIcon(I.icon("plus", 16))
+        self.b_cadd.setMenu(self._type_menu(self.b_cadd, lambda k: self.add_part(k, "add")))
+        self.b_csub = _btn("  Restar", "ghost", "Quitar una zona de esta máscara (cualquier tipo: pincel, lineal, IA…)")
+        self.b_csub.setIcon(I.icon("minus", 16))
+        self.b_csub.setMenu(self._type_menu(self.b_csub, lambda k: self.add_part(k, "sub")))
+        crow.addWidget(self.b_cadd, 1)
+        crow.addWidget(self.b_csub, 1)
+        cb.addLayout(crow)
+        self.comp_list = QListWidget()
+        self.comp_list.setFixedHeight(78)
+        self.comp_list.setToolTip("Zonas de esta máscara. Elige una para moverla o pintarla en la foto y "
+                                  "cambiar sus valores. La casilla la activa o la desactiva.")
+        self.comp_list.currentRowChanged.connect(self._select_comp)
+        self.comp_list.itemChanged.connect(self._comp_checked)
+        cb.addWidget(self.comp_list)
+        prow = QHBoxLayout()
+        self.c_mode = QComboBox()
+        for k, label in M.COMBINE.items():
+            self.c_mode.addItem(label, k)
+        self.c_mode.setToolTip("Cómo se combina esta zona con las de encima: sumar, restar o solo lo común")
+        self.c_mode.activated.connect(self._comp_mode)
+        self.b_cinv = _ibtn("invert", "Invertir solo esta zona")
+        self.b_cinv.clicked.connect(self._invert_comp)
+        self.b_cdup = _ibtn("dupes", "Duplicar esta zona")
+        self.b_cdup.clicked.connect(self._duplicate_comp)
+        self.b_cdel = _ibtn("trash", "Quitar esta zona de la máscara")
+        self.b_cdel.clicked.connect(self._delete_comp)
+        prow.addWidget(self.c_mode, 1)
+        for b in (self.b_cinv, self.b_cdup, self.b_cdel):
+            prow.addWidget(b)
+        cb.addLayout(prow)
+        self.comp_box.hide()
+        sec.lay.addWidget(self.comp_box)
         self.mask_hint = QLabel("")
         self.mask_hint.setObjectName("muted")
         self.mask_hint.setWordWrap(True)
@@ -875,11 +933,44 @@ class StudioView(QWidget):
                                             ("hue", "Tono", 0, 360, 1, 25), ("range", "Amplitud", 5, 90, 1, 30),
                                             ("size", "Alcance", 1, 100, 1, 25),
                                             ("sim", "Parecido de color", 0, 100, 1, 50)] + \
-                [(k, l, a, b, s_, n) for k, l, a, b, s_, n in M.ADJ]:
+                [(k, l, a, b, s_, n) for k, l, a, b, s_, n in M.ADJ if k not in ("clarity", "saturation")]:
             r = SliderRow("m_" + key, label, lo, hi, st, neu)
             r.changed.connect(self._mask_value)
             self.mrows[key] = r
             mb.addWidget(r)
+        # presencia y curva tonal de la máscara, como los paneles generales
+        for title, rows in (("Presencia", M.PRESENCE), ("Curva tonal", M.CURVE)):
+            sec_ = Section(title, open_=False)
+            for key, label, lo, hi, st, neu in rows:
+                r = SliderRow("m_" + key, label, lo, hi, st, neu)
+                r.changed.connect(self._mask_value)
+                self.mrows[key] = r
+                sec_.lay.addWidget(r)
+            mb.addWidget(sec_)
+        # color de la máscara: por colores (HSL) y por tonos (gradación), solo dentro de la zona
+        hsl = Section("Color por colores (HSL)", open_=False)
+        tb = QTabWidget()
+        for p_, nm in (("h", "Tono"), ("s", "Saturación"), ("l", "Luminancia")):
+            pg = QWidget()
+            pv = QVBoxLayout(pg)
+            pv.setContentsMargins(0, 6, 0, 0)
+            pv.setSpacing(5)
+            for b, label in M.HSL_BANDS:
+                key = f"hsl_{b}_{p_}"
+                r = SliderRow("m_" + key, label, -100, 100, 1, 0)
+                r.changed.connect(self._mask_value)
+                self.mrows[key] = r
+                pv.addWidget(r)
+            tb.addTab(pg, nm)
+        hsl.lay.addWidget(tb)
+        mb.addWidget(hsl)
+        grade = Section("Color por tonos (sombras, medios, luces)", open_=False)
+        for key, label, lo, hi, st, neu in M.GRADE:
+            r = SliderRow("m_" + key, label, lo, hi, st, neu)
+            r.changed.connect(self._mask_value)
+            self.mrows[key] = r
+            grade.lay.addWidget(r)
+        mb.addWidget(grade)
         self.mask_box.hide()
         sec.lay.addWidget(self.mask_box)
         QShortcut(QKeySequence("O"), self, lambda: self.b_mshow.toggle())
@@ -889,12 +980,145 @@ class StudioView(QWidget):
     def _masks(self) -> list:
         return self.cur.settings.setdefault("masks", []) if self.cur else []
 
-    def _refresh_masks(self, select=None):
+    def _type_menu(self, parent, fn) -> QMenu:
+        menu = QMenu(parent)
+        groups = [("Manual", M.MANUAL_TYPES), ("Personas (IA)", M.AI_TYPES),
+                  ("Cara (IA)", {**{k: v[0] for k, v in M.FACE_PARTS.items()}, **M.FACE_EXTRA}), ("Otros", M.OTHER_TYPES)]
+        for title, items in groups:
+            menu.addSection(title)
+            for k, label in items.items():
+                menu.addAction(label, lambda k=k: fn(k))
+        return menu
+
+    def _mask(self) -> dict | None:
+        ms = self._masks()
+        return ms[self.mask_i] if self.cur and self.mask_i is not None and self.mask_i < len(ms) else None
+
+    def _comp(self) -> dict | None:
+        """La zona elegida de la máscara: la principal (la propia máscara) o una de las que suman o restan."""
+        m = self._mask()
+        if m is None:
+            return None
+        parts = m.get("parts") or []
+        return parts[self.comp_i - 1] if 0 < self.comp_i <= len(parts) else m
+
+    def _mask_changed(self, select_comp=None):
+        """Tras cambiar la estructura de una máscara: refresca las listas, vuelve a revelar y guarda."""
+        self._refresh_masks(select=self.mask_i, comp=self.comp_i if select_comp is None else select_comp)
+        self.request(draft=False)
+        self._save_timer.start(400)
+
+    def _refresh_comps(self, select=0):
+        m = self._mask()
+        self.comp_list.blockSignals(True)
+        self.comp_list.clear()
+        if m is not None:
+            sign = {"add": "+", "sub": "−", "inter": "∩"}
+            self.comp_list.addItem(QListWidgetItem(f"Principal: {m['name']}"
+                                                   + ("  (invertida)" if m.get("invert") else "")))
+            for c in m.get("parts") or []:
+                mode = c.get("mode", "add")
+                it = QListWidgetItem(f"{sign.get(mode, '+')} {M.COMBINE.get(mode, 'Sumar')}: {c.get('name', c['type'])}"
+                                     + ("  (invertida)" if c.get("invert") else ""))
+                it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                it.setCheckState(Qt.Checked if c.get("enabled", True) else Qt.Unchecked)
+                self.comp_list.addItem(it)
+        n = self.comp_list.count()
+        if n:
+            self.comp_list.setCurrentRow(max(0, min(select, n - 1)))
+        self.comp_list.blockSignals(False)
+        self._select_comp(self.comp_list.currentRow())
+
+    def _select_comp(self, i):
+        m = self._mask()
+        if m is None:
+            return
+        self.comp_i = max(0, i)
+        c = self._comp()
+        main = c is m
+        self.c_mode.setEnabled(not main)
+        self.b_cdel.setEnabled(not main)
+        if not main:
+            self.c_mode.setCurrentIndex(max(0, self.c_mode.findData(c.get("mode", "add"))))
+        self._show_comp_controls()
+
+    def add_part(self, kind, mode):
+        m = self._mask()
+        if m is None:
+            return
+        self._push_history(f"{m['name']}: {M.COMBINE[mode].lower()} zona")
+        m.setdefault("parts", []).append(M.new_part(kind, mode))
+        if kind in M.AI_TYPES or kind in M.FACE_PARTS or kind in M.FACE_EXTRA:
+            self.status.setText("Zona con IA: la primera vez se descarga el modelo (16 MB)…")
+        self.b_mshow.setChecked(True)
+        self._mask_changed(select_comp=len(m["parts"]))
+
+    def _comp_mode(self, _=None):
+        m, c = self._mask(), self._comp()
+        if m is None or c is m:
+            return
+        self._push_history(f"{m['name']}: combinar")
+        c["mode"] = self.c_mode.currentData()
+        self._mask_changed()
+
+    def _invert_comp(self):
+        m, c = self._mask(), self._comp()
+        if c is None:
+            return
+        self._push_history(f"{m['name']}: invertir zona")
+        c["invert"] = not c.get("invert")
+        self._mask_changed()
+
+    def _duplicate_comp(self):
+        m, c = self._mask(), self._comp()
+        if c is None:
+            return
+        self._push_history(f"{m['name']}: duplicar zona")
+        if c is m:  # la principal se duplica como una zona que suma
+            nc = {k: copy.deepcopy(m.get(k)) for k in ("name", "type", "params", "invert")}
+            nc.update(mode="add", enabled=True)
+        else:
+            nc = copy.deepcopy(c)
+        m.setdefault("parts", []).insert(self.comp_i, nc)
+        self._mask_changed(select_comp=self.comp_i + 1)
+
+    def _delete_comp(self):
+        m, c = self._mask(), self._comp()
+        if c is None or c is m:
+            return
+        self._push_history(f"{m['name']}: quitar zona")
+        del m["parts"][self.comp_i - 1]
+        self._mask_changed(select_comp=self.comp_i - 1)
+
+    def _comp_checked(self, item):
+        m = self._mask()
+        r = self.comp_list.row(item)
+        if m is None or r < 1:
+            return
+        self._push_history(f"{m['name']}: activar zona")
+        m["parts"][r - 1]["enabled"] = item.checkState() == Qt.Checked
+        self._mask_changed(select_comp=r)
+
+    def _duplicate_mask(self):
+        m = self._mask()
+        if m is None:
+            return
+        self._push_history("Duplicar máscara")
+        nm = copy.deepcopy(m)
+        nm["name"] = m["name"] + " (copia)"
+        self._masks().insert(self.mask_i + 1, nm)
+        self.mask_i += 1
+        self._mask_changed(select_comp=0)
+
+    def _refresh_masks(self, select=None, comp=0):
+        self._pending_comp = comp
         self.mask_list.blockSignals(True)
         self.mask_list.clear()
         for m in self._masks():
-            on = any(m.get("adj", {}).values())
-            it = QListWidgetItem(("● " if on else "○ ") + m["name"] + ("  (invertida)" if m.get("invert") else "")
+            on = M.adj_active(m.get("adj", {}))
+            nz = len(m.get("parts") or [])
+            it = QListWidgetItem(("● " if on else "○ ") + m["name"] + (f"  (+{nz} zonas)" if nz else "")
+                                 + ("  (invertida)" if m.get("invert_all") else "")
                                  + ("" if m.get("enabled", True) else "  · desactivada"))
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             it.setCheckState(Qt.Checked if m.get("enabled", True) else Qt.Unchecked)
@@ -902,7 +1126,11 @@ class StudioView(QWidget):
         self.mask_list.blockSignals(False)
         n = len(self._masks())
         if select is not None and n:
-            self.mask_list.setCurrentRow(min(select, n - 1))
+            row = min(select, n - 1)
+            if self.mask_list.currentRow() == row:
+                self._select_mask(row)
+            else:
+                self.mask_list.setCurrentRow(row)
         elif n == 0:
             self._select_mask(-1)
 
@@ -920,14 +1148,24 @@ class StudioView(QWidget):
 
     def _select_mask(self, i):
         self.mask_i = i if i is not None and i >= 0 else None
-        m = self._masks()[self.mask_i] if self.mask_i is not None and self.mask_i < len(self._masks()) else None
+        m = self._mask()
         self.mask_box.setVisible(m is not None)
+        self.comp_box.setVisible(m is not None)
+        for b in (self.b_minv, self.b_mdup, self.b_mdel):
+            b.setEnabled(m is not None)
         self.b_mon.setEnabled(m is not None)
         self.b_mon.setChecked(bool(m and m.get("enabled", True)))
+        comp, self._pending_comp = self._pending_comp or 0, 0
         if not m:
             self.mask_hint.setText("Añade una máscara para ajustar solo una zona (caras, fondo, cielo…).")
             return
-        t, p = m["type"], m["params"]
+        self._refresh_comps(comp)  # rellena los controles de la zona elegida
+
+    def _show_comp_controls(self):
+        m, c = self._mask(), self._comp()
+        if m is None or c is None:
+            return
+        t, p = c["type"], c.setdefault("params", {})
         hints = {"radial": "Arrastra sobre la foto: el punto inicial es el centro.",
                  "linear": "Arrastra sobre la foto: de donde el efecto es completo a donde desaparece.",
                  "brush": "Pinta sobre la foto. Botón derecho: borrar.",
@@ -935,8 +1173,11 @@ class StudioView(QWidget):
                  "point": "Pincha en la foto sobre lo que quieres ajustar (cielo, vestido, césped…): coge lo "
                           "que está cerca y tiene un color parecido. Alcance: hasta dónde llega; Parecido: "
                           "cuánto se tiene que parecer el color."}
-        self.mask_hint.setText(hints.get(t, "Zona detectada automáticamente con IA."))
-        vis = {"feather": t in ("radial", "brush", "luma"), "brush": t == "brush", "lo": t == "luma",
+        how = {"add": "se suma a", "sub": "se resta de", "inter": "se interseca con"}
+        self.mask_hint.setText(hints.get(t, "Zona detectada automáticamente con IA.")
+                               + ("" if c is m else f"  ·  Esta zona {how.get(c.get('mode', 'add'), 'se suma a')} "
+                                                    "la máscara."))
+        vis = {"feather": t in ("radial", "brush", "luma", "linear"), "brush": t == "brush", "lo": t == "luma",
                "hi": t == "luma", "hue": t == "color", "range": t == "color", "size": t == "point",
                "sim": t == "point"}
         for k, r in self.mrows.items():
@@ -945,27 +1186,33 @@ class StudioView(QWidget):
                 r.set_value(m.get("amount", 100))
             elif k == "brush":
                 r.set_value(p.get("_size", 6))
+            elif k == "feather" and t == "linear":
+                r.set_value(round(self._linear_width(p) * 100))
             elif k in p:
                 r.set_value(p[k])
-            elif k in m["adj"]:
-                r.set_value(m["adj"][k])
+            else:
+                r.set_value(m["adj"].get(k, M.NEUTRAL_ADJ.get(k, 0)))
         if self.mask_show:
             self.request(draft=False)
 
     def _mask_value(self, key, value, final):
-        if not self.cur or self.mask_i is None:
+        m, c = self._mask(), self._comp()
+        if m is None or c is None:
             return
-        m = self._masks()[self.mask_i]
+        p = c.setdefault("params", {})
         k = key[2:]
         if final:
             self._push_history(f"{m['name']}: {self.mrows[k].lab.text()}")
         if k == "amount":
             m["amount"] = value
         elif k == "brush":
-            m["params"]["_size"] = value
+            p["_size"] = value
             return
-        elif k in m["params"]:
-            m["params"][k] = value
+        elif k == "feather" and c.get("type") == "linear":
+            self._set_linear_width(p, value / 100)
+            self.canvas.update()
+        elif k in p:
+            p[k] = value
         else:
             m["adj"][k] = value
             if self.mask_show:  # al ajustar, se quita el magenta para ver el resultado (como Lightroom)
@@ -973,7 +1220,8 @@ class StudioView(QWidget):
                 self.b_mshow.setChecked(False)
                 self.b_mshow.blockSignals(False)
                 self.mask_show = False
-        self._refresh_masks(select=self.mask_i)
+        if final:
+            self._refresh_masks(select=self.mask_i, comp=self.comp_i)
         self.request(draft=not final)
         self._save_timer.start(600)
 
@@ -1111,10 +1359,8 @@ class StudioView(QWidget):
         if self.cur and self.mask_i is not None:
             self._push_history()
             m = self._masks()[self.mask_i]
-            m["invert"] = not m.get("invert")
-            self._refresh_masks(select=self.mask_i)
-            self.request(draft=False)
-            self._save_timer.start(400)
+            m["invert_all"] = not m.get("invert_all")
+            self._mask_changed()
 
     def _delete_mask(self):
         if self.cur and self.mask_i is not None:
@@ -1124,39 +1370,276 @@ class StudioView(QWidget):
             self.request(draft=False)
             self._save_timer.start(400)
 
-    def _canvas_mouse(self, ev, x, y, right):
-        """Dibujo de máscaras sobre la foto (las coordenadas son de la foto completa mientras se ve la máscara)."""
-        if not self.cur or self.mask_i is None:
+    # ---------------------------------------------------------- guías de las máscaras sobre la foto
+    def _gz_frame(self):
+        """(rect de la foto en pantalla, recorte de la vista): para pasar de 0..1 de la foto entera a píxeles."""
+        return self.canvas.img_rect, (self._view_crop or [0.0, 0.0, 1.0, 1.0])
+
+    def _gz_px(self, x, y):
+        r, c = self._gz_frame()
+        return (r.x() + (x - c[0]) / max(c[2] - c[0], 1e-6) * r.width(),
+                r.y() + (y - c[1]) / max(c[3] - c[1], 1e-6) * r.height())
+
+    def _gz_full(self, px, py):
+        r, c = self._gz_frame()
+        return (c[0] + (px - r.x()) / max(r.width(), 1e-6) * (c[2] - c[0]),
+                c[1] + (py - r.y()) / max(r.height(), 1e-6) * (c[3] - c[1]))
+
+    def _gz_scale(self):
+        """Píxeles de pantalla por unidad (0..1) de la foto entera, en x y en y."""
+        r, c = self._gz_frame()
+        return r.width() / max(c[2] - c[0], 1e-6), r.height() / max(c[3] - c[1], 1e-6)
+
+    def _linear_width(self, p) -> float:
+        """Difuminado de la lineal: distancia entre su línea de efecto pleno y la de nada, sobre el lado largo."""
+        sx, sy = self._gz_scale()
+        if sx <= 0 or sy <= 0:
+            sx = sy = 1.0
+        d = math.hypot((p["x1"] - p["x0"]) * sx, (p["y1"] - p["y0"]) * sy)
+        return min(1.0, d / max(sx, sy))
+
+    def _set_linear_width(self, p, w):
+        sx, sy = self._gz_scale()
+        if sx <= 0 or sy <= 0:
+            sx = sy = 1.0
+        mx, my = (p["x0"] + p["x1"]) / 2, (p["y0"] + p["y1"]) / 2
+        dx, dy = (p["x1"] - p["x0"]) * sx, (p["y1"] - p["y0"]) * sy
+        L = math.hypot(dx, dy) or 1.0
+        half = max(0.005, w) * max(sx, sy) / 2
+        ux, uy = dx / L * half / sx, dy / L * half / sy
+        p.update(x0=round(mx - ux, 4), y0=round(my - uy, 4), x1=round(mx + ux, 4), y1=round(my + uy, 4))
+
+    def _gz_comp(self):
+        c = self._comp()
+        if c is None or self.crop_mode or c.get("type") not in ("radial", "linear", "point"):
+            return None
+        return c
+
+    def _gz_hit(self, px, py):
+        """Qué parte de la guía hay bajo el ratón: move, p0, p1, rotate, rx, ry, edge, size; o None."""
+        c = self._gz_comp()
+        if c is None:
+            return None
+        t, p, tol = c["type"], c["params"], 9
+        if t == "linear":
+            ax, ay = self._gz_px(p["x0"], p["y0"])
+            bx, by = self._gz_px(p["x1"], p["y1"])
+            mx, my = (ax + bx) / 2, (ay + by) / 2
+            if math.hypot(px - mx, py - my) <= tol + 3:
+                return "move"
+            dx, dy = bx - ax, by - ay
+            L = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / L, dy / L
+            for name, qx, qy in (("p0", ax, ay), ("p1", bx, by), ("rotate", mx, my)):
+                if abs((px - qx) * ux + (py - qy) * uy) <= tol:
+                    return name
+            return None
+        if t == "radial":
+            cx, cy = self._gz_px(p["cx"], p["cy"])
+            sx, sy = self._gz_scale()
+            rx, ry = max(p["rx"] * sx, 1), max(p["ry"] * sy, 1)
+            if math.hypot(px - cx, py - cy) <= tol + 3:
+                return "move"
+            for name, hx, hy in (("rx", cx + rx, cy), ("rx", cx - rx, cy), ("ry", cx, cy + ry), ("ry", cx, cy - ry)):
+                if math.hypot(px - hx, py - hy) <= tol + 2:
+                    return name
+            d = math.hypot((px - cx) / rx, (py - cy) / ry)
+            if abs(d - 1) * min(rx, ry) <= tol:
+                return "edge"
+            return "move" if d < 1 else None
+        if t == "point":
+            cx, cy = self._gz_px(p["cx"], p["cy"])
+            sx, sy = self._gz_scale()
+            rad = p.get("size", 25) / 100 * max(sx, sy)
+            dist = math.hypot(px - cx, py - cy)
+            if dist <= tol + 4:
+                return "move"
+            if abs(dist - rad) <= tol:
+                return "size"
+        return None
+
+    def _gizmo_cursor(self, x, y):
+        r = self.canvas.img_rect
+        h = self._gz_hit(r.x() + x * r.width(), r.y() + y * r.height())
+        return {"move": Qt.SizeAllCursor, "rotate": Qt.PointingHandCursor, "p0": Qt.SizeVerCursor,
+                "p1": Qt.SizeVerCursor, "rx": Qt.SizeHorCursor, "ry": Qt.SizeVerCursor, "edge": Qt.SizeFDiagCursor,
+                "size": Qt.SizeFDiagCursor}.get(h) if h else (Qt.CrossCursor if self._gz_comp() else None)
+
+    def _paint_gizmo(self, p, r):
+        """Las guías de la zona elegida, como en Lightroom: líneas de la lineal, elipse de la radial, punto."""
+        c = self._gz_comp()
+        if c is None:
             return
-        m = self._masks()[self.mask_i]
-        t, p = m["type"], m["params"]
+        t, prm = c["type"], c["params"]
+        p.setRenderHint(QPainter.Antialiasing)
+        white, shadow = QColor(255, 255, 255, 235), QColor(0, 0, 0, 150)
+
+        def line(x0, y0, x1, y1, dash=False, w=1.5):
+            for col, ww in ((shadow, w + 2), (white, w)):
+                pen = QPen(col, ww)
+                if dash:
+                    pen.setStyle(Qt.DashLine)
+                p.setPen(pen)
+                p.drawLine(QPointF(x0, y0), QPointF(x1, y1))
+
+        def pin(x, y, rad=6):
+            p.setPen(QPen(shadow, 3))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QPointF(x, y), rad, rad)
+            p.setPen(QPen(white, 1.5))
+            p.setBrush(QColor(T.ACCENT))
+            p.drawEllipse(QPointF(x, y), rad, rad)
+            p.setBrush(Qt.NoBrush)
+
+        if t == "linear":
+            ax, ay = self._gz_px(prm["x0"], prm["y0"])
+            bx, by = self._gz_px(prm["x1"], prm["y1"])
+            dx, dy = bx - ax, by - ay
+            L = math.hypot(dx, dy) or 1.0
+            nx, ny = -dy / L, dx / L
+            ext = math.hypot(r.width(), r.height()) * 2
+            for (qx, qy), dash in (((ax, ay), False), (((ax + bx) / 2, (ay + by) / 2), True), ((bx, by), False)):
+                line(qx - nx * ext, qy - ny * ext, qx + nx * ext, qy + ny * ext, dash)
+            pin((ax + bx) / 2, (ay + by) / 2)
+        elif t == "radial":
+            cx, cy = self._gz_px(prm["cx"], prm["cy"])
+            sx, sy = self._gz_scale()
+            rx, ry = prm["rx"] * sx, prm["ry"] * sy
+            f = max(0.02, prm.get("feather", 50) / 100)
+            for (ex, ey), dash in (((rx, ry), False), ((rx * (1 - f), ry * (1 - f)), True)):
+                for col, ww in ((shadow, 3.5), (white, 1.5)):
+                    pen = QPen(col, ww)
+                    if dash:
+                        pen.setStyle(Qt.DashLine)
+                    p.setPen(pen)
+                    p.drawEllipse(QPointF(cx, cy), ex, ey)
+            for hx, hy in ((cx + rx, cy), (cx - rx, cy), (cx, cy + ry), (cx, cy - ry)):
+                p.setPen(QPen(shadow, 3))
+                p.setBrush(white)
+                p.drawRect(QRectF(hx - 4, hy - 4, 8, 8))
+            pin(cx, cy)
+        elif t == "point":
+            cx, cy = self._gz_px(prm["cx"], prm["cy"])
+            sx, sy = self._gz_scale()
+            rad = prm.get("size", 25) / 100 * max(sx, sy)
+            for col, ww in ((shadow, 3.5), (white, 1.5)):
+                pen = QPen(col, ww)
+                pen.setStyle(Qt.DashLine)
+                p.setPen(pen)
+                p.drawEllipse(QPointF(cx, cy), rad, rad)
+            pin(cx, cy, 7)
+
+    def _gz_drag(self, mode, x, y, px, py):
+        """Arrastre de una parte de la guía (x, y: 0..1 de la foto entera; px, py: píxeles de pantalla)."""
+        c = self._comp()
+        p, st = c["params"], self._gz_start
+        if mode == "move":
+            fx, fy = st["at"]
+            ddx, ddy = x - fx, y - fy
+            for kx, ky in (("x0", "y0"), ("x1", "y1"), ("cx", "cy")):
+                if kx in st["p"]:
+                    p[kx] = round(st["p"][kx] + ddx, 4)
+                    p[ky] = round(st["p"][ky] + ddy, 4)
+        elif mode in ("p0", "p1", "rotate"):
+            q = st["p"]
+            ax, ay = self._gz_px(q["x0"], q["y0"])
+            bx, by = self._gz_px(q["x1"], q["y1"])
+            mx, my = (ax + bx) / 2, (ay + by) / 2
+            dx, dy = bx - ax, by - ay
+            L = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / L, dy / L
+            if mode == "rotate":  # la línea central pasa por el ratón: gira alrededor del centro
+                vx, vy = px - mx, py - my
+                if math.hypot(vx, vy) < 4:
+                    return
+                nux, nuy = -vy, vx
+                nl = math.hypot(nux, nuy)
+                nux, nuy = nux / nl, nuy / nl
+                if nux * ux + nuy * uy < 0:
+                    nux, nuy = -nux, -nuy
+                ax, ay, bx, by = mx - nux * L / 2, my - nuy * L / 2, mx + nux * L / 2, my + nuy * L / 2
+            else:  # mover una de las líneas exteriores a lo largo del eje: más o menos difuminado
+                s_ = (px - mx) * ux + (py - my) * uy
+                if mode == "p0":
+                    s_ = min(s_, -2)
+                    ax, ay = mx + ux * s_, my + uy * s_
+                else:
+                    s_ = max(s_, 2)
+                    bx, by = mx + ux * s_, my + uy * s_
+            p["x0"], p["y0"] = (round(v, 4) for v in self._gz_full(ax, ay))
+            p["x1"], p["y1"] = (round(v, 4) for v in self._gz_full(bx, by))
+        elif mode in ("rx", "ry", "edge"):
+            cx, cy = self._gz_px(p["cx"], p["cy"])
+            sx, sy = self._gz_scale()
+            if mode == "rx":
+                p["rx"] = round(max(0.01, abs(px - cx) / sx), 4)
+            elif mode == "ry":
+                p["ry"] = round(max(0.01, abs(py - cy) / sy), 4)
+            else:
+                q = st["p"]
+                d0 = math.hypot(*(a - b for a, b in zip(self._gz_px(*st["at"]), (cx, cy)))) or 1.0
+                k = max(0.05, math.hypot(px - cx, py - cy) / d0)
+                p["rx"], p["ry"] = round(max(0.01, q["rx"] * k), 4), round(max(0.01, q["ry"] * k), 4)
+        elif mode == "size":
+            cx, cy = self._gz_px(p["cx"], p["cy"])
+            sx, sy = self._gz_scale()
+            p["size"] = int(min(100, max(1, round(math.hypot(px - cx, py - cy) / max(sx, sy) * 100))))
+            if "size" in self.mrows:
+                self.mrows["size"].set_value(p["size"])
+        self.canvas.update()
+
+    def _canvas_mouse(self, ev, x, y, right):
+        """Dibujo de máscaras sobre la foto (las coordenadas son de la foto completa mientras se ve la máscara).
+        Sobre las guías (líneas de la lineal, elipse de la radial, círculo del punto) se arrastran; fuera,
+        se dibuja una nueva."""
+        c = self._comp()
+        if c is None:
+            return
+        t, p = c["type"], c.setdefault("params", {})
         if t not in ("radial", "linear", "brush", "point"):
             return
-        c = self._view_crop
-        if c:  # la vista está recortada: coordenadas de la foto entera
-            x, y = c[0] + x * (c[2] - c[0]), c[1] + y * (c[3] - c[1])
+        r = self.canvas.img_rect
+        spx, spy = r.x() + x * r.width(), r.y() + y * r.height()  # píxeles de pantalla
+        vc = self._view_crop
+        if vc:  # la vista está recortada: coordenadas de la foto entera
+            x, y = vc[0] + x * (vc[2] - vc[0]), vc[1] + y * (vc[3] - vc[1])
         if ev == "press":
             self._push_history()
             self._drag = (x, y)
-            if not self.mask_show:
+            hit = None if right else self._gz_hit(spx, spy)
+            self._gz_mode = hit
+            self._gz_start = {"at": (x, y), "p": copy.deepcopy(p)}
+            if not self.mask_show and not hit:
                 self.b_mshow.setChecked(True)
         if self._drag is None:
             return
         x0, y0 = self._drag
-        if t == "point":
+        if getattr(self, "_gz_mode", None):
+            if ev != "press":
+                self._gz_drag(self._gz_mode, x, y, spx, spy)
+        elif t == "point":
             p.update(cx=round(x, 4), cy=round(y, 4))
         elif t == "radial":
             p.update(cx=x0, cy=y0, rx=max(0.02, abs(x - x0)), ry=max(0.02, abs(y - y0)))
         elif t == "linear":
+            if ev == "press":
+                return
             p.update(x0=x0, y0=y0, x1=x, y1=y)
         elif t == "brush":
             size = p.get("_size", 6) / 200.0
             p.setdefault("strokes", []).append([round(x, 4), round(y, 4), size, -1 if right else 1])
         if ev == "release":
             self._drag = None
+            mode, self._gz_mode = getattr(self, "_gz_mode", None), None
+            if t == "linear" and not mode and math.hypot(x - x0, y - y0) < 0.005:
+                p.update(self._gz_start["p"] if self._gz_start else {})  # un clic suelto no deja la lineal en nada
+            if t == "linear" and "feather" in self.mrows:
+                self.mrows["feather"].set_value(round(self._linear_width(p) * 100))
+            self.canvas.update()
             self.request(draft=False)
             self._save_timer.start(400)
         else:
+            self.canvas.update()
             self.request(draft=True)
 
     # ---------------------------------------------------------- carpeta y miniaturas
@@ -1383,6 +1866,31 @@ class StudioView(QWidget):
         self.hist.set(img)
         self.nav.setPixmap(pm.scaled(self.nav.width() - 4, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
+    # ---------------------------------------------------------- blanco y negro
+    def set_bw_mode(self, on: bool):
+        """Botón «B/N» (V): la foto pasa a blanco y negro y se abre lo necesario para retocarla en B/N."""
+        if not self.cur:
+            self.b_bw_bar.setChecked(False)
+            return
+        self.bw_cb.setChecked(bool(on))  # guarda el ajuste (historial incluido) y sincroniza la interfaz
+        if on:
+            self.pages.setCurrentIndex(1)
+            self._tab_btns[1].setChecked(True)
+            self._bw_sec.head.setChecked(True)
+            self._hsl_sec.head.setChecked(True)
+            self._hsl_tabs.setCurrentIndex(2)
+            self.status.setText("Blanco y negro: elige el estilo, retoca luz y contraste en Luz, y aclara u "
+                                "oscurece cada color en «Mezcla B/N».")
+
+    def _sync_bw_ui(self, on: bool):
+        self.bw_style.setEnabled(on)
+        self.b_bw_bar.blockSignals(True)
+        self.b_bw_bar.setChecked(on)
+        self.b_bw_bar.blockSignals(False)
+        self._hsl_sec.title = "Mezcla B/N (luz de cada color)" if on else "Mezcla de color (HSL)"
+        self._hsl_sec._label(self._hsl_sec.head.isChecked())
+        self._hsl_tabs.setTabText(2, "Mezcla B/N" if on else "Luminancia")
+
     # ---------------------------------------------------------- ajustes
     def _load_controls(self, refresh_history: bool = True):
         s = self.cur.settings
@@ -1394,7 +1902,7 @@ class StudioView(QWidget):
         self.bw_cb.setChecked(bool(s.get("bw")))
         self.bw_cb.blockSignals(False)
         self.bw_style.setCurrentText(s.get("bw_style") or "Editorial")
-        self.bw_style.setEnabled(bool(s.get("bw")))
+        self._sync_bw_ui(bool(s.get("bw")))
         i = self.lut_cb.findData(s.get("lut") or None)
         self.lut_cb.setCurrentIndex(max(0, i))
         self._show_rating()
