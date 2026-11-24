@@ -1635,7 +1635,15 @@ class GraphicsView(QWidget):
         self.pages_timer = QTimer(self)
         self.pages_timer.setSingleShot(True)
         self.pages_timer.timeout.connect(self.refresh_pages)
-        self.load_design(self._initial_design())
+        try:  # un diseño guardado que falle no debe impedir abrir PhootFlow
+            self.load_design(self._initial_design())
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            self._last = None
+            d = G.design_from_preset("Instagram vertical 4:5")
+            G.apply_template(d, "Post de evento")
+            self.load_design(d)
         self.root_stack.setCurrentWidget(self.home)  # se abre en el inicio
 
     # ---------------------------------------------------------- construcción
