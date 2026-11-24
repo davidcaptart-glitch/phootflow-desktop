@@ -82,6 +82,9 @@ def migrate_old_config() -> None:
 class Worker(QThread):
     progress = Signal(int, int, str)
     photo = Signal(int)
+    plan = Signal(list)          # pasos del trabajo: [(clave, etiqueta, nº de fotos o None)]
+    step = Signal(str, str, str)  # clave, estado ("active", "done", "skip", "error"), detalle
+    item = Signal(str, str, str)  # paso, fase ("start", "done", "skip", "error"), ruta de la foto
     scene = Signal(str, dict)  # tipo detectado, parámetros
     calibrated = Signal(dict)  # ajustes únicos de la sesión (curva, color) para el revelado
     done = Signal(str, str)  # resumen, enlace
@@ -101,7 +104,10 @@ class Worker(QThread):
             elif self.mode == "export":
                 self.export()
             else:  # automático: analizar, seleccionar y exportar sin parar
+                self.plan.emit([("analyze", "Analizar y seleccionar", None)] + self._export_plan(None))
+                self.step.emit("analyze", "active", "")
                 msg = self.analyze()
+                self.step.emit("analyze", "done", msg)
                 if self.cancel:
                     self.done.emit(msg, "")
                 else:
@@ -157,9 +163,33 @@ class Worker(QThread):
         return detected + f"Análisis: {keep} para editar, {n - keep} descartadas" + \
             (f", {warn} con avisos." if warn else ".") + saved
 
+    def _export_plan(self, counts) -> list:
+        """Pasos de la exportación para el panel de progreso (los que no tocan se marcan «no hace falta»)."""
+        c = counts or {}
+        plan = [("edit", "Editar las fotos aprobadas", c.get("edit")),
+                ("studio", "Exportar las retocadas en Studio", c.get("studio")),
+                ("edits", "Exportar las retocadas en Edits", c.get("edits")),
+                ("report", "Informe" + (" y XMP de las descartadas" if self.st.write_xmp else ""), None)]
+        if self.st.archive_originals:
+            plan.append(("zip", "Comprimir los originales", None))
+        kind = self.cloud.get("kind", 0)
+        if kind == 1:
+            plan.append(("cloud", "Subir a Google Drive", None))
+        elif kind == 2:
+            plan.append(("cloud", "Copiar a la carpeta sincronizada", None))
+        if self.st.move_discards:
+            plan.append(("discards", "Mover las descartadas a «Descartadas»", None))
+        return plan
+
     def export(self, prefix: str = ""):
         studio_keep = [p for p in self.photos if p.keep and os.path.normcase(p.path) in self.overrides]
         keep = [p for p in self.photos if p.keep and os.path.normcase(p.path) not in self.overrides]
+        import edits_engine as EE
+        try:
+            n_edits = len(EE.events_todo(self.photos, self.src))
+        except Exception:
+            n_edits = 0
+        self.plan.emit(self._export_plan({"edit": len(keep), "studio": len(studio_keep), "edits": n_edits}))
         before = E.exported_names(self.out) if self.st.resume else set()
         resumed = sum(1 for p in keep if os.path.basename(p.path) in before)
         t0 = time.time()
@@ -171,40 +201,77 @@ class Worker(QThread):
 
         extra = f", {resumed} ya hechas antes" if resumed else ""
         self.progress.emit(0, len(keep), f"Editando {len(keep)} fotos ({self.st.workers} a la vez{extra})…")
-        files = E.export_many(keep, self.st, self.out, __version__, on_done, lambda: self.cancel)
+        self.step.emit("edit", "active", f"{self.st.workers} a la vez{extra}")
+        files = E.export_many(keep, self.st, self.out, __version__, on_done, lambda: self.cancel,
+                              on_event=lambda ph_, ph: self.item.emit("edit", ph_, ph.path))
+        errs_edit = sum(1 for p in keep if p.error)
+        self.step.emit("edit", "error" if errs_edit else ("done" if keep else "skip"),
+                       f"{errs_edit} con error" if errs_edit else "")
+        if not studio_keep:
+            self.step.emit("studio", "skip", "")
         if studio_keep and not self.cancel:
             import studio_engine as SE
+            self.step.emit("studio", "active", "")
             for j, p in enumerate(studio_keep):
+                self.item.emit("studio", "start", p.path)
                 self.progress.emit(j, len(studio_keep), f"Exportando las retocadas en Studio ({j + 1}/{len(studio_keep)})…")
                 s = self.overrides[os.path.normcase(p.path)]
-                for size in self.st.sizes:
-                    side = None if size == "max" else int(size)
-                    try:
-                        SE.export(p.path, s, os.path.join(self.out, "Sugeridas", f"{p.name}_studio_{size}.jpg"),
-                                  self.st.quality, side)
-                        files += 1
-                    except Exception as e:
-                        p.error = f"{type(e).__name__}: {e}"
+                try:  # como las demás: sugerido (el recorte de Studio), formatos elegidos y B/N
+                    files += len(SE.export_events(p, s, self.st, self.out, __version__))
+                except Exception as e:
+                    p.error = f"{type(e).__name__}: {e}"
+                self.item.emit("studio", "error" if p.error else "done", p.path)
+            self.step.emit("studio", "done", "")
             keep = keep + studio_keep
         if not self.cancel:
-            import edits_engine as EE
-            files += EE.export_for_events(self.photos, self.src, self.out, self.st.sizes, self.st.quality,
-                                          self.progress.emit)
+            if n_edits:
+                self.step.emit("edits", "active", "")
+                last = []
+
+                def eprog(j, n, text):
+                    if last:
+                        self.item.emit("edits", "done", last[-1])
+                    todo = EE.events_todo(self.photos, self.src) if not hasattr(eprog, "todo") else eprog.todo
+                    eprog.todo = todo
+                    if j < len(todo):
+                        last.append(todo[j].path)
+                        self.item.emit("edits", "start", todo[j].path)
+                    self.progress.emit(j, n, text)
+                files += EE.export_for_events(self.photos, self.src, self.out, self.st.sizes, self.st.quality, eprog)
+                if last:
+                    self.item.emit("edits", "done", last[-1])
+                self.step.emit("edits", "done", "")
+            else:
+                self.step.emit("edits", "skip", "")
         if self.cancel:
             E.write_report(self.photos, self.out)
             return self.done.emit("Exportación cancelada (lo ya exportado se conserva).", "")
+        self.step.emit("report", "active", "")
         if self.st.write_xmp:
             for p in self.photos:
                 if not p.keep and not p.error:
                     E.xmp_sidecar(p, self.st)
         E.write_report(self.photos, self.out)
+        self.step.emit("report", "done", "informe.csv")
         zip_path = None
         if self.st.archive_originals and keep:
+            self.step.emit("zip", "active", "")
             self.progress.emit(0, 0, "Comprimiendo originales…")
             zip_path = E.archive_originals(
                 self.photos, self.out, lambda a, b: self.progress.emit(a, b, f"Comprimiendo originales ({a}/{b})"))
+            self.step.emit("zip", "done", os.path.basename(zip_path) if zip_path else "")
+        elif self.st.archive_originals:
+            self.step.emit("zip", "skip", "")
+        if self.cloud.get("kind", 0) in (1, 2):
+            self.step.emit("cloud", "active", "")
         link = self.upload(zip_path)
+        if self.cloud.get("kind", 0) in (1, 2):
+            self.step.emit("cloud", "done", "enlace copiado" if link else "")
+        if self.st.move_discards:
+            self.step.emit("discards", "active", "")
         moved = E.move_discards(self.photos, self.src) if self.st.move_discards else 0
+        if self.st.move_discards:
+            self.step.emit("discards", "done", f"{moved} archivos")
         errs = sum(1 for p in keep if p.error)
         msg = prefix + f"Listo: {len(keep) - errs} fotos editadas ({files} archivos JPG nuevos) en " \
                        f"{_fmt_time(time.time() - t0)}."
@@ -976,6 +1043,11 @@ class Main(QMainWindow):
         self.b_open = UI.icon_button("open", "Abrir la carpeta de salida")
         self.b_ca = button("  Cancelar", "ghost")
         self.b_ca.setIcon(I.icon("stop", 16))
+        self.b_prog = button("  Ver progreso", "ghost", "Pasos de la exportación, fotos en curso y tiempo que queda")
+        self.b_prog.setIcon(I.icon("eye", 16))
+        self.b_prog.clicked.connect(self.show_progress)
+        self.b_prog.hide()
+        self.prog_panel = None
         self.b_an = button("  1  Analizar", "step", "Pasada rápida para revisar antes de exportar: no mueve ni borra nada")
         self.b_ex = button("  3  Exportar", "step", "Revela a resolución completa las fotos conservadas")
         self.b_auto = UI.icon_button("zap", "Procesar todo: analiza, selecciona y exporta la sesión sin parar.\n"
@@ -994,6 +1066,7 @@ class Main(QMainWindow):
         QShortcut(QKeySequence("Ctrl+S"), self, self.save_now)
         head.addWidget(self.b_save)
         head.addWidget(self.b_open)
+        head.addWidget(self.b_prog)
         head.addWidget(self.b_ca)
         head.addSpacing(6)
         for i_, b in enumerate((self.b_an, self.b_rev, self.b_ex)):
@@ -1802,6 +1875,20 @@ class Main(QMainWindow):
         self._threads.add(worker)
         worker.finished.connect(lambda w=worker: self._threads.discard(w))
         worker.progress.connect(self.on_progress)
+        if worker.mode in ("export", "auto"):  # panel con los pasos, las fotos en curso y el tiempo que queda
+            import progress_panel
+            if self.prog_panel is not None:
+                self.prog_panel.close()
+                self.prog_panel.deleteLater()
+            pp = progress_panel.ExportProgress(self, "Procesando la sesión" if worker.mode == "auto"
+                                               else "Exportando la sesión")
+            worker.plan.connect(pp.set_plan)
+            worker.step.connect(pp.set_step)
+            worker.item.connect(pp.on_item)
+            worker.progress.connect(pp.set_progress)
+            self.prog_panel = pp
+            self.b_prog.show()
+            pp.show()
         worker.photo.connect(self.on_photo)
         worker.scene.connect(self.on_scene)
         worker.calibrated.connect(lambda d: setattr(self, "session_extra", dict(d, _cube=st_cube)))
@@ -1827,13 +1914,25 @@ class Main(QMainWindow):
             self.grid.setCurrentRow(i)
         self.refresh_counts()
 
+    def show_progress(self):
+        if self.prog_panel is not None:
+            self.prog_panel.show()
+            self.prog_panel.raise_()
+            self.prog_panel.activateWindow()
+
+    def _progress_end(self, msg, ok=True):
+        if self.prog_panel is not None:
+            self.prog_panel.finish(msg, ok)
+
     def on_failed(self, msg):
         self.worker = None
+        self._progress_end("Se ha parado por un error: " + msg.split("\n")[0], ok=False)
         self.busy(False)
         QMessageBox.critical(self, APP, msg)
 
     def on_done(self, msg, link):
         self.worker = None
+        self._progress_end(msg, ok="cancelad" not in msg)
         resume, self._resume = self._resume, False
         if getattr(self, "_review_after", False):
             self._review_after = False

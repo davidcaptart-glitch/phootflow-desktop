@@ -2170,6 +2170,12 @@ def pending_events(folder: str) -> dict:
     return out
 
 
+def events_todo(photos, folder: str) -> list:
+    """Fotos aprobadas con trabajo de Edits para Events (las que exporta `export_for_events`)."""
+    docs = pending_events(folder)
+    return [p for p in photos if p.keep and os.path.normcase(p.path) in docs]
+
+
 def export_for_events(photos, folder: str, out_dir: str, sizes, quality: int, progress=None) -> int:
     """Exporta en «Sugeridas» las fotos aprobadas que tienen retoque de Edits (además de la edición normal)."""
     docs = pending_events(folder)

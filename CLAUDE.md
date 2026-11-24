@@ -31,6 +31,10 @@ python -m unittest discover -s tests   # 118 pruebas, sin fotos reales ni red
   distribución objetivo). Estilos en `%APPDATA%\PhootFlow\estilos\*.json`.
 - `app.py` — ventana `Main` (barra lateral + rejilla con `ThumbDelegate` + vista previa), `Worker`
   (`analyze`/`export`/`auto`), `LearnDialog`, banner de actualización, `selftest()`.
+- `progress_panel.py` — `ExportProgress`: ventana no modal al exportar o procesar todo (pasos con ○/◐/✓, barra
+  general con «quedan ~», fotos en curso y terminadas con su miniatura, Cancelar, Abrir la carpeta, seguir en
+  segundo plano; «Ver progreso» la vuelve a abrir). El `Worker` emite `plan`, `step` e `item`
+  (`E.export_many(on_event=…)`, `EE.events_todo`).
 - `theme.py` — QSS: interfaz negro azulado del logo (`#05070F`), lienzo neutro, chips y degradado magenta→violeta.
 - `icons.py` (iconos SVG propios, `icon(nombre)`) y `ui.py` (chips, `ComboChips` ligado a un QComboBox, `SideSheet` ⚙,
   `CommandPalette` Ctrl+K, `FlowLayout`). En Events los controles de siempre guardan el estado; los chips son su cara visible.
@@ -38,7 +42,9 @@ python -m unittest discover -s tests   # 118 pruebas, sin fotos reales ni red
   verifica SHA-256, copia encima, pip si cambió `requirements.txt`, reinicia) y `dev` (clon git: solo avisa).
 - `studio.py` / `studio_engine.py` — entorno **Studio** (tipo Lightroom): `StudioView` (biblioteca, lienzo con
   antes/después, histograma, paneles de sliders, historial, presets, exportar) y el revelado no destructivo
-  `render(lin, ajustes)`. Ajustes por foto en `<carpeta>/.phootflow/studio/<foto>.json`. Proxy de 2048 px y
+  `render(lin, ajustes)`. Ajustes por foto en `<carpeta>/.phootflow/studio/<foto>.json`. Las retocadas para
+  Events (`_events_override`) se exportan con `export_events`: recorte de Studio en Sugeridas (`_studio`), los
+  demás formatos en Formatos y B/N en ByN, como el resto; `fit_ratio` mantiene la proporción aunque cambie el giro. Proxy de 2048 px y
   borrador de 1024 px mientras se arrastra. `Shell` (app.py) aloja Events (`Main`) y Studio con el interruptor.
   Máscaras (`masks.py`): zonas en `m["parts"]` de cualquier tipo que suman, restan o intersecan (`build` combina,
   `build_one` una zona), `invert` por zona e `invert_all` para la máscara; color dentro de la máscara (HSL por

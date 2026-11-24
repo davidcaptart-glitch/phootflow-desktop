@@ -1364,39 +1364,36 @@ def export(ph: Photo, st: Settings, out_dir: str, version: str = "") -> list[str
         c = img[int(round(y0 * H)):int(round(y1 * H)), int(round(x0 * W)):int(round(x1 * W))]
         folder = os.path.join(out_dir, "Sugeridas") if ratio == ph.best else os.path.join(
             out_dir, "Formatos", _tag(ratio))
-        for size in st.sizes:
-            ch, cw = c.shape[:2]
-            if size == "max":
-                r = c
-            else:
-                px = SIZES[size]
-                s = px / cw if size == "1080" else px / max(cw, ch)
-                if s >= 1:
-                    continue  # no se amplía
-                r = cv2.resize(c, (int(round(cw * s)), int(round(ch * s))), interpolation=cv2.INTER_AREA)
-                r = np.clip(r + (r - cv2.GaussianBlur(r, (0, 0), 0.6)) * 0.35, 0, 1)
-            p = os.path.join(folder, f"{ph.name}_{_tag(ratio) if ratio != 'Original' else 'original'}_{size}.jpg")
-            _save(r, p, st.quality, exif)
-            written.append(p)
+        written += save_sizes(c, folder, f"{ph.name}_{_tag(ratio) if ratio != 'Original' else 'original'}", st, exif)
     if st.bw and not st.style.get("bw") and photo_bw_style(ph, st) != BW_NONE:  # B/N del formato sugerido
         x0, y0, x1, y1 = ph.crops[ph.best]
         c = img[int(round(y0 * H)):int(round(y1 * H)), int(round(x0 * W)):int(round(x1 * W))]
         del img
         bw = bw_editorial(c, seed=ph.dhash & 0xFFFFFFFF, style=photo_bw_style(ph, st))
         tag = _tag(ph.best) if ph.best != "Original" else "original"
-        for size in st.sizes:
-            ch, cw = bw.shape[:2]
-            if size == "max":
-                r = bw
-            else:
-                px = SIZES[size]
-                s = px / cw if size == "1080" else px / max(cw, ch)
-                if s >= 1:
-                    continue
-                r = cv2.resize(bw, (int(round(cw * s)), int(round(ch * s))), interpolation=cv2.INTER_AREA)
-            p = os.path.join(out_dir, "ByN", f"{ph.name}_bn_{tag}_{size}.jpg")
-            _save(r, p, st.quality, exif)
-            written.append(p)
+        written += save_sizes(bw, os.path.join(out_dir, "ByN"), f"{ph.name}_bn_{tag}", st, exif, sharpen=False)
+    return written
+
+
+def save_sizes(c: np.ndarray, folder: str, stem: str, st: Settings, exif: bytes = b"",
+               sharpen: bool = True) -> list[str]:
+    """Guarda `c` en cada tamaño elegido como `<carpeta>/<stem>_<tamaño>.jpg` (1080 = ancho; nunca amplía)."""
+    written = []
+    for size in st.sizes:
+        ch, cw = c.shape[:2]
+        if size == "max":
+            r = c
+        else:
+            px = SIZES[size]
+            s = px / cw if size == "1080" else px / max(cw, ch)
+            if s >= 1:
+                continue  # no se amplía
+            r = cv2.resize(c, (int(round(cw * s)), int(round(ch * s))), interpolation=cv2.INTER_AREA)
+            if sharpen:
+                r = np.clip(r + (r - cv2.GaussianBlur(r, (0, 0), 0.6)) * 0.35, 0, 1)
+        p = os.path.join(folder, f"{stem}_{size}.jpg")
+        _save(np.clip(r, 0, 1), p, st.quality, exif)
+        written.append(p)
     return written
 
 
@@ -1601,26 +1598,37 @@ def analyze_many(photos: list[Photo], st: Settings, workers: int = 2, on_done=No
 
 
 def export_many(photos: list[Photo], st: Settings, out_dir: str, version: str = "", on_done=None,
-                cancelled=lambda: False) -> int:
+                cancelled=lambda: False, on_event=None) -> int:
     """Exporta en paralelo (`st.workers` hilos). Un fallo en una foto queda en `ph.error` y no para el lote.
-    `on_done(hechas, total)` tras cada foto. Devuelve el número de archivos JPG escritos."""
+    `on_done(hechas, total)` tras cada foto. `on_event(fase, foto)` desde los hilos: "start", "done", "skip"
+    (ya exportada otra vez) o "error". Devuelve el número de archivos JPG escritos."""
     done_before = exported_names(out_dir) if st.resume else set()
     lock = threading.Lock()
     os.makedirs(os.path.dirname(_done_file(out_dir)), exist_ok=True)
 
     def one(ph):
         key = os.path.basename(ph.path)
-        if cancelled() or key in done_before:
+        if cancelled():
             return 0
+        if key in done_before:
+            if on_event:
+                on_event("skip", ph)
+            return 0
+        if on_event:
+            on_event("start", ph)
         try:
             n = len(export(ph, st, out_dir, version))
             if st.write_xmp:
                 xmp_sidecar(ph, st)
             with lock, open(_done_file(out_dir), "a", encoding="utf-8") as f:
                 f.write(key + "\n")
+            if on_event:
+                on_event("done", ph)
             return n
         except Exception as e:
             ph.error = f"{type(e).__name__}: {e}"
+            if on_event:
+                on_event("error", ph)
             return 0
 
     files = 0
