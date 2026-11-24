@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 122 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 129 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -87,6 +87,10 @@ python -m unittest discover -s tests   # 122 pruebas, sin fotos reales ni red
   grupos, imán, texto curvo, pluma y nodos, Buscatrazos, QR, quitar fondo
   (PNG aparte en `diseños\recortes`), vectorizar (OpenCV) y PDF de imprenta (sangrado, marcas, CMYK simple).
   Un solo pintor (`paint_element`) para lienzo y exportación.
+  Foto + formas/textos: «Recortar con la forma» (intersect) o «Restar de la foto» (`G.cut_image`, `el["cuts"]`
+  en coordenadas de la foto, siguen al escalarla; `cut_src` para «Quitar recortes»). «Intercambiar» (`swap_places`):
+  dos fotos cambian de foto, el resto de sitio. Asas: `ElementItem.shape` une las piezas (con addEllipse sobre
+  addRect la regla par-impar dejaba un agujero en cada asa y no se podía escalar).
   `graphics_templates.py`: 47 plantillas propias por grupos (bodas, comunión, fiestas, deporte, negocio, redes,
   impresión, copias) con fuentes de Windows; se registran en `G.TEMPLATES`/`TEMPLATE_SIZE`/`TEMPLATE_GROUP`.
   Pestaña **Elementos** (`graphics_elements.py` + `graphics_online.py`): gráficos y stickers de Iconify (solo

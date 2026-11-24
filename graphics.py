@@ -416,15 +416,21 @@ class ElementItem(QGraphicsItem):
         return QRectF(-m, -m, self.el["w"] + 2 * m, self.el["h"] + 2 * m)
 
     def shape(self):
+        # Las piezas se UNEN: sumadas con addEllipse sobre addRect, la regla par-impar dejaba un agujero justo
+        # donde la asa pisa la caja (el centro de cada asa) y el clic caía al lienzo: no se podía escalar.
         p = QPainterPath()
         t = 5 / self._s()
         p.addRect(QRectF(-t, -t, self.el["w"] + 2 * t, self.el["h"] + 2 * t))
         if self.isSelected():
-            r = self.H / self._s()
+            r = (self.H + 3) / self._s()
             for pt in self.handles().values():
-                p.addEllipse(pt, r, r)
+                q = QPainterPath()
+                q.addEllipse(pt, r * 1.5, r * 1.5)
+                p = p.united(q)
         if self.cv.tool == "direct" and self.el["type"] == "vector" and self.isSelected():
-            p.addRect(self.boundingRect())
+            q = QPainterPath()
+            q.addRect(self.boundingRect())
+            p = p.united(q)
         return p
 
     def handles(self) -> dict:
@@ -535,7 +541,23 @@ class ElementItem(QGraphicsItem):
     def hoverLeaveEvent(self, e):
         if self.cv.hover is self:
             self.cv.hover = None
+        self.unsetCursor()
         self.update()
+
+    CURSORS = {"n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor, "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor,
+               "nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor, "ne": Qt.SizeBDiagCursor,
+               "sw": Qt.SizeBDiagCursor}
+    ORDER = ["n", "ne", "e", "se", "s", "sw", "w", "nw"]
+
+    def hoverMoveEvent(self, e):
+        h = self.handle_at(e.pos()) if self.cv.tool == "select" else None
+        if h == "rot":
+            self.setCursor(Qt.CrossCursor)
+        elif h:
+            step = int(round(self.el.get("rot", 0.0) / 45.0))   # el cursor gira con el elemento
+            self.setCursor(self.CURSORS[self.ORDER[(self.ORDER.index(h) + step) % 8]])
+        else:
+            self.unsetCursor()
 
     def mousePressEvent(self, e):
         if self.cv.tool in ("pen", "text", "rect", "ellipse", "hand"):
@@ -543,6 +565,9 @@ class ElementItem(QGraphicsItem):
             return
         if e.button() != Qt.LeftButton:
             return super().mousePressEvent(e)
+        if not self.isSelected() and self.cv.handle_owner(e.scenePos()) is not None:
+            e.ignore()   # la asa del seleccionado queda debajo de este elemento: el clic es para ella
+            return
         if self.cv.tool == "direct" and self.el["type"] == "vector" and not self.el.get("locked"):
             if not self.isSelected():
                 self.scene().clearSelection()
@@ -867,6 +892,15 @@ class Canvas(QGraphicsView):
             p.drawRect(QRectF(P.x() - r, P.y() - r, 2 * r, 2 * r))
             p.setBrush(Qt.NoBrush)
 
+    def handle_owner(self, sp: QPointF):
+        """El único elemento seleccionado, si `sp` (escena) cae en una de sus asas; si no, None."""
+        sel = self.sc.selectedItems()
+        if len(sel) == 1 and isinstance(sel[0], ElementItem) and self.tool == "select":
+            it = sel[0]
+            if it.handle_at(it.mapFromScene(sp)):
+                return it
+        return None
+
     # ---------------------------------------------------------- mover con imán
     def begin_move(self, item):
         self.moving = item
@@ -1066,8 +1100,16 @@ class TaskBar(QFrame):
         o = self.owner
         acts = []
         if len(sel) > 1:
-            acts += [("Unir", lambda: o.pathfinder("union")), ("Restar", lambda: o.pathfinder("subtract")),
-                     ("Agrupar", o.group)]
+            if any(e["type"] == "image" for e in sel):
+                acts += [("Recortar con la forma", lambda: o.pathfinder("intersect")),
+                         ("Restar de la foto", lambda: o.pathfinder("subtract"))]
+            else:
+                acts += [("Unir", lambda: o.pathfinder("union")), ("Restar", lambda: o.pathfinder("subtract")),
+                         ("Intersecar", lambda: o.pathfinder("intersect")),
+                         ("Excluir", lambda: o.pathfinder("exclude"))]
+            if len(sel) == 2:
+                acts += [("Intercambiar", o.swap)]
+            acts += [("Agrupar", o.group)]
         else:
             t = sel[0]["type"]
             if t == "text":
@@ -1075,11 +1117,14 @@ class TaskBar(QFrame):
                          ("T  Crear contornos", o.outline_text)]
             elif t == "image" and sel[0].get("path"):
                 acts += [("Quitar fondo", o.remove_bg), ("Vectorizar", o.vectorize), ("Ampliar IA", o.upscale_image)]
+                if sel[0].get("cuts"):
+                    acts += [("Quitar recortes", o.uncut)]
             elif t == "vector":
                 acts += [("Editar nodos", lambda: o.set_tool("direct")), ("Cromo, fuego…", o.fx_effect)]
             elif t == "shape":
                 acts += [("Cromo, fuego…", o.fx_effect)]
-        acts += [("Duplicar", o.duplicate)]
+        acts += [("Duplicar", o.duplicate), ("▲ Delante", lambda: o.order("up")),
+                 ("▼ Detrás", lambda: o.order("down"))]
         for txt, fn in acts:
             b = QPushButton(txt)
             b.setCursor(Qt.PointingHandCursor)
@@ -2291,7 +2336,7 @@ class GraphicsView(QWidget):
         QMessageBox.information(self, "Atajos", "V selección · A selección directa · P pluma · T texto · "
                                 "M rectángulo · L elipse · H mano · Z zoom\n"
                                 "Ctrl+Z / Ctrl+Y deshacer y rehacer · Ctrl+D duplicar · Ctrl+G agrupar · "
-                                "Supr eliminar\nCtrl+] / Ctrl+[ adelante y atrás · flechas: mover (Mayús ×10)\n"
+                                "Supr eliminar\nCtrl+↑ / Ctrl+↓ (o Ctrl+] / Ctrl+[) adelante y atrás · flechas: mover (Mayús ×10)\n"
                                 "Ctrl+Mayús+O crear contornos · Ctrl+E exportar · Ctrl+0 encajar · Ctrl+1 100 %\n"
                                 "Rueda: zoom · espacio + arrastrar: desplazar")
 
@@ -2421,6 +2466,9 @@ class GraphicsView(QWidget):
                       ("Ctrl+G", self.group), ("Ctrl+Shift+G", self.ungroup),
                       ("Ctrl+]", lambda: self.order("up")), ("Ctrl+[", lambda: self.order("down")),
                       ("Ctrl+Shift+]", lambda: self.order("front")), ("Ctrl+Shift+[", lambda: self.order("back")),
+                      ("Ctrl+Up", lambda: self.order("up")), ("Ctrl+Down", lambda: self.order("down")),
+                      ("Ctrl+Shift+Up", lambda: self.order("front")),
+                      ("Ctrl+Shift+Down", lambda: self.order("back")),
                       ("V", lambda: self.set_tool("select")), ("A", lambda: self.set_tool("direct")),
                       ("P", lambda: self.set_tool("pen")), ("T", lambda: self.set_tool("text")),
                       ("M", lambda: self.set_tool("rect")), ("L", lambda: self.set_tool("ellipse")),
@@ -3468,7 +3516,11 @@ class GraphicsView(QWidget):
         self.build_props()
 
     def pathfinder(self, op):
-        sel = [e for e in self.selected() if e["type"] in ("shape", "vector", "text")]
+        allsel = self.selected()
+        imgs = [e for e in allsel if e["type"] == "image"]
+        if imgs:
+            return self.cut_photo(op, imgs, [e for e in allsel if e["type"] in ("shape", "vector", "text")])
+        sel = [e for e in allsel if e["type"] in ("shape", "vector", "text")]
         if len(sel) < 2:
             QMessageBox.information(self, "Buscatrazos", "Selecciona dos o más formas, vectores o textos.")
             return
@@ -3483,6 +3535,47 @@ class GraphicsView(QWidget):
         self.d["elements"] = rest
         self.rebuild(select=[res["id"]])
         self.commit()
+
+    def cut_photo(self, op, imgs, cutters):
+        """Foto + formas o textos: «intersect» deja la foto dentro de la forma (letras rellenas de foto);
+        «subtract»/«exclude» abre el hueco de la forma en la foto. Las formas quedan guardadas en la foto."""
+        if len(imgs) != 1 or not cutters:
+            QMessageBox.information(self, "Recortar foto", "Selecciona una foto y una o más formas, vectores o "
+                                    "textos que la toquen.")
+            return
+        if op == "union":
+            return self.group()
+        img = imgs[0]
+        G.cut_image(img, cutters, op)
+        ids = {e["id"] for e in cutters}
+        self.d["elements"] = [e for e in self.d["elements"] if e["id"] not in ids]
+        self.rebuild(select=[img["id"]])
+        self.commit()
+
+    def uncut(self):
+        """Quita los recortes de la foto y vuelve a poner encima las formas que los hicieron."""
+        out = []
+        for img in [e for e in self.selected() if e["type"] == "image" and e.get("cuts")]:
+            back = G.uncut_image(img)
+            i = self.d["elements"].index(img)
+            self.d["elements"][i + 1:i + 1] = back
+            out += [img["id"]] + [e["id"] for e in back]
+        if out:
+            self.rebuild(select=out)
+            self.commit()
+
+    def swap(self):
+        """Dos fotos: cambian de foto (cada hueco se queda con su caja). Otros: cambian de sitio."""
+        sel = self.selected()
+        if len(sel) != 2:
+            return
+        what = G.swap_places(*sel)
+        for e in sel:
+            self.items[e["id"]].sync()
+            self.items[e["id"]].update()
+        self.commit()
+        self.build_props()
+        self.status_msg("Fotos intercambiadas" if what == "fotos" else "Elementos intercambiados de sitio")
 
     def show_text_effects(self):
         """Barra contextual «Efectos»: Propiedades, bajando hasta la rejilla de efectos del texto."""

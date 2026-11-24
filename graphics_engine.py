@@ -1336,6 +1336,60 @@ def pathfinder(els: list[dict], op: str) -> dict | None:
                    paths=[{"fill": fill or "#05070F", "d": qpath_to_d(res)}], grad=base.get("grad"))
 
 
+def cut_image(img: dict, cutters: list[dict], op: str) -> dict:
+    """Recorta una foto con formas, vectores o textos (como restar/intersecar en Photoshop o Canva):
+    «subtract» (y «exclude») abre el hueco de las formas en la foto; «intersect» deja la foto solo dentro.
+    Se guarda en `img["cuts"]` en coordenadas de la foto (con su tamaño de entonces, para que siga al escalarla)
+    y los recortadores originales en `cut_src`, para «Quitar recortes»."""
+    from PySide6.QtGui import QPainterPath
+    shape = QPainterPath()
+    for c in cutters:
+        shape = shape.united(element_qpath(c).simplified())
+    inv, ok = element_transform(img).inverted()
+    local = inv.map(shape)
+    if local.isEmpty():
+        return img
+    img.setdefault("cuts", []).append({"op": "intersect" if op == "intersect" else "subtract",
+                                       "d": qpath_to_d(local), "w": img["w"], "h": img["h"]})
+    img.setdefault("cut_src", []).extend(copy.deepcopy(cutters))
+    return img
+
+
+def uncut_image(img: dict) -> list[dict]:
+    """Quita los recortes de la foto y devuelve las formas que los hicieron (para volver a ponerlas)."""
+    img.pop("cuts", None)
+    return img.pop("cut_src", [])
+
+
+def _apply_cuts(clip, el: dict):
+    from PySide6.QtGui import QTransform
+    for c in el.get("cuts") or []:
+        q = _qpath(c["d"], "evenodd")
+        q = QTransform.fromScale(el["w"] / max(c.get("w", el["w"]), 1e-6),
+                                 el["h"] / max(c.get("h", el["h"]), 1e-6)).map(q)
+        clip = clip.intersected(q) if c.get("op") == "intersect" else clip.subtracted(q)
+    return clip
+
+
+def swap_places(a: dict, b: dict) -> str:
+    """«Intercambiar»: dos fotos cambian de foto (cada hueco conserva su caja y su forma, como en Canva);
+    cualquier otra pareja cambia de sitio (centro con centro). Devuelve qué hizo: «fotos» o «sitio»."""
+    if a["type"] == "image" and b["type"] == "image":
+        keys = ("path", "zoom", "fx", "fy", "orig", "bw", "look", "art", "edge")
+        va = {k: a.pop(k) for k in keys if k in a}
+        vb = {k: b.pop(k) for k in keys if k in b}
+        a.update(vb)
+        b.update(va)
+        a.setdefault("path", "")
+        b.setdefault("path", "")
+        return "fotos"
+    ca = (a["x"] + a["w"] / 2, a["y"] + a["h"] / 2)
+    cb = (b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
+    for e, (cx, cy) in ((a, cb), (b, ca)):
+        e["x"], e["y"] = cx - e["w"] / 2, cy - e["h"] / 2
+    return "sitio"
+
+
 # ------------------------------------------------------------------ pintado (lienzo y exportación)
 
 _EDGE_CACHE: dict = {}
@@ -1617,6 +1671,8 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
             clip = QPainterPath()
             r = min(el.get("radius", 0.0), w / 2, h / 2)
             clip.addRoundedRect(QRectF(0, 0, w, h), r, r)
+        if el.get("cuts"):
+            clip = _apply_cuts(clip, el)
         p.setClipPath(clip, Qt.IntersectClip)
         img = None
         if el.get("path") and os.path.exists(el["path"]):

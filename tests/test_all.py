@@ -1152,6 +1152,74 @@ class Graphics(unittest.TestCase):
             self.assertIsNotNone(G.preset_info(size), f"{name}: tamaño {size} no existe")
             self.assertIn(name, G.TEMPLATE_GROUP, name)
 
+    def test_handles_cut_swap_and_order(self):
+        """Graphics: las asas escalan (también si otro elemento las tapa), restar e intersecar formas y textos
+        en una foto (el hueco sigue a la foto al escalarla; «Quitar recortes» devuelve las formas),
+        intercambiar dos fotos y traer adelante."""
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+        import graphics
+        import graphics_engine as G
+        app = QApplication.instance()
+        with tempfile.TemporaryDirectory() as cfg:
+            v = graphics.GraphicsView(cfg)
+            v.resize(1400, 900)
+            v.show()
+            v.new_from_preset("Instagram cuadrado")
+            red, blue = os.path.join(cfg, "r.png"), os.path.join(cfg, "b.png")
+            cv2.imwrite(red, np.full((300, 300, 3), (0, 0, 255), np.uint8))
+            cv2.imwrite(blue, np.full((300, 300, 3), (255, 0, 0), np.uint8))
+            photo = G.image_el(v.d, red, 1.0, x=0, y=0, w=1080, h=1080)
+            over = G.shape_el(v.d, "rect", x=1000, y=1000, w=120, h=120)   # tapa la asa de la esquina
+            v.d["elements"] = [photo, over]
+            v.rebuild(select=[photo["id"]])
+            v.canvas.fit()
+            app.processEvents()
+            it = v.items[photo["id"]]
+            vp = v.canvas.mapFromScene(it.mapToScene(it.handles()["se"]))
+            QTest.mousePress(v.canvas.viewport(), Qt.LeftButton, Qt.NoModifier, vp)
+            for k in range(1, 5):
+                QTest.mouseMove(v.canvas.viewport(), vp - QPoint(10 * k, 10 * k))
+            QTest.mouseRelease(v.canvas.viewport(), Qt.LeftButton, Qt.NoModifier, vp - QPoint(40, 40))
+            self.assertLess(photo["w"], 1070)
+            self.assertAlmostEqual(photo["w"], photo["h"], delta=1)   # esquina de foto: mantiene proporción
+
+            def px(x, y):
+                c = G.render_image(v.d, v.canvas.cache, 0.25).pixelColor(int(x * 0.25), int(y * 0.25))
+                return c.red(), c.green(), c.blue()
+            photo.update(x=0, y=0, w=1080, h=1080)
+            hole = G.shape_el(v.d, "ellipse", x=440, y=440, w=200, h=200)
+            v.d["elements"] = [photo, hole]
+            v.rebuild(select=[photo["id"], hole["id"]])
+            v.pathfinder("subtract")
+            self.assertEqual([e["id"] for e in v.d["elements"]], [photo["id"]])
+            self.assertEqual(px(540, 540), (255, 255, 255))   # hueco: se ve el fondo
+            self.assertEqual(px(100, 100), (255, 0, 0))
+            photo.update(w=540, h=540)
+            self.assertEqual(px(270, 270), (255, 255, 255))   # el hueco escala con la foto
+            photo.update(w=1080, h=1080)
+            v.rebuild(select=[photo["id"]])
+            v.uncut()
+            self.assertEqual(len(v.d["elements"]), 2)
+            self.assertNotIn("cuts", photo)
+            txt = G.text_el(v.d, "HOLA", "title")
+            txt.update(x=100, y=400, w=880, size=300)
+            v.d["elements"] = [photo, txt]
+            v.rebuild(select=[photo["id"], txt["id"]])
+            v.pathfinder("intersect")
+            self.assertEqual(px(40, 40), (255, 255, 255))   # fuera de las letras no hay foto
+            a = G.image_el(v.d, red, 1.0, x=0, y=0, w=400, h=400)
+            b = G.image_el(v.d, blue, 1.0, x=600, y=600, w=300, h=300)
+            v.d["elements"] = [a, b]
+            v.rebuild(select=[a["id"], b["id"]])
+            v.swap()
+            self.assertEqual((a["path"], b["path"], a["w"], b["w"]), (blue, red, 400, 300))
+            v.rebuild(select=[a["id"]])
+            v.order("up")
+            self.assertEqual(v.d["elements"][-1]["id"], a["id"])
+            v.shutdown()
+
     def test_home_create_and_editor_flow(self):
         """Inicio → Crear (tamaño, plantilla, imagen subida) → editor con paneles, páginas y zoom; Proyectos
         lista lo guardado; duplicar, renombrar y eliminar desde la tarjeta. Sin red."""
@@ -1491,6 +1559,15 @@ class FakeGoogle(http.server.BaseHTTPRequestHandler):
 
 
 class Drive(unittest.TestCase):
+    def test_find_downloaded_client(self):
+        dl = tempfile.mkdtemp()
+        self.assertEqual(drive.Drive.find_downloaded_client(dl), "")
+        json.dump({"web": {"client_id": "w"}}, open(os.path.join(dl, "client_secret_web.json"), "w"))
+        self.assertEqual(drive.Drive.find_downloaded_client(dl), "")  # no es «App de escritorio»
+        ok = os.path.join(dl, "client_secret_123.apps.googleusercontent.com.json")
+        json.dump({"installed": {"client_id": "c"}}, open(ok, "w"))
+        self.assertEqual(drive.Drive.find_downloaded_client(dl), ok)
+
     def test_refresh_folder_chunked_upload_and_link(self):
         srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeGoogle)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
