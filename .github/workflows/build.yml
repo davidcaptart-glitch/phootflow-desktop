@@ -33,14 +33,14 @@ jobs:
         run: >
           pyinstaller --noconfirm --onefile --windowed --name PhootFlow
           --icon assets/icon.ico --add-data "assets;assets"
-          --collect-all rawpy --collect-data cv2 --collect-all mediapipe --collect-all onnxruntime
+          --collect-all rawpy --collect-all pillow_heif --collect-data cv2 --collect-all mediapipe --collect-all onnxruntime
           --hidden-import scene_ai --hidden-import eyes --hidden-import luts --hidden-import studio --hidden-import studio_engine --hidden-import review --hidden-import masks --hidden-import compare --hidden-import edits --hidden-import edits_engine --hidden-import edits_adjust --hidden-import edits_ui --hidden-import zoomview --hidden-import cropview --hidden-import icons --hidden-import ui --hidden-import propagate --hidden-import progress_panel --hidden-import export_formats --hidden-import fx_engine --hidden-import fx_ui --hidden-import graphics_elements --hidden-import graphics_home --hidden-import graphics_online --hidden-import graphics_templates --hidden-import graphics_textfx --hidden-import graphics_textfx_ui --hidden-import license --hidden-import graphics --hidden-import graphics_engine --hidden-import PySide6.QtSvg app.py
       - name: Compilar la versión en carpeta (para el instalador)
         run: >
           pyinstaller --noconfirm --onedir --windowed --name PhootFlow
           --distpath dist_dir --workpath build_dir
           --icon assets/icon.ico --add-data "assets;assets"
-          --collect-all rawpy --collect-data cv2 --collect-all mediapipe --collect-all onnxruntime
+          --collect-all rawpy --collect-all pillow_heif --collect-data cv2 --collect-all mediapipe --collect-all onnxruntime
           --hidden-import scene_ai --hidden-import eyes --hidden-import luts --hidden-import studio --hidden-import studio_engine --hidden-import review --hidden-import masks --hidden-import compare --hidden-import edits --hidden-import edits_engine --hidden-import edits_adjust --hidden-import edits_ui --hidden-import zoomview --hidden-import cropview --hidden-import icons --hidden-import ui --hidden-import propagate --hidden-import progress_panel --hidden-import export_formats --hidden-import fx_engine --hidden-import fx_ui --hidden-import graphics_elements --hidden-import graphics_home --hidden-import graphics_online --hidden-import graphics_templates --hidden-import graphics_textfx --hidden-import graphics_textfx_ui --hidden-import license --hidden-import graphics --hidden-import graphics_engine --hidden-import PySide6.QtSvg app.py
       - name: Firmar los ejecutables (si hay certificado)
         shell: pwsh

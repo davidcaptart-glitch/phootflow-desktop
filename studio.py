@@ -14,7 +14,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QMenu,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QMenu,
                                QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListView, QListWidget,
                                QListWidgetItem, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
                                QSlider, QSpinBox, QStyle, QStyledItemDelegate, QTabWidget, QToolButton, QVBoxLayout,
@@ -478,6 +478,7 @@ class StudioView(QWidget):
                       ("Ctrl+E", self.export_dialog), ("Y", self.next_split),
                       ("R", lambda: self.b_crop.toggle()),
                       ("V", lambda: self.set_bw_mode(not self.bw_cb.isChecked())),
+                      ("C", lambda: self.set_splash(not self.splash_cb.isChecked())),
                       ("Z", lambda: (self.canvas.zoom.toggle(None, self.canvas._area(), self.canvas.pm.size())
                                      if self.canvas.pm is not None else None))):
             QShortcut(QKeySequence(k), self, fn)
@@ -607,7 +608,9 @@ class StudioView(QWidget):
         self.canvas.crop.on_change = self._on_crop
         self.canvas.zoom.provider = self._tile
         self._full: tuple | None = None
-        self.canvas.mask_drawing = lambda: bool(
+        self._picking = False   # cuentagotas del color selectivo armado
+        self._splash_view = False  # ver la selección del color selectivo
+        self.canvas.mask_drawing = lambda: bool(self._picking) or bool(
             self.cur and self.mask_i is not None and self.mask_i < len(self._masks())
             and (self._comp() or {}).get("type") in ("radial", "linear", "brush", "point"))
         v.addWidget(self.canvas, 1)
@@ -629,6 +632,11 @@ class StudioView(QWidget):
         self.b_bw_bar.setText(" B/N")
         self.b_bw_bar.clicked.connect(self.set_bw_mode)
         hb.addWidget(self.b_bw_bar)
+        self.b_splash_bar = _ibtn("splash", "Color selectivo (C): un color (p. ej. un jersey rojo) se queda en color y "
+                                            "el resto pasa a blanco y negro. Pincha el color en la foto.", True)
+        self.b_splash_bar.setText(" Color")
+        self.b_splash_bar.clicked.connect(self.set_splash)
+        hb.addWidget(self.b_splash_bar)
         hb.addSpacing(8)
         self.stars = []
         for n in range(1, 6):
@@ -736,7 +744,7 @@ class StudioView(QWidget):
 
         panels = dict(SE.PANELS)
         layout = [("sun", "Luz", ["Básico", "Presencia", "Curva tonal"]),
-                  ("palette", "Color", ["_color", "_hsl", "Gradación de color"]),
+                  ("palette", "Color", ["_color", "_splash", "_hsl", "Gradación de color"]),
                   ("detail", "Detalle", ["Detalle", "Efectos"]),
                   ("mask", "Máscaras", ["_masks"]),
                   ("crop", "Recorte y geometría", ["_crop", "Geometría"])]
@@ -748,6 +756,8 @@ class StudioView(QWidget):
                     bv.addWidget(self._build_masks())
                 elif t == "_crop":
                     bv.addWidget(self._build_crop())
+                elif t == "_splash":
+                    bv.addWidget(self._build_splash())
                 elif t == "_color":
                     sec = Section("Perfil, LUT y B/N")
                     row = QHBoxLayout()
@@ -763,7 +773,7 @@ class StudioView(QWidget):
                     sec.lay.addWidget(lut_k)
                     row = QHBoxLayout()
                     self.bw_cb = QCheckBox("Blanco y negro")
-                    self.bw_cb.toggled.connect(lambda on: (self._set("bw", on, True), self._sync_bw_ui(on)))
+                    self.bw_cb.toggled.connect(self._bw_toggled)
                     self.bw_style = QComboBox()
                     self.bw_style.addItems(list(E.BW_STYLES))
                     self.bw_style.activated.connect(lambda _: self._set("bw_style", self.bw_style.currentText(), True))
@@ -1134,6 +1144,8 @@ class StudioView(QWidget):
                 self.mask_list.setCurrentRow(row)
         elif n == 0:
             self._select_mask(-1)
+        if hasattr(self, "splash_cb"):
+            self._sync_splash_ui()
 
     def add_mask(self, kind):
         if not self.cur:
@@ -1556,6 +1568,8 @@ class StudioView(QWidget):
         return None
 
     def _gizmo_cursor(self, x, y):
+        if self._picking:
+            return Qt.CrossCursor
         r = self.canvas.img_rect
         h = self._gz_hit(r.x() + x * r.width(), r.y() + y * r.height())
         return {"move": Qt.SizeAllCursor, "rotate": Qt.PointingHandCursor, "p0": Qt.SizeVerCursor,
@@ -1689,6 +1703,13 @@ class StudioView(QWidget):
         """Dibujo de máscaras sobre la foto (las coordenadas son de la foto completa mientras se ve la máscara).
         Sobre las guías (líneas de la lineal, elipse de la radial, círculo del punto) se arrastran; fuera,
         se dibuja una nueva."""
+        if self._picking:
+            if ev == "press" and not right:
+                vc = self._view_crop
+                if vc:
+                    x, y = vc[0] + x * (vc[2] - vc[0]), vc[1] + y * (vc[3] - vc[1])
+                self._pick_color(x, y, bool(QApplication.keyboardModifiers() & Qt.ShiftModifier))
+            return
         c = self._comp()
         if c is None:
             return
@@ -1885,7 +1906,10 @@ class StudioView(QWidget):
             return
         self._req += 1
         self._req_angle = (self._req, self._cur_angle())
-        self._jobs.put((self._req, self.cur.path, copy.deepcopy(self.cur.settings), draft,
+        s = copy.deepcopy(self.cur.settings)
+        if self._splash_view and s.get("splash"):
+            s["_splash_view"] = True
+        self._jobs.put((self._req, self.cur.path, s, draft,
                         self.mask_i if self.mask_show else None, self.canvas.cmp.active, self.crop_mode))
         if draft:
             self._full_timer.start(260)
@@ -1985,8 +2009,246 @@ class StudioView(QWidget):
             self.status.setText("Blanco y negro: elige el estilo, retoca luz y contraste en Luz, y aclara u "
                                 "oscurece cada color en «Mezcla B/N».")
 
+    def _bw_toggled(self, on: bool):
+        if on and self.cur and self.cur.settings.get("splash"):  # B/N entero: fuera el color selectivo
+            self.cur.settings["splash"] = False
+            self._sync_splash_ui()
+        self._set("bw", on, True)
+        self._sync_bw_ui(on)
+
+    # ---------------------------------------------------------- color selectivo
+    def _build_splash(self):
+        sec = Section("Color selectivo", open_=False)
+        self._splash_sec = sec
+        intro = QLabel("Lo que elijas se queda en color y el resto pasa a blanco y negro (con el estilo de B/N de "
+                       "arriba). Pincha el color en la foto o usa los botones; también vale una máscara.")
+        intro.setWordWrap(True)
+        intro.setObjectName("meta")
+        sec.lay.addWidget(intro)
+        row = QHBoxLayout()
+        self.splash_cb = QCheckBox("Activar (C)")
+        self.splash_cb.toggled.connect(self.set_splash)
+        self.b_splash_pick = _btn("  Cuentagotas", "ghost",
+                                  "Pincha en la foto el color que quieres conservar (p. ej. el jersey). "
+                                  "Con Mayús pulsada, añade otro color más.")
+        self.b_splash_pick.setIcon(I.icon("dropper", 16))
+        self.b_splash_pick.setCheckable(True)
+        self.b_splash_pick.toggled.connect(self._arm_picker)
+        self.b_splash_view = _ibtn("eye", "Ver la selección: lo que pasa a B/N se tapa en magenta y lo que se queda "
+                                          "en color se ve limpio", True)
+        self.b_splash_view.toggled.connect(self._toggle_splash_view)
+        row.addWidget(self.splash_cb)
+        row.addStretch(1)
+        row.addWidget(self.b_splash_pick)
+        row.addWidget(self.b_splash_view)
+        sec.lay.addLayout(row)
+        sw = QHBoxLayout()
+        sw.setSpacing(3)
+        self._swatches = []
+        for _b, label, hsv in SE.HSL_BANDS:
+            b = QToolButton()
+            b.setCheckable(True)
+            b.setToolTip(f"Conservar el {label.lower()}")
+            b.setFixedSize(30, 22)
+            b.setCursor(Qt.PointingHandCursor)
+            c = QColor.fromHsv(int(hsv) % 360, 215, 235)
+            b.setStyleSheet(f"QToolButton {{ background: {c.name()}; border: 2px solid transparent; border-radius: 4px; }}"
+                            f"QToolButton:checked {{ border: 2px solid {T.TEXT_STRONG}; }}"
+                            f"QToolButton:hover {{ border: 2px solid {T.MUTED}; }}")
+            b.clicked.connect(lambda on, hv=SE.band_hue(hsv): self._toggle_band(hv, on))
+            self._swatches.append((b, SE.band_hue(hsv)))
+            sw.addWidget(b)
+        sw.addStretch(1)
+        sec.lay.addLayout(sw)
+        row = QHBoxLayout()
+        self.splash_lbl = QLabel("")
+        self.splash_lbl.setTextFormat(Qt.RichText)
+        self.splash_lbl.setObjectName("meta")
+        self.b_splash_clear = _btn("Quitar colores", "flat", "Vaciar la lista de colores elegidos")
+        self.b_splash_clear.clicked.connect(lambda: self._set_hues([], "Color selectivo: quitar colores"))
+        row.addWidget(self.splash_lbl, 1)
+        row.addWidget(self.b_splash_clear)
+        sec.lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Se queda"))
+        self.splash_mode = QComboBox()
+        for k, v in SE.SPLASH_MODES.items():
+            self.splash_mode.addItem(v, k)
+        self.splash_mode.activated.connect(
+            lambda _: (self._set("splash_mode", self.splash_mode.currentData(), True), self._sync_splash_ui()))
+        row.addWidget(self.splash_mode, 1)
+        sec.lay.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Máscara"))
+        self.splash_mask = QComboBox()
+        self.splash_mask.setToolTip("La máscara de la pestaña Máscaras que marca lo que se queda en color "
+                                    "(persona, pincel, radial…)")
+        self.splash_mask.activated.connect(lambda i: self._set("splash_mask", int(i), True))
+        self.b_splash_mask = _btn("  Nueva", "ghost", "Crear una máscara para el color selectivo y dibujarla")
+        self.b_splash_mask.setIcon(I.icon("plus", 16))
+        self.b_splash_mask.setMenu(self._type_menu(self.b_splash_mask, self._splash_new_mask))
+        row.addWidget(self.splash_mask, 1)
+        row.addWidget(self.b_splash_mask)
+        sec.lay.addLayout(row)
+        for c in SE.SPLASH_CTRLS:
+            r = SliderRow(*c)
+            r.changed.connect(self._set)
+            self.rows[c[0]] = r
+            sec.lay.addWidget(r)
+        self.splash_skin = QCheckBox("Proteger la piel (las caras pasan a B/N aunque elijas rojo o naranja)")
+        self.splash_skin.toggled.connect(lambda on: self._set("splash_skin", bool(on), True))
+        sec.lay.addWidget(self.splash_skin)
+        return sec
+
+    def set_splash(self, on: bool):
+        """Botón «Color» (C): activa el color selectivo, abre su panel y arma el cuentagotas si no hay color."""
+        if not self.cur:
+            self._sync_splash_ui()
+            return
+        on = bool(on)
+        if on == bool(self.cur.settings.get("splash")):
+            self._sync_splash_ui()
+        else:
+            if on and self.cur.settings.get("bw"):  # el resto ya se pasa a B/N: el B/N entero sobra
+                self.cur.settings["bw"] = False
+                self.bw_cb.blockSignals(True)
+                self.bw_cb.setChecked(False)
+                self.bw_cb.blockSignals(False)
+                self._sync_bw_ui(False)
+            self._set("splash", on, True)
+            self._sync_splash_ui()
+        if on:
+            self.pages.setCurrentIndex(1)
+            self._tab_btns[1].setChecked(True)
+            self._splash_sec.head.setChecked(True)
+            s = self.cur.settings
+            if not s.get("splash_hues") and (s.get("splash_mode") or "color") != "mask":
+                self.b_splash_pick.setChecked(True)
+            else:
+                self.status.setText("Color selectivo: Mayús+clic con el cuentagotas añade otro color; "
+                                    "el ojo muestra qué se queda en color.")
+        else:
+            self.b_splash_pick.setChecked(False)
+            self.b_splash_view.setChecked(False)
+
+    def _arm_picker(self, on: bool):
+        self._picking = bool(on) and self.cur is not None
+        if self._picking:
+            self.status.setText("Cuentagotas: pincha en la foto el color que quieres conservar "
+                                "(Mayús+clic añade otro).")
+        self.canvas.setCursor(Qt.CrossCursor if self._picking else Qt.ArrowCursor)
+
+    def _pick_color(self, x: float, y: float, add: bool):
+        """Toma el tono del punto pinchado (en la foto revelada sin el color selectivo) y lo conserva."""
+        it = self.cur
+        if not it or it.path not in self._proxy:
+            return
+        lin = self._proxy[it.path][0]
+        f = 720 / max(lin.shape[:2])
+        small = cv2.resize(lin, None, fx=f, fy=f, interpolation=cv2.INTER_AREA) if f < 1 else lin
+        s = dict(copy.deepcopy(it.settings), splash=False, bw=False, nr_luma=0)
+        try:
+            img = SE.render(small, s, crop=False, key=it.path)
+        except Exception as e:
+            self.status.setText(f"No se pudo leer el color: {e}")
+            return
+        h, w = img.shape[:2]
+        px, py = int(round(x * (w - 1))), int(round(y * (h - 1)))
+        patch = img[max(0, py - 2):py + 3, max(0, px - 2):px + 3].reshape(-1, 3)
+        hue, chroma = SE.hue_of(np.median(patch, axis=0))
+        if chroma < 0.03:
+            self.status.setText("Ese punto casi no tiene color (gris, blanco o negro): pincha en una zona de color.")
+            return
+        hues = list(it.settings.get("splash_hues") or []) if add else []
+        hues = [hh for hh in hues if abs((hh - hue + 180) % 360 - 180) > 4] + [round(hue, 1)]
+        if not it.settings.get("splash"):
+            it.settings["splash"] = True
+        if (it.settings.get("splash_mode") or "color") == "mask":
+            it.settings["splash_mode"] = "both"
+        self._set_hues(hues, "Color selectivo: elegir color")
+        if not add:
+            self.b_splash_pick.setChecked(False)
+        self.status.setText("Color elegido. Mayús+clic con el cuentagotas añade otro; «Amplitud» abarca tonos "
+                            "parecidos y el ojo muestra qué se queda en color.")
+
+    def _set_hues(self, hues: list, label: str):
+        if not self.cur:
+            return
+        self._push_history(label)
+        self.cur.settings["splash_hues"] = hues
+        if hues and not self.cur.settings.get("splash"):
+            self.cur.settings["splash"] = True
+        self._sync_splash_ui()
+        self.request(draft=False)
+        self._save_timer.start(400)
+
+    def _toggle_band(self, hue: float, on: bool):
+        if not self.cur:
+            return
+        hues = [h for h in (self.cur.settings.get("splash_hues") or []) if abs((h - hue + 180) % 360 - 180) > 12]
+        if on:
+            hues.append(round(hue, 1))
+        self._set_hues(hues, "Color selectivo: " + ("añadir" if on else "quitar") + " color")
+
+    def _toggle_splash_view(self, on: bool):
+        self._splash_view = bool(on)
+        self.request(draft=False)
+
+    def _splash_new_mask(self, kind: str):
+        """Máscara nueva para el color selectivo: se crea, se elige aquí y se abre la pestaña para dibujarla."""
+        if not self.cur:
+            return
+        self.add_mask(kind)  # guarda el historial antes de cambiar nada: un Ctrl+Z lo deshace todo
+        s = self.cur.settings
+        s["splash"] = True
+        if (s.get("splash_mode") or "color") == "color":
+            s["splash_mode"] = "mask"
+        s["splash_mask"] = len(self._masks()) - 1
+        self._sync_splash_ui()
+        self.pages.setCurrentIndex(3)
+        self._tab_btns[3].setChecked(True)
+        self.status.setText("Dibuja o ajusta la máscara: lo que marque se quedará en color y el resto en B/N.")
+        self.request(draft=False)
+        self._save_timer.start(400)
+
+    def _sync_splash_ui(self):
+        if not hasattr(self, "splash_cb"):
+            return
+        s = self.cur.settings if self.cur else {}
+        on = bool(s.get("splash"))
+        for w, v in ((self.splash_cb, on), (self.b_splash_bar, on), (self.splash_skin, s.get("splash_skin", True))):
+            w.blockSignals(True)
+            w.setChecked(bool(v))
+            w.blockSignals(False)
+        hues = [float(h) for h in s.get("splash_hues") or []]
+        for b, hv in self._swatches:
+            b.blockSignals(True)
+            b.setChecked(any(abs((h - hv + 180) % 360 - 180) <= 12 for h in hues))
+            b.blockSignals(False)
+        if hues:
+            dots = " ".join(f'<span style="color: rgb{SE.hue_rgb(h)}; font-size: 15pt;">■</span>' for h in hues)
+            self.splash_lbl.setText(f"Se conservan: {dots}")
+        else:
+            self.splash_lbl.setText("Ningún color elegido todavía")
+        self.b_splash_clear.setEnabled(bool(hues))
+        mode = s.get("splash_mode") or "color"
+        self.splash_mode.setCurrentIndex(max(0, self.splash_mode.findData(mode)))
+        self.splash_mask.blockSignals(True)
+        self.splash_mask.clear()
+        ms = s.get("masks") or []
+        for i, m in enumerate(ms):
+            self.splash_mask.addItem(f"{i + 1}. {m.get('name', 'Máscara')}")
+        if not ms:
+            self.splash_mask.addItem("(ninguna: pulsa «Nueva»)")
+        self.splash_mask.setCurrentIndex(min(int(s.get("splash_mask") or 0), max(0, len(ms) - 1)))
+        self.splash_mask.blockSignals(False)
+        self.splash_mask.setEnabled(mode != "color" and bool(ms))
+        self.bw_style.setEnabled(bool(s.get("bw")) or on)
+        if not on and self._splash_view:
+            self.b_splash_view.setChecked(False)
+
     def _sync_bw_ui(self, on: bool):
-        self.bw_style.setEnabled(on)
+        self.bw_style.setEnabled(on or bool(self.cur and self.cur.settings.get("splash")))
         self.b_bw_bar.blockSignals(True)
         self.b_bw_bar.setChecked(on)
         self.b_bw_bar.blockSignals(False)
@@ -2006,6 +2268,7 @@ class StudioView(QWidget):
         self.bw_cb.blockSignals(False)
         self.bw_style.setCurrentText(s.get("bw_style") or "Editorial")
         self._sync_bw_ui(bool(s.get("bw")))
+        self._sync_splash_ui()
         if hasattr(self, "crop_angle"):
             self._sync_angle_rows(float(s.get("angle", 0) or 0))
         i = self.lut_cb.findData(s.get("lut") or None)

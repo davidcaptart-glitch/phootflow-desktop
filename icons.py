@@ -30,6 +30,8 @@ _P = {
     "lut": '<rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/>'
            '<rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/>',
     "bw": '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="COLOR"/>',
+    "splash": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="COLOR"/>',  # color selectivo
+    "dropper": '<path d="M14.5 5.5l4 4M16.5 3.5a2.1 2.1 0 0 1 3 3l-2 2-3-3zM15 8l-8.5 8.5L5 19l2.5-1.5L16 9"/>',
     "sliders": '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/>'
                '<circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
     "cloud": '<path d="M7 18a4 4 0 0 1-.5-8A6 6 0 0 1 18 9a4.5 4.5 0 0 1-.5 9z"/>',
