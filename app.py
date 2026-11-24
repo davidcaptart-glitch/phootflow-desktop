@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 
 import drive as gdrive
 import session_file as SF
+import session_presets as SP
 import compare as CMP
 import zoomview as Z
 import engine as E
@@ -525,6 +526,90 @@ def button(text: str, kind: str = "", tip: str = "") -> QPushButton:
     return b
 
 
+class DriveSetupDialog(QDialog):
+    """Asistente de la primera conexión con Google Drive: pasos con botones que abren cada página de Google
+    y detección del client_secret*.json en cuanto aparece en Descargas."""
+
+    GC = "https://console.cloud.google.com/"
+    STEPS = [
+        ("Crear un proyecto", "projectcreate",
+         "Ponle un nombre cualquiera (p. ej. «PhootFlow») y pulsa <b>Crear</b>. Comprueba arriba que queda "
+         "seleccionado."),
+        ("Activar Google Drive API", "apis/library/drive.googleapis.com",
+         "Pulsa <b>Habilitar</b>."),
+        ("Pantalla de consentimiento", "auth/overview",
+         "<b>Comenzar</b> → nombre de la app y tu correo → público <b>Externo</b> → acepta y <b>Crear</b>. "
+         "Luego, en <b>Público</b>: añade tu cuenta en «Usuarios de prueba» y pulsa <b>Publicar la "
+         "aplicación</b> (si se queda «en pruebas», Google caduca el permiso cada 7 días)."),
+        ("Crear la credencial", "auth/clients/create",
+         "Tipo de aplicación: <b>App de escritorio</b> → <b>Crear</b> → <b>Descargar JSON</b>. "
+         "Guárdalo en Descargas: PhootFlow lo detecta solo."),
+    ]
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Conectar Google Drive (una sola vez)")
+        self.setMinimumWidth(620)
+        self.path = ""
+        v = QVBoxLayout(self)
+        v.setSpacing(10)
+        intro = QLabel("Google pide que cada programa de escritorio tenga su propia credencial. Se hace una sola "
+                       "vez (unos 5 minutos) con tu cuenta de Google; cada botón abre la página exacta.")
+        intro.setWordWrap(True)
+        intro.setObjectName("muted")
+        v.addWidget(intro)
+        for i, (title, url, text) in enumerate(self.STEPS, 1):
+            row = QHBoxLayout()
+            lab = QLabel(f"<b>{i}. {title}</b><br>{text}")
+            lab.setWordWrap(True)
+            lab.setTextFormat(Qt.RichText)
+            b = button("Abrir", "small", self.GC + url)
+            b.setFixedWidth(80)
+            b.clicked.connect(lambda _=False, u=self.GC + url: QDesktopServices.openUrl(QUrl(u)))
+            row.addWidget(lab, 1)
+            row.addWidget(b, 0, Qt.AlignTop)
+            v.addLayout(row)
+        self.found = QLabel()
+        self.found.setWordWrap(True)
+        v.addWidget(self.found)
+        row = QHBoxLayout()
+        b_pick = button("Elegir el archivo…", "ghost")
+        b_pick.clicked.connect(self._pick)
+        b_cancel = button("Cancelar", "ghost")
+        b_cancel.clicked.connect(self.reject)
+        self.b_go = button("Conectar", "primary")
+        self.b_go.clicked.connect(self.accept)
+        row.addWidget(b_pick)
+        row.addStretch(1)
+        row.addWidget(b_cancel)
+        row.addWidget(self.b_go)
+        v.addLayout(row)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._scan)
+        self._timer.start(1500)
+        self._scan()
+
+    def _set(self, path: str):
+        self.path = path
+        self.b_go.setEnabled(bool(path))
+        if path:
+            self.found.setText(f"✓ Credencial encontrada: <b>{os.path.basename(path)}</b>. Pulsa <b>Conectar</b> "
+                               "y autoriza en el navegador.")
+        else:
+            self.found.setText("5. Esperando el JSON en Descargas… (o elígelo tú con «Elegir el archivo…»)")
+
+    def _scan(self):
+        if not self.path or not os.path.exists(self.path):
+            self._set(gdrive.Drive.find_downloaded_client())
+
+    def _pick(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Credencial de Google (client_secret….json)",
+                                           os.path.join(os.path.expanduser("~"), "Downloads"), "JSON (*.json)")
+        if f:
+            self._timer.stop()
+            self._set(f)
+
+
 def labeled(label: str, w: QWidget) -> QWidget:
     box = QWidget()
     h = QHBoxLayout(box)
@@ -1008,6 +1093,28 @@ class Main(QMainWindow):
 
         # --- panel ⚙: lo que no se toca en cada sesión
         self.sheet = UI.SideSheet(self, "Ajustes de la sesión", 420)
+        c, cv = card("Ajustes guardados")
+        self.preset_cb = QComboBox()
+        self.preset_cb.setToolTip("Configuraciones completas: LUT, revelado, B/N, formatos, cómo exportar, nube y calidad.")
+        self.preset_info = QLabel("")
+        self.preset_info.setObjectName("muted")
+        self.preset_info.setWordWrap(True)
+        self.preset_cb.currentTextChanged.connect(self._preset_hint)
+        b_apply = button("  Aplicar", "ghost", "Pone estos ajustes en la sesión abierta")
+        b_apply.setIcon(I.icon("check", 16))
+        b_apply.clicked.connect(lambda: self.apply_preset(self.preset_cb.currentText()))
+        b_saveas = button("  Guardar como…", "ghost", "Guarda los ajustes actuales con un nombre")
+        b_saveas.setIcon(I.icon("save", 16))
+        b_saveas.clicked.connect(self.save_preset_as)
+        self.b_preset_del = button("  Borrar", "ghost", "Borra este ajuste guardado")
+        self.b_preset_del.setIcon(I.icon("trash", 16))
+        self.b_preset_del.clicked.connect(self.delete_preset)
+        cv.addWidget(self.preset_cb)
+        cv.addWidget(self.preset_info)
+        cv.addWidget(UI.flow([b_apply, b_saveas, self.b_preset_del]))
+        self.sheet.add(c)
+        self.preset_name = ""
+        self.reload_presets()
         c, cv = card("Carpetas")
         for label, edit in (("Sesión", self.src), ("Salida", self.out)):
             row = QHBoxLayout()
@@ -1374,6 +1481,135 @@ class Main(QMainWindow):
             bw_style=self.bw_style_cb.currentText(), look=self.look_cb.currentText(),
             cache_dir=os.path.join(work_dir(self.out_dir()), "previas"), resume=True)
 
+    # ---------------------------------------------------- ajustes guardados
+    def snapshot(self) -> dict:
+        """Los ajustes de la sesión tal como están en la ventana (las claves de `session_presets.KEYS`)."""
+        return {
+            "style": self.style_cb.currentText(), "look": self.look_cb.currentText(),
+            "nr": self.nr.currentText(), "evc": round(self.evc.value(), 2), "straight": self.straight.isChecked(),
+            "uniform": self.c_uniform.isChecked(), "cam": self.c_cam.isChecked(),
+            "focus": self.c_focus.isChecked(), "exp": self.c_exp.isChecked(), "dup": self.c_dup.isChecked(),
+            "eyes": self.c_eyes.isChecked(), "sens": self.sens.currentText(),
+            "ratios": [k for k, c in self.ratio_cb.items() if c.isChecked()],
+            "sizes": [k for k, c in self.size_cb.items() if c.isChecked()], "orig": self.r_orig.isChecked(),
+            "bw": self.c_bw.isChecked(), "bw_style": self.bw_style_cb.currentText(), "quality": self.q.value(),
+            "workers": self.workers.value(), "review": self.c_review.isChecked(), "move": self.c_move.isChecked(),
+            "exif": self.c_exif.isChecked(), "xmp": self.c_xmp.isChecked(), "zip": self.c_zip.isChecked(),
+            "trash_orig": self.c_trash.isChecked(), "del_disc": self.c_del_disc.isChecked(),
+            "cloud": self.cloud.currentIndex(), "cloud_folder": self.cloud_folder.text(),
+            "up_orig": self.c_up_orig.isChecked(),
+            "lut": self.lut_cb.currentData() or "", "lutk": self.lut_k.value()}
+
+    def apply_snapshot(self, d: dict):
+        """Pone en la ventana los ajustes de `d`; las claves que no trae se quedan como están."""
+        checks = {"straight": self.straight, "uniform": self.c_uniform, "cam": self.c_cam, "focus": self.c_focus,
+                  "exp": self.c_exp, "dup": self.c_dup, "eyes": self.c_eyes, "orig": self.r_orig, "bw": self.c_bw,
+                  "review": self.c_review, "move": self.c_move, "exif": self.c_exif, "xmp": self.c_xmp,
+                  "zip": self.c_zip, "trash_orig": self.c_trash, "del_disc": self.c_del_disc,
+                  "up_orig": self.c_up_orig}
+        combos = {"look": self.look_cb, "nr": self.nr, "sens": self.sens, "bw_style": self.bw_style_cb}
+        if "style" in d and self.style_cb.findText(d["style"]) >= 0:
+            self.style_cb.setCurrentText(d["style"])  # antes que el LUT: cambia la lista de LUT
+        for k, cb in combos.items():
+            if k in d and cb.findText(str(d[k])) >= 0:
+                cb.setCurrentText(str(d[k]))
+        for k, w_ in checks.items():
+            if k in d:
+                w_.setChecked(bool(d[k]))
+        if "ratios" in d:
+            for k, c in self.ratio_cb.items():
+                c.setChecked(k in d["ratios"])
+        if "sizes" in d:
+            for k, c in self.size_cb.items():
+                c.setChecked(k in (d["sizes"] or ["max"]))
+        for k, sp in (("evc", self.evc), ("quality", self.q), ("workers", self.workers), ("lutk", self.lut_k)):
+            if k in d:
+                try:
+                    sp.setValue(type(sp.value())(d[k]))
+                except (TypeError, ValueError):
+                    pass
+        if "cloud" in d:
+            self.cloud.setCurrentIndex(max(0, min(len(CLOUDS) - 1, int(d["cloud"] or 0))))
+        if "cloud_folder" in d:
+            self.cloud_folder.setText(str(d["cloud_folder"] or ""))
+        if "lut" in d:
+            want = d["lut"] or None
+            idx = self.lut_cb.findData(want) if want else 0
+            if idx < 0 and want and os.path.isfile(want):
+                self.lut_cb.addItem(os.path.splitext(os.path.basename(want))[0], want)
+                idx = self.lut_cb.count() - 1
+            if idx >= 0:
+                self.lut_cb.setCurrentIndex(idx)
+        self.c_trash.setEnabled(self.c_zip.isChecked())
+        self.cloud_ui()
+        self.save()
+
+    def reload_presets(self, select: str = ""):
+        cur = select or self.preset_cb.currentText()
+        self.preset_cb.blockSignals(True)
+        self.preset_cb.clear()
+        self.preset_cb.addItems(list(SP.all_presets(CFG_DIR)))
+        if cur and self.preset_cb.findText(cur) >= 0:
+            self.preset_cb.setCurrentText(cur)
+        self.preset_cb.blockSignals(False)
+        self._preset_hint(self.preset_cb.currentText())
+
+    def _preset_hint(self, name: str):
+        p = SP.all_presets(CFG_DIR).get(name)
+        mine = SP.is_user(CFG_DIR, name)
+        self.preset_info.setText((SP.describe(p) if p else "") +
+                                 (" (tuyo)" if mine and name not in SP.BUILTIN else
+                                  " (predefinido, modificado por ti)" if mine else ""))
+        self.b_preset_del.setEnabled(mine)
+        self.b_preset_del.setText("  Volver al original" if mine and name in SP.BUILTIN else "  Borrar")
+
+    def apply_preset(self, name: str) -> bool:
+        p = SP.all_presets(CFG_DIR).get(name)
+        if not p:
+            return False
+        self.apply_snapshot(p)
+        self.preset_name = name
+        self.save_session_settings()
+        self.status.setText(f"Ajustes «{name}» aplicados a la sesión.")
+        return True
+
+    def save_preset_as(self):
+        name, ok = QInputDialog.getText(self, APP, "Nombre de estos ajustes (p. ej. «Bodas con LUT cálido»):",
+                                        text=self.preset_name or self.preset_cb.currentText())
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in SP.all_presets(CFG_DIR) and QMessageBox.question(
+                self, APP, f"Ya hay unos ajustes «{name}». ¿Sustituirlos?") != QMessageBox.Yes:
+            return
+        try:
+            SP.save_preset(CFG_DIR, name, self.snapshot())
+        except (OSError, ValueError) as e:
+            return QMessageBox.warning(self, APP, f"No se pudo guardar: {e}")
+        self.preset_name = name
+        self.reload_presets(name)
+        self.save_session_settings()
+        self.status.setText(f"Ajustes guardados como «{name}».")
+
+    def delete_preset(self):
+        name = self.preset_cb.currentText()
+        if not SP.is_user(CFG_DIR, name):
+            return
+        txt = (f"¿Devolver «{name}» a como venía?" if name in SP.BUILTIN else f"¿Borrar los ajustes «{name}»?")
+        if QMessageBox.question(self, APP, txt) != QMessageBox.Yes:
+            return
+        SP.delete_preset(CFG_DIR, name)
+        self.reload_presets(name if name in SP.BUILTIN else "")
+
+    def save_session_settings(self):
+        """Deja en la sesión los ajustes con los que se trabaja (se recuperan al volver a abrirla)."""
+        if not os.path.isdir(self.src.text().strip()):
+            return
+        try:
+            SP.save_for_session(work_dir(self.out_dir()), self.snapshot(), self.preset_name)
+        except OSError:
+            pass
+
     def out_dir(self) -> str:
         return self.out.text().strip() or os.path.join(self.src.text().strip(), "Editadas")
 
@@ -1531,13 +1767,10 @@ class Main(QMainWindow):
                 self.drive.disconnect()
             else:
                 if not self.drive.has_client():
-                    QMessageBox.information(self, APP, "La primera vez hace falta el archivo de credenciales de "
-                                            "Google (client_secret.json, tipo «App de escritorio»). "
-                                            "Las instrucciones están en el README del proyecto.")
-                    f, _ = QFileDialog.getOpenFileName(self, "client_secret.json", "", "JSON (*.json)")
-                    if not f:
+                    dlg = DriveSetupDialog(self)
+                    if dlg.exec() != QDialog.Accepted or not dlg.path:
                         return
-                    self.drive.install_client(f)
+                    self.drive.install_client(dlg.path)
                 self.status.setText("Autoriza el acceso en el navegador que se acaba de abrir…")
                 QApplication.processEvents()
                 self.drive.connect()
@@ -1918,14 +2151,25 @@ class Main(QMainWindow):
                                    "Guardar el trabajo (Ctrl+S). Autoguardado: " +
                                    ("activado" if self.autosave else "desactivado (menú ⚙)"))
 
-    def open_session(self, folder: str, out: str = ""):
+    def open_session(self, folder: str, out: str = "", preset: str | None = None):
         """Abre una carpeta. Si ya tiene trabajo guardado lo recupera tal cual, sin pulsar «Analizar»: tus
-        aprobadas y rechazadas, recortes y looks; y si estabas revisando, vuelve a esa foto."""
+        aprobadas y rechazadas, recortes y looks; y si estabas revisando, vuelve a esa foto.
+        `preset`: ajustes guardados que aplicar; None o `SP.OWN` = los de esta sesión si los tiene;
+        `SP.KEEP` = no tocar los que hay."""
         if not self.ask_save():
             return
         self.src.setText(folder)
         default = os.path.normcase(os.path.normpath(os.path.join(folder, "Editadas")))
         self.out.setText("" if not out or os.path.normcase(os.path.normpath(out)) == default else out)
+        self.preset_name = ""
+        own = SP.load_for_session(work_dir(self.out_dir()))
+        if preset and preset not in (SP.KEEP, SP.OWN):
+            self.apply_preset(preset)
+        elif own and preset != SP.KEEP:
+            self.apply_snapshot(own)
+            self.preset_name = own.get("_preset", "")
+        if self.preset_name:
+            self.reload_presets(self.preset_name)
         self.photos, self.cur, self.dirty = [], None, False
         self.fill_grid()
         self.refresh_counts()
@@ -1999,6 +2243,7 @@ class Main(QMainWindow):
 
     def run(self, worker):
         st_cube = worker.st.style.get("cube") or ""
+        self.save_session_settings()  # la sesión recuerda con qué ajustes se analizó y exportó
         if worker.mode in ("analyze", "auto"):
             E.prepare_detectors(worker.st.workers)  # en el hilo principal (ver engine.prepare_detectors)
         self.worker = worker
@@ -2205,6 +2450,35 @@ class ModeDialog(QDialog):
             b.clicked.connect(lambda _, k=key: (setattr(self, "choice", k), self.accept()))
             row.addWidget(b)
         v.addLayout(row)
+        # ajustes de Events con los que abrir la sesión (LUT, exportar, nube, calidad…)
+        own = SP.load_for_session(os.path.join(folder, "Editadas", ".phootflow"))
+        self.preset = QComboBox()
+        if own:
+            self.preset.addItem(SP.OWN + (f" ({own['_preset']})" if own.get("_preset") else ""), SP.OWN)
+        self.preset.addItem(SP.KEEP, SP.KEEP)
+        for name in SP.all_presets(CFG_DIR):
+            self.preset.addItem(name, name)
+        self.preset.setToolTip("Configuración de Events para esta sesión: LUT, revelado, B/N, formatos,\n"
+                               "cómo exportar, nube y calidad. Se guardan en «⚙ Ajustes de la sesión».")
+        pinfo = QLabel("")
+        pinfo.setObjectName("muted")
+        pinfo.setWordWrap(True)
+        presets = SP.all_presets(CFG_DIR)
+        self.preset.currentIndexChanged.connect(lambda _: pinfo.setText(
+            SP.describe(presets[self.preset.currentData()]) if self.preset.currentData() in presets else
+            "Los que tenía esta sesión la última vez." if self.preset.currentData() == SP.OWN else
+            "Los ajustes que tienes ahora en Events, sin cambiar nada."))
+        prow = QHBoxLayout()
+        plab = QLabel("Ajustes de la sesión")
+        plab.setObjectName("meta")
+        prow.addWidget(plab)
+        prow.addWidget(self.preset, 1)
+        v.addLayout(prow)
+        v.addWidget(pinfo)
+        self.preset.currentIndexChanged.emit(0)
+
+    def preset_choice(self) -> str:
+        return self.preset.currentData() or SP.KEEP
 
 
 class Shell(QMainWindow):
@@ -2376,9 +2650,11 @@ class Shell(QMainWindow):
             return
         self.folder = d
         if dlg.choice == ENV_EVENTS:
-            self.events.open_session(d)  # recupera el trabajo guardado, si lo hay
+            self.events.open_session(d, preset=dlg.preset_choice())  # recupera el trabajo guardado, si lo hay
         else:
             self.events.src.setText(d)
+            if dlg.preset_choice() not in (SP.KEEP, SP.OWN):
+                self.events.apply_preset(dlg.preset_choice())
         self.events.save()
         if dlg.choice == ENV_STUDIO:
             self.studio.open_folder(d)

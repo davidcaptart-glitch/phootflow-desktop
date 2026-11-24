@@ -34,6 +34,12 @@ python -m unittest discover -s tests   # 129 pruebas, sin fotos reales ni red
   `Originales.zip` va junto a «Editadas» (`E.originals_zip`; el de dentro de Editadas de versiones anteriores se
   traslada), con RAW, JPG gemelo y XMP; `originales.json` guarda la fecha de cada uno para que `restore_originals`
   los devuelva tal cual y el análisis valga («Recuperar sesión desde el ZIP», o se ofrece al abrir).
+- `session_presets.py` — «Ajustes guardados» de Events (sin Qt): perfiles con nombre de LUT, revelado, B/N,
+  formatos, cómo exportar, nube y calidad (`KEYS`; las claves que faltan no se tocan). 5 predefinidos en `BUILTIN`;
+  los tuyos en `%APPDATA%\PhootFlow\ajustes_sesion\*.json` (uno con el nombre de un predefinido lo sustituye).
+  Cada sesión guarda los suyos en `<salida>/.phootflow/ajustes.json` (al aplicar un perfil y al analizar/exportar)
+  y `open_session` los recupera. En la ventana: `Main.snapshot`/`apply_snapshot`, tarjeta en el panel ⚙ y
+  selector en «Abrir carpeta» (`ModeDialog.preset_choice`: los de la sesión, los últimos usados o un perfil).
 - `styles.py` — presets por tipo de evento, `detect_scene()` heurístico, `apply_color()` y aprendizaje:
   `learn_style()` (parejas original↔edición, curva L por CDF + color) y `learn_from_finals()` (solo acabadas:
   distribución objetivo). Estilos en `%APPDATA%\PhootFlow\estilos\*.json`.

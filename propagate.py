@@ -27,6 +27,8 @@ STUDIO_GROUPS: list[tuple[str, str, list[str], bool]] = [
     ("detail", "Detalle: nitidez y ruido", _panel_keys("Detalle"), True),
     ("effects", "Efectos: viñeta y grano", _panel_keys("Efectos"), True),
     ("profile", "Perfil, LUT y blanco y negro", ["profile", "lut", "lut_strength", "bw", "bw_style"], True),
+    ("splash", "Color selectivo (un color se queda, el resto en B/N)",
+     [k for k in SE.DEFAULTS if k.startswith("splash")], False),
     ("masks", "Máscaras (las de IA se recalculan en cada foto)", ["masks"], False),
     ("geometry", "Recorte y enderezado", ["crop", "crop_ratio", "angle"], False),
 ]

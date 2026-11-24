@@ -188,7 +188,8 @@ def apply_color(rgb: np.ndarray, style: dict, stats: dict | None = None) -> np.n
 
 # ------------------------------------------------------------------ aprender un estilo de tus ediciones
 
-IMG_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+IMG_EXT = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".tif", ".tiff", ".webp", ".bmp", ".avif", ".heic", ".heif",
+           ".hif"}
 
 
 def find_pairs(originals_dir: str, edits_dir: str, raw_ext: set) -> list[tuple[str, str]]:

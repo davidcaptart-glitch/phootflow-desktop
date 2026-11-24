@@ -59,6 +59,25 @@ class Drive:
             raise DriveError('Ese archivo no es una credencial de tipo "App de escritorio"')
         shutil.copyfile(path, self.client_path)
 
+    @staticmethod
+    def find_downloaded_client(folder: str = "") -> str:
+        """El client_secret*.json de tipo «App de escritorio» más reciente de Descargas ('' si no hay)."""
+        folder = folder or os.path.join(os.path.expanduser("~"), "Downloads")
+        try:
+            names = [n for n in os.listdir(folder) if n.lower().startswith("client_secret") and
+                     n.lower().endswith(".json")]
+        except OSError:
+            return ""
+        for n in sorted(names, key=lambda n: os.path.getmtime(os.path.join(folder, n)), reverse=True):
+            p = os.path.join(folder, n)
+            try:
+                with open(p, encoding="utf-8") as f:
+                    if "installed" in json.load(f):
+                        return p
+            except (OSError, ValueError):
+                pass
+        return ""
+
     def _client(self) -> dict:
         with open(self.client_path, encoding="utf-8") as f:
             return json.load(f)["installed"]

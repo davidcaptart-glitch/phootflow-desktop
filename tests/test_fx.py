@@ -127,6 +127,10 @@ class Integration(unittest.TestCase):
         info = G.layer_info(el, d)
         self.assertIn("Acuarela", info)
         self.assertIn("Papel rasgado", info)
+        el["credit"] = "Ana López · CC BY"  # el crédito se guarda como texto
+        self.assertIn("Crédito: Ana López · CC BY", G.layer_info(el, d))
+        el["credit"] = {"author": "Ana"}
+        self.assertIn("Crédito: Ana", G.layer_info(el, d))
 
     def test_edits_new_layers(self):
         import edits_engine as EE

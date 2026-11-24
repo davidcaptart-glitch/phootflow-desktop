@@ -319,7 +319,8 @@ def layer_info(el: dict, d: dict | None = None) -> str:
             rows.append("Filtros: " + ", ".join(extra))
         rows.append(f"Zoom: {el.get('zoom', 1.0) * 100:.0f} %   Forma: {el.get('clip', 'rect')}")
         if el.get("credit"):
-            rows.append("Crédito: " + str(el["credit"].get("author", el["credit"])))
+            cr = el["credit"]  # texto («autor · licencia»); dict en diseños antiguos
+            rows.append("Crédito: " + str(cr.get("author", cr) if isinstance(cr, dict) else cr))
     elif t == "shape":
         rows.append(f"Forma: {el.get('shape')}   Relleno: {el.get('fill')}"
                     + (f"   Contorno: {el.get('stroke')} {el.get('stroke_w', 0):.1f} px" if el.get("stroke_w") else ""))

@@ -574,8 +574,8 @@ class DoubleExposureDialog(QDialog):
         f.addRow(bb)
 
     def _pick(self, folder):
-        p, _ = QFileDialog.getOpenFileName(self, "Segunda foto", folder,
-                                           "Imágenes (*.jpg *.jpeg *.png *.tif *.tiff *.webp *.arw *.nef *.dng)")
+        import engine as E
+        p, _ = QFileDialog.getOpenFileName(self, "Segunda foto", folder, E.file_filter(label="Imágenes"))
         if p:
             self.path = p
             self.lab.setText(os.path.basename(p))

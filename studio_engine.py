@@ -63,6 +63,14 @@ HSL_BANDS = [("red", "Rojo", 0), ("orange", "Naranja", 30), ("yellow", "Amarillo
 
 DEFAULTS: dict = {k: v for _, ctrls in PANELS for k, *_rest, v in [(c[0], c[5]) for c in ctrls]}
 DEFAULTS.update({f"hsl_{b}_{p}": 0 for b, _, _ in HSL_BANDS for p in ("h", "s", "l")})
+# Color selectivo: lo elegido (colores y/o una máscara) se queda en color y el resto pasa a B/N
+SPLASH_MODES = {"color": "Los colores elegidos", "mask": "Lo que marque una máscara",
+                "both": "Los colores elegidos, dentro de una máscara"}
+SPLASH_CTRLS = [("splash_range", "Amplitud del color", 5, 90, 1, 20), ("splash_soft", "Suavidad del borde", 0, 100, 1, 45),
+                ("splash_sat", "Saturación de lo que queda", -50, 100, 1, 0),
+                ("splash_amount", "Resto en B/N", 0, 100, 1, 100)]
+DEFAULTS.update({"splash": False, "splash_hues": [], "splash_mode": "color", "splash_mask": 0, "splash_skin": True})
+DEFAULTS.update({c[0]: c[5] for c in SPLASH_CTRLS})
 DEFAULTS.update({"masks": [], "bw_style": "Editorial", "bw": False, "crop": [0.0, 0.0, 1.0, 1.0], "crop_ratio": "Original", "lut": "", "lut_strength": 100,
                  "rating": 0, "flag": 0, "profile": "Neutro"})
 
@@ -389,6 +397,85 @@ def effects_stage(y: np.ndarray, s: dict, seed: int = 0) -> np.ndarray:
     return y
 
 
+def hue_of(rgb01) -> tuple[float, float]:
+    """(tono OkLCh en grados, croma) de un color sRGB 0..1: lo que guarda el cuentagotas del color selectivo."""
+    lab = to_oklab(_lin(np.asarray(rgb01, np.float32).reshape(1, 3)))[0]
+    return float(math.degrees(math.atan2(lab[2], lab[1])) % 360), float(math.hypot(lab[1], lab[2]))
+
+
+def hue_rgb(deg: float) -> tuple[int, int, int]:
+    """Color de muestra (sRGB 0..255) de un tono OkLCh, para pintar los colores elegidos en la interfaz."""
+    h = math.radians(deg)
+    d = from_oklab(np.array([[0.68, 0.15 * math.cos(h), 0.15 * math.sin(h)]], np.float32))
+    d = np.clip(d / max(1.0, float(d.max())), 0, 1)
+    return tuple(int(round(v * 255)) for v in _srgb(d)[0])
+
+
+def band_hue(hsv_deg: float) -> float:
+    """Tono OkLCh (grados) de un tono HSV: el de cada botón de color (rojo, naranja…)."""
+    return math.degrees(_oklch_hue_of_hsv(hsv_deg)) % 360
+
+
+def splash_alpha(y: np.ndarray, s: dict, key: str = "") -> np.ndarray:
+    """Alfa 0..1 de lo que se queda en color: los tonos elegidos (con amplitud y suavidad, sin grises ni blancos)
+    y/o una máscara de Studio."""
+    import masks as M
+    s = dict(DEFAULTS, **s)
+    mode = s.get("splash_mode") or "color"
+    h, w = y.shape[:2]
+    a = None
+    if mode in ("color", "both"):
+        a = np.zeros((h, w), np.float32)
+        hues = [float(x) for x in s.get("splash_hues") or []]
+        if hues:
+            lab = to_oklab(_lin(np.clip(y, 0, 1)))
+            C = np.hypot(lab[..., 1], lab[..., 2])
+            H = np.degrees(np.arctan2(lab[..., 2], lab[..., 1])) % 360
+            rng = float(s["splash_range"])
+            soft = float(s["splash_soft"]) / 100
+            inner, outer = rng * (1 - 0.6 * soft), rng * (1 + 0.8 * soft) + 2
+            for hh in hues:
+                d = np.abs((H - hh + 180) % 360 - 180)
+                a = np.maximum(a, 1 - _smoothstep(inner, outer, d))
+            a *= _smoothstep(0.018, 0.018 + 0.03 * (0.4 + soft), C)  # los grises y blancos no tienen color
+            if s.get("splash_skin", True):  # la piel (tono 40–65°, poco saturada) pasa a B/N aunque se elija rojo
+                skin = np.exp(-((((H - 54) + 180) % 360 - 180) / 13) ** 2) * (1 - _smoothstep(0.105, 0.145, C))
+                a *= 1 - skin
+            r = max(1.0, max(h, w) / 1400)
+            a = np.clip(guided(a.astype(np.float32), 2.5 * r, 0.01), 0, 1)  # sin ruido ni bordes dentados
+    if mode in ("mask", "both"):
+        ms = s.get("masks") or []
+        i = int(s.get("splash_mask") or 0)
+        if 0 <= i < len(ms):
+            try:
+                ma = M.build(ms[i], y, key)
+            except Exception:
+                ma = np.ones((h, w), np.float32)
+        else:
+            ma = np.zeros((h, w), np.float32) if mode == "mask" else np.ones((h, w), np.float32)
+        a = ma if a is None else a * ma
+    return np.clip(a, 0, 1).astype(np.float32)
+
+
+def splash_stage(y: np.ndarray, s: dict, seed: int = 0, key: str = "", view: bool = False) -> np.ndarray:
+    """Color selectivo: B/N (el estilo elegido) en todo menos en lo seleccionado. `view` = ver la selección."""
+    a = splash_alpha(y, s, key)
+    keep = y
+    if s.get("splash_sat"):
+        lab = to_oklab(_lin(np.clip(y, 0, 1)))
+        lab[..., 1:] *= max(0.0, 1 + s["splash_sat"] / 100)
+        d = np.clip(from_oklab(lab), 0, None)
+        keep = np.clip(_srgb(d / np.maximum(1, d.max(-1, keepdims=True))), 0, 1).astype(np.float32)
+    bw = E.bw_editorial(y, seed=seed, style=s.get("bw_style") or "Editorial")
+    k = float(s.get("splash_amount", 100)) / 100
+    rest = y * (1 - k) + bw * k
+    out = keep * a[..., None] + rest * (1 - a[..., None])
+    if view:  # lo que se queda, a todo color; lo que pasa a B/N, tapado en magenta
+        import masks as M
+        out = M.overlay(1 - a, out)
+    return out.astype(np.float32)
+
+
 def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True, key: str = "",
            show_mask: int | None = None) -> np.ndarray:
     """Revelado completo. `lin`: sRGB lineal float32 (de engine.load_linear). Devuelve sRGB 0..1.
@@ -406,7 +493,9 @@ def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True, key: str 
             y = L.apply(y, s["lut"], s.get("lut_strength", 100) / 100.0)
         except Exception:
             pass
-    if s["bw"]:
+    if s.get("splash"):  # color selectivo: manda sobre el B/N de toda la foto
+        y = splash_stage(y, s, seed, key, view=bool(s.get("_splash_view")))
+    elif s["bw"]:
         y = E.bw_editorial(y, seed=seed, style=s.get("bw_style") or "Editorial")
     y = effects_stage(y, s, seed)
     if show_mask is not None and 0 <= show_mask < len(s.get("masks") or []):

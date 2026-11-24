@@ -34,9 +34,28 @@ try:
     import exifread
 except Exception:  # pragma: no cover
     exifread = None
+try:  # HEIF/HEIC/HIF (iPhone, y Sony, Canon y Fuji en modo HEIF); sin la librería, esas fotos no se listan
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HEIF = True
+except Exception:  # pragma: no cover - p. ej. si Smart App Control bloquea su DLL
+    HEIF = False
 
-RAW_EXT = {".arw", ".cr2", ".cr3", ".nef", ".raf", ".dng", ".orf", ".rw2", ".srw", ".pef"}
-IMG_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+# RAW que lee LibRaw: Sony, Canon, Nikon, Fujifilm, Olympus/OM, Panasonic/Leica, Pentax, Samsung, Sigma,
+# Hasselblad, Phase One, Leaf, Mamiya, Minolta, Kodak, Epson, GoPro y DNG (también de móviles)
+RAW_EXT = {".arw", ".srf", ".sr2", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".raf", ".dng", ".orf", ".rw2", ".raw",
+           ".rwl", ".srw", ".pef", ".x3f", ".3fr", ".fff", ".iiq", ".mos", ".mef", ".mrw", ".kdc", ".dcr", ".erf",
+           ".gpr"}
+IMG_EXT = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".tif", ".tiff", ".webp", ".bmp", ".avif"} | \
+    ({".heic", ".heif", ".hif"} if HEIF else set())
+PREVIEW_ONLY: set = set()  # RAW que LibRaw no sabe revelar: se trabaja con el JPEG grande que lleva dentro
+PREVIEW_WARN = "RAW no compatible: se edita su vista previa JPEG"
+
+
+def file_filter(raw: bool = True, label: str = "Fotos") -> str:
+    """Filtro de QFileDialog con todos los formatos que se abren (RAW de todas las marcas, JPEG, HEIF…)."""
+    exts = sorted(IMG_EXT | (RAW_EXT if raw else set()))
+    return f"{label} ({' '.join('*' + e for e in exts)})"
 
 # nombre -> (ancho, alto)
 RATIOS = {
@@ -204,6 +223,35 @@ def read_meta(ph: Photo) -> None:
                 seconds=float("0." + "".join(c for c in sub if c.isdigit()) or 0))
     except Exception:
         pass
+    if not ph.meta and not is_raw(ph.path):
+        _meta_from_pillow(ph)
+
+
+def _meta_from_pillow(ph: Photo) -> None:
+    """EXIF de los formatos que exifread no lee (HEIC/HIF, WebP, AVIF, PNG) a través de Pillow."""
+    try:
+        with Image.open(ph.path) as im:
+            ex = im.getexif()
+        if not ex:
+            return
+        e = ex.get_ifd(0x8769)
+        for key, v in [("make", ex.get(0x010F)), ("model", ex.get(0x0110)), ("lens", e.get(0xA434)),
+                       ("exposure", e.get(0x829A)), ("fnumber", e.get(0x829D)), ("focal", e.get(0x920A)),
+                       ("date", e.get(0x9003)), ("artist", ex.get(0x013B)), ("copyright", ex.get(0x8298))]:
+            if v is None or v == "":
+                continue
+            if hasattr(v, "numerator"):
+                v = [f"{v.numerator}/{v.denominator}"]
+            ph.meta[key] = v.strip("\x00 ").strip() if isinstance(v, str) else v
+        iso = e.get(0x8827)
+        if iso:
+            ph.iso = int(iso[0] if isinstance(iso, tuple) else iso)
+            ph.meta["iso"] = ph.iso
+        d = e.get(0x9003) or ex.get(0x0132)
+        if d:
+            ph.when = dt.datetime.strptime(str(d).strip("\x00 "), "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        pass
 
 
 def is_raw(path: str) -> bool:
@@ -219,21 +267,108 @@ def load_linear(path: str, half: bool, rebuild_highlights: bool = False) -> np.n
     if is_raw(path):
         if rawpy is None:
             raise RuntimeError("Falta la librería rawpy para leer RAW")
-        with rawpy.imread(path) as r:
-            hm = rawpy.HighlightMode.Reconstruct(4) if rebuild_highlights else rawpy.HighlightMode.Blend
-            kw = dict(use_camera_wb=True, no_auto_bright=True, output_bps=16, gamma=(1, 1),
-                      output_color=rawpy.ColorSpace.sRGB, highlight_mode=hm)
-            if half:
-                rgb = r.postprocess(half_size=True, **kw)
-            else:
-                rgb = r.postprocess(demosaic_algorithm=rawpy.DemosaicAlgorithm.DHT,
-                                    fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Full, **kw)
-        return rgb.astype(np.float32) / 65535.0
-    im = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+        if path not in PREVIEW_ONLY:
+            try:
+                return _develop_raw(path, half, rebuild_highlights)
+            except (MemoryError, FileNotFoundError, PermissionError):
+                raise
+            except Exception as e:  # cámara o compresión que LibRaw aún no conoce (p. ej. NEF «HE»)
+                x = _raw_preview(path, half)
+                if x is None:
+                    raise RuntimeError(f"Este RAW no se puede leer ({type(e).__name__}: {e}). "
+                                       "Prueba a convertirlo a DNG o a disparar en RAW+JPEG.") from e
+                PREVIEW_ONLY.add(path)
+                return x
+        x = _raw_preview(path, half)
+        if x is None:
+            raise RuntimeError("Este RAW no se puede leer ni tiene vista previa JPEG")
+        return x
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".tif", ".tiff", ".png"):  # 16 bits: sin pasar por 8 (Pillow los reduce)
+        x = _read_16bit(path, half)
+        if x is not None:
+            return x
+    im = ImageOps.exif_transpose(Image.open(path))
+    if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+        bg = Image.new("RGB", im.size, (255, 255, 255))  # lo transparente, en blanco (no en negro)
+        rgba = im.convert("RGBA")
+        bg.paste(rgba, mask=rgba.getchannel("A"))
+        im = bg
+    im = im.convert("RGB")
     if half and max(im.size) > 3200:
         im.thumbnail((3200, 3200), Image.LANCZOS)
     x = np.asarray(im, dtype=np.float32) / 255.0
+    return _to_linear(x)
+
+
+def _to_linear(x: np.ndarray) -> np.ndarray:
     return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4).astype(np.float32)
+
+
+def _develop_raw(path: str, half: bool, rebuild_highlights: bool) -> np.ndarray:
+    with rawpy.imread(path) as r:
+        hm = rawpy.HighlightMode.Reconstruct(4) if rebuild_highlights else rawpy.HighlightMode.Blend
+        kw = dict(use_camera_wb=True, no_auto_bright=True, output_bps=16, gamma=(1, 1),
+                  output_color=rawpy.ColorSpace.sRGB, highlight_mode=hm)
+        if half:
+            rgb = r.postprocess(half_size=True, **kw)
+        else:
+            pat = r.raw_pattern
+            bayer = pat is not None and pat.shape == (2, 2)  # X-Trans (Fuji), Foveon…: su propio revelado
+            extra = dict(demosaic_algorithm=rawpy.DemosaicAlgorithm.DHT,
+                         fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Full) if bayer else {}
+            rgb = r.postprocess(**extra, **kw)
+    return rgb.astype(np.float32) / 65535.0
+
+
+def _raw_preview(path: str, half: bool) -> np.ndarray | None:
+    """El JPEG que lleva el RAW, en lineal (para cámaras que LibRaw aún no revela). None si no hay o es pequeño."""
+    try:
+        with rawpy.imread(path) as r:
+            th = r.extract_thumb()
+        if th.format == rawpy.ThumbFormat.JPEG:
+            im = ImageOps.exif_transpose(Image.open(io.BytesIO(th.data))).convert("RGB")
+        else:
+            im = Image.fromarray(np.asarray(th.data)).convert("RGB")
+    except Exception:
+        return None
+    if max(im.size) < 1000:
+        return None
+    if half and max(im.size) > 3200:
+        im.thumbnail((3200, 3200), Image.LANCZOS)
+    return _to_linear(np.asarray(im, dtype=np.float32) / 255.0)
+
+
+def _read_16bit(path: str, half: bool) -> np.ndarray | None:
+    """TIFF o PNG de 16 bits por canal con toda su precisión (None si es de 8 bits o no se puede)."""
+    try:
+        a = cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_UNCHANGED)
+    except Exception:
+        return None
+    if a is None or a.dtype != np.uint16:
+        return None
+    if a.ndim == 2:
+        a = cv2.cvtColor(a, cv2.COLOR_GRAY2RGB)
+    elif a.shape[2] == 4:
+        al = a[..., 3:4].astype(np.float32) / 65535.0
+        a = a[..., 2::-1].astype(np.float32) * al + 65535.0 * (1 - al)
+    else:
+        a = a[..., 2::-1]
+    x = np.asarray(a, dtype=np.float32) / 65535.0
+    try:
+        with Image.open(path) as im:
+            o = (im.getexif() or {}).get(0x0112, 1)
+    except Exception:
+        o = 1
+    x = {2: lambda v: v[:, ::-1], 3: lambda v: v[::-1, ::-1], 4: lambda v: v[::-1],
+         5: lambda v: v.transpose(1, 0, 2), 6: lambda v: np.rot90(v, 3), 7: lambda v: np.rot90(v, 1)[::-1],
+         8: lambda v: np.rot90(v, 1)}.get(o, lambda v: v)(x)
+    x = np.ascontiguousarray(x)
+    if half and max(x.shape[:2]) > 3200:
+        f = 3200 / max(x.shape[:2])
+        x = cv2.resize(x, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+    # los TIFF/PNG de 16 bits suelen venir en sRGB codificado (Lightroom, Capture One, Photoshop)
+    return _to_linear(np.clip(x, 0, 1))
 
 
 def _luma(x: np.ndarray) -> np.ndarray:
@@ -786,6 +921,8 @@ def analyze(ph: Photo, st: Settings) -> Photo:
         fs = ph.face_sharp = face_sharpness(gray, faces)
         if faces and 0 < fs < 0.5 * ph.sharp:
             ph.warn = (ph.warn + " · " if ph.warn else "") + "La cara está menos nítida que el fondo"
+        if ph.path in PREVIEW_ONLY:
+            ph.warn = (ph.warn + " · " if ph.warn else "") + PREVIEW_WARN
         ph.feats = styles.scene_features(g, ph)
         if AI["ready"]:
             try:
@@ -1101,7 +1238,10 @@ def full_size(path: str) -> tuple[int, int]:
         return _SIZES[path]
     w = h = 0
     try:
-        if is_raw(path) and rawpy is not None:
+        if path in PREVIEW_ONLY:
+            x = _raw_preview(path, False)
+            h, w = x.shape[:2] if x is not None else (0, 0)
+        elif is_raw(path) and rawpy is not None:
             with rawpy.imread(path) as r:
                 s = r.sizes
                 w, h = s.width, s.height

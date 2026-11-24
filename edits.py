@@ -776,7 +776,7 @@ class EditsView(QWidget):
 
     def _pick_image(self):
         p, _ = QFileDialog.getOpenFileName(self, "Añadir imagen como capa", self.prefs.get("img_dir", ""),
-                                           "Imágenes (*.png *.jpg *.jpeg *.webp *.tif *.tiff *.bmp)")
+                                           E.file_filter(raw=False, label="Imágenes"))
         if p:
             self.prefs["img_dir"] = os.path.dirname(p)
             self._save_prefs()
@@ -1776,7 +1776,7 @@ class EditsView(QWidget):
         if not lay or lay["kind"] != "image":
             return
         p, _ = QFileDialog.getOpenFileName(self, "Cambiar imagen", self.prefs.get("img_dir", ""),
-                                           "Imágenes (*.png *.jpg *.jpeg *.webp *.tif *.tiff *.bmp)")
+                                           E.file_filter(raw=False, label="Imágenes"))
         if p:
             lay["path"] = EE.import_image(self.folder, p)
             lay["name"] = "Imagen: " + os.path.splitext(os.path.basename(p))[0]

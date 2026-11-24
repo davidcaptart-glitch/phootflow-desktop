@@ -64,7 +64,7 @@ KINDS = {"liquify": "Licuar", "retouch": "Retoque", "skin": "Piel", "light": "Oj
 OVERLAY = ("text", "logo")
 CLIPPABLE = ("adjust", "image", "paint")  # lo que puede ir recortado a una imagen o pintura
 CLIP_BASES = ("image", "paint")  # capas con píxeles propios: base de una máscara de recorte
-IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp")
+IMAGE_EXT = tuple(sorted(E.IMG_EXT))  # JPEG, PNG, TIFF, WebP, BMP, AVIF y HEIF (si está pillow-heif)
 CUTS = {"none": "No quitar el fondo", "color": "Logo o fondo liso (por color)",
         "object": "Objeto o producto (automático)", "person": "Persona (IA)"}
 PIXEL_ORDER = ("liquify", "retouch", "skin", "light", "portrait", "background", "adjust", "artistic", "image", "paint",
