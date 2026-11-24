@@ -81,6 +81,48 @@ class Formats(unittest.TestCase):
         self.assertIn("no se puede leer", ph.error)
 
 
+class HighEfficiencyNef(unittest.TestCase):
+    """RAW que LibRaw no revela (NEF «High Efficiency»): se convierte a DNG con el Adobe DNG Converter (simulado)."""
+
+    def setUp(self):
+        self.saved = (E.dng_converter, E._run_converter, E._develop_raw)
+        self.calls = []
+        real = E._develop_raw
+
+        def develop(path, half, rebuild):
+            if path.lower().endswith(".nef"):
+                raise RuntimeError("LibRawFileUnsupportedError")  # como con TicoRAW
+            return np.full((30, 40, 3), 0.2, np.float32) if path.endswith(".dng") else real(path, half, rebuild)
+
+        def convert(exe, src, out_dir, name):
+            self.calls.append(src)
+            with open(os.path.join(out_dir, name), "wb") as f:
+                f.write(b"DNG")
+
+        E.dng_converter, E._run_converter, E._develop_raw = (lambda: "conversor.exe"), convert, develop
+
+    def tearDown(self):
+        E.dng_converter, E._run_converter, E._develop_raw = self.saved
+        E._DNG_OF.clear()
+
+    def test_he_nef_is_converted_once_and_developed(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "DSC_0001.NEF")
+        with open(p, "wb") as f:
+            f.write(b"nef he")
+        x = E.load_linear(p, half=True)
+        self.assertEqual(x.shape, (30, 40, 3))
+        E.load_linear(p, half=False)
+        self.assertEqual(self.calls, [p])  # una sola conversión
+        self.assertNotIn(p, E.PREVIEW_ONLY)
+        dng = E._DNG_OF[p]
+        self.assertTrue(dng.startswith(os.path.join(d, ".phootflow", "dng")))
+        self.assertEqual(open(p, "rb").read(), b"nef he")  # el original, intacto
+        E._DNG_OF.clear()  # otra sesión: reutiliza el DNG de la caché
+        E.load_linear(p, half=True)
+        self.assertEqual(len(self.calls), 1)
+
+
 class Splash(unittest.TestCase):
     def setUp(self):
         self.lin = E._to_linear(card().astype(np.float32) / 255)

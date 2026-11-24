@@ -2309,6 +2309,7 @@ class Main(QMainWindow):
     def on_done(self, msg, link):
         self.worker = None
         self._progress_end(msg, ok="cancelad" not in msg)
+        QTimer.singleShot(0, self._warn_dng)
         resume, self._resume = self._resume, False
         if getattr(self, "_review_after", False):
             self._review_after = False
@@ -2333,6 +2334,26 @@ class Main(QMainWindow):
             self.on_update_found(self.pending_update, False)
         if resume:
             self._after_resume()
+
+    def _warn_dng(self):
+        """RAW que LibRaw no revela (NEF «High Efficiency»…) y sin Adobe DNG Converter: se avisa una vez por carpeta."""
+        n = sum(1 for p in self.photos if p.path in E.PREVIEW_ONLY)
+        key = self.src.text()
+        if not n or E.dng_converter() or key in self.__dict__.setdefault("_dng_warned", set()):
+            return
+        self._dng_warned.add(key)
+        box = QMessageBox(self)
+        box.setWindowTitle(APP)
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"{n} RAW no se pueden revelar directamente (p. ej. NEF «High Efficiency» de las Nikon Z).")
+        box.setInformativeText("Ahora se usa la vista previa JPEG que lleva cada RAW. Instala el Adobe DNG Converter "
+                               "(gratis): PhootFlow los convertirá solo a DNG, sin tocar los originales, y se "
+                               "revelarán a calidad completa al exportar o al volver a analizar.")
+        get = box.addButton("Descargar el conversor", QMessageBox.AcceptRole)
+        box.addButton("Ahora no", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is get:
+            QDesktopServices.openUrl(QUrl(E.DNG_URL))
 
     def _after_resume(self):
         meta = E.review_meta(work_dir(self.out_dir()))

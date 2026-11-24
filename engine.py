@@ -12,6 +12,7 @@ import queue
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -49,7 +50,61 @@ RAW_EXT = {".arw", ".srf", ".sr2", ".cr2", ".cr3", ".crw", ".nef", ".nrw", ".raf
 IMG_EXT = {".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".tif", ".tiff", ".webp", ".bmp", ".avif"} | \
     ({".heic", ".heif", ".hif"} if HEIF else set())
 PREVIEW_ONLY: set = set()  # RAW que LibRaw no sabe revelar: se trabaja con el JPEG grande que lleva dentro
-PREVIEW_WARN = "RAW no compatible: se edita su vista previa JPEG"
+PREVIEW_WARN = ("RAW no compatible (p. ej. NEF «High Efficiency»): se edita su vista previa JPEG. Instala el "
+                "Adobe DNG Converter (gratis) y se revelará a calidad completa")
+DNG_URL = "https://helpx.adobe.com/camera-raw/using/adobe-dng-converter.html"
+_DNG_OF: dict = {}       # RAW que LibRaw no revela -> su DNG convertido (caché en <carpeta>/.phootflow/dng)
+_DNG_LOCKS: dict = {}
+_DNG_GUARD = threading.Lock()
+_DNG_EXE: list = []      # ruta del conversor, buscada una vez
+
+
+def dng_converter() -> str:
+    """Ruta del Adobe DNG Converter (gratuito; lee los NEF «High Efficiency», CR3 nuevos…) o "" si no está."""
+    if not (_DNG_EXE and _DNG_EXE[0]):  # si no estaba, se vuelve a mirar (por si se instala con la app abierta)
+        _DNG_EXE.clear()
+        cands = [os.environ.get("PHOOTFLOW_DNG_CONVERTER", "")]
+        for base in (os.environ.get("ProgramFiles", r"C:\Program Files"), os.environ.get("ProgramFiles(x86)", ""),
+                     os.environ.get("LOCALAPPDATA", "")):
+            if base:
+                cands.append(os.path.join(base, "Adobe", "Adobe DNG Converter", "Adobe DNG Converter.exe"))
+        _DNG_EXE.append(next((c for c in cands if c and os.path.isfile(c)), ""))
+    return _DNG_EXE[0]
+
+
+def _run_converter(exe: str, src: str, out_dir: str, out_name: str) -> None:
+    """DNG 1.4 sin pérdida (sin JPEG XL, que LibRaw no siempre lee) y con vista previa media."""
+    subprocess.run([exe, "-c", "-dng1.4", "-p1", "-d", out_dir, "-o", out_name, src], timeout=600,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def converted_dng(path: str) -> str:
+    """DNG del RAW `path` hecho con el Adobe DNG Converter (caché; el original no se toca). "" si no se puede."""
+    exe = dng_converter()
+    if not exe:
+        return ""
+    with _DNG_GUARD:
+        lock = _DNG_LOCKS.setdefault(os.path.normcase(path), threading.Lock())
+    with lock:  # análisis y exportación en paralelo: se convierte una sola vez
+        stem = os.path.splitext(os.path.basename(path))[0]
+        name = f"{stem}_{hashlib.sha1(os.path.normcase(path).encode()).hexdigest()[:6]}.dng"
+        dirs = [os.path.join(os.path.dirname(path), ".phootflow", "dng"),
+                os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "PhootFlow", "dng")]
+        for d in dirs:
+            out = os.path.join(d, name)
+            if os.path.isfile(out) and os.path.getsize(out) > 0 and os.path.getmtime(out) >= os.path.getmtime(path):
+                return out
+        for d in dirs:
+            try:
+                os.makedirs(d, exist_ok=True)
+                out = os.path.join(d, name)
+                _run_converter(exe, path, d, name)
+                if os.path.isfile(out) and os.path.getsize(out) > 0:
+                    return out
+            except Exception:
+                continue
+    return ""
 
 
 def file_filter(raw: bool = True, label: str = "Fotos") -> str:
@@ -267,16 +322,28 @@ def load_linear(path: str, half: bool, rebuild_highlights: bool = False) -> np.n
     if is_raw(path):
         if rawpy is None:
             raise RuntimeError("Falta la librería rawpy para leer RAW")
+        if path in _DNG_OF:
+            return _develop_raw(_DNG_OF[path], half, rebuild_highlights)
+        if path in PREVIEW_ONLY and dng_converter():  # el conversor se instaló después: a calidad completa
+            PREVIEW_ONLY.discard(path)
         if path not in PREVIEW_ONLY:
             try:
                 return _develop_raw(path, half, rebuild_highlights)
             except (MemoryError, FileNotFoundError, PermissionError):
                 raise
             except Exception as e:  # cámara o compresión que LibRaw aún no conoce (p. ej. NEF «HE»)
+                dng = converted_dng(path)  # con el Adobe DNG Converter, a calidad completa
+                if dng:
+                    try:
+                        x = _develop_raw(dng, half, rebuild_highlights)
+                        _DNG_OF[path] = dng
+                        return x
+                    except Exception:
+                        pass
                 x = _raw_preview(path, half)
                 if x is None:
                     raise RuntimeError(f"Este RAW no se puede leer ({type(e).__name__}: {e}). "
-                                       "Prueba a convertirlo a DNG o a disparar en RAW+JPEG.") from e
+                                       "Instala el Adobe DNG Converter (gratis) y PhootFlow lo convertirá solo.") from e
                 PREVIEW_ONLY.add(path)
                 return x
         x = _raw_preview(path, half)
@@ -1242,7 +1309,7 @@ def full_size(path: str) -> tuple[int, int]:
             x = _raw_preview(path, False)
             h, w = x.shape[:2] if x is not None else (0, 0)
         elif is_raw(path) and rawpy is not None:
-            with rawpy.imread(path) as r:
+            with rawpy.imread(_DNG_OF.get(path, path)) as r:
                 s = r.sizes
                 w, h = s.width, s.height
                 if s.flip in (5, 6):

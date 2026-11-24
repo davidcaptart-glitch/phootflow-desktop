@@ -28,7 +28,9 @@ python -m unittest discover -s tests   # 129 pruebas, sin fotos reales ni red
   Caché de análisis y reanudación en `<salida>/.phootflow/` (`save_session`/`load_session`, `exportadas.txt`).
   Formatos (`RAW_EXT`, `IMG_EXT`, `file_filter`): RAW de todas las marcas que lee LibRaw, JPEG, PNG, TIFF (16 bits
   sin pasar por 8, `_read_16bit`), WebP, BMP, AVIF y HEIC/HIF (`pillow-heif`, opcional: `HEIF`). Un RAW que LibRaw
-  no revela (cámara nueva, NEF «HE») se trabaja con su JPEG incrustado (`PREVIEW_ONLY`, aviso `PREVIEW_WARN`).
+  no revela (NEF «High Efficiency»/TicoRAW, cámaras nuevas) se convierte con el Adobe DNG Converter si está
+  instalado (`dng_converter`, `converted_dng`: DNG 1.4 en `<carpeta>/.phootflow/dng`, `_DNG_OF`); si no, se usa su JPEG
+  incrustado (`PREVIEW_ONLY`, aviso `PREVIEW_WARN`, y `Main._warn_dng` ofrece descargarlo).
   Salida: `Entrega/Color` y `Entrega/Blanco y negro` (`<foto>.jpg`, tamaño de entrega = max; `delivery_path`,
   `save_delivery`), `Otros tamaños/<n> px/…` y `Formatos/<proporción>/`. Edits sustituye la foto en Entrega/Color.
 - `session_file.py` — «<sesión>.phootflow» en la carpeta de la sesión (JSON, salida relativa): con doble clic abre
