@@ -40,15 +40,17 @@ En la rejilla: clic para ver la foto en grande con el recorte marcado; **P** con
 
 ```
 Sesión/
-├── Descartadas/            originales apartados (nunca se borran)
-├── DSC0001.xmp             (opcional) ajustes para Lightroom, solo si no existía ya uno
+├── Sesión.phootflow        doble clic: abre PhootFlow con esta sesión (revisión y retoques incluidos)
+├── Originales.zip          originales conservados (RAW + XMP), sin pérdida
+├── Descartadas/            originales apartados (o, con «Borrar las descartadas», borrados para siempre)
+├── DSC0001.ARW …           (con «Quitar los RAW tras el ZIP» van a la Papelera; «Recuperar sesión» los saca del ZIP)
 └── Editadas/
-    ├── Sugeridas/          cada foto en su formato sugerido
+    ├── Entrega/            lo que se manda al cliente, con el nombre de la foto (DSC0001.jpg)
+    │   ├── Color/          cada foto en su formato sugerido (o el recorte de Studio)
+    │   └── Blanco y negro/ (opcional) blanco y negro editorial
+    ├── Otros tamaños/1080 px/ …  los tamaños que no son el de entrega
     ├── Formatos/4x5/ …     los demás formatos que marques
-    ├── ByN/                (opcional) blanco y negro editorial
-    ├── Originales.zip      originales conservados, sin pérdida
-    ├── informe.csv         estado, motivo, ajustes y avisos de cada foto
-    └── .phootflow/         análisis guardado para reanudar (se puede borrar)
+    └── informe.csv         estado, motivo, ajustes y avisos de cada foto
 ```
 
 ## Estilos
@@ -121,8 +123,8 @@ visibilidad, opacidad y orden:
 Lienzo con zoom (rueda, doble clic 100 %, Ctrl+0 encajar; mano con el botón central o la barra espaciadora),
 antes/después (`\` y Y), historial con deshacer y rehacer (Ctrl+Z / Ctrl+Y). Nada toca el original: el trabajo
 se guarda en `.phootflow/edits/<foto>.json` y se exporta a la carpeta **Edits** en JPG, TIFF de 16 bits o PNG.
-Desde la revisión de Events, «Aprobar y volver a Events» hace que la exportación de Events añada la foto
-retocada en «Sugeridas» (`<foto>_edits_<tamaño>.jpg`).
+Desde la revisión de Events, «Aprobar y volver a Events» hace que la exportación de Events entregue la foto
+retocada en «Entrega/Color» en lugar de la edición automática.
 
 ### Máscaras (Studio)
 

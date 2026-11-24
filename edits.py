@@ -3722,7 +3722,7 @@ class EditsView(QWidget):
             return False
         self._events_cb = (on_use, on_back)
         self.banner_txt.setText(f"<b>Retocando {os.path.basename(path)} para Events.</b> Al aprobar, la exportación "
-                                "de Events añade esta foto retocada en «Sugeridas».")
+                                "de Events entrega esta foto retocada (en «Entrega»).")
         self.banner_wrap.show()
         return True
 

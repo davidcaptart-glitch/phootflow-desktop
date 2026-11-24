@@ -2177,7 +2177,7 @@ def events_todo(photos, folder: str) -> list:
 
 
 def export_for_events(photos, folder: str, out_dir: str, sizes, quality: int, progress=None) -> int:
-    """Exporta en «Sugeridas» las fotos aprobadas que tienen retoque de Edits (además de la edición normal)."""
+    """Exporta las fotos aprobadas con retoque de Edits en «Entrega/Color»: sustituye a la edición normal."""
     docs = pending_events(folder)
     todo = [p for p in photos if p.keep and os.path.normcase(p.path) in docs]
     n = 0
@@ -2188,7 +2188,7 @@ def export_for_events(photos, folder: str, out_dir: str, sizes, quality: int, pr
             side = None if size == "max" else int(size)
             try:
                 export(folder, p.path, docs[os.path.normcase(p.path)],
-                       os.path.join(out_dir, "Sugeridas", f"{p.name}_edits_{size}.jpg"), "jpg", quality, side)
+                       E.delivery_path(out_dir, p.name, size, False, sizes), "jpg", quality, side)
                 n += 1
             except Exception as e:
                 p.error = f"{type(e).__name__}: {e}"

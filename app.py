@@ -18,10 +18,11 @@ from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QImage, QKeyS
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                                QFileDialog,
                                QFrame, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget,
-                               QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QPushButton, QScrollArea,
+                               QListWidgetItem, QMainWindow, QMessageBox, QProgressBar, QProgressDialog, QPushButton, QScrollArea,
                                QSizePolicy, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
 
 import drive as gdrive
+import session_file as SF
 import compare as CMP
 import zoomview as Z
 import engine as E
@@ -140,6 +141,7 @@ class Worker(QThread):
         self.progress.emit(0, max(todo, 1), f"Analizando {todo} fotos{extra}…")
         E.analyze_many(self.photos, self.st, self.st.workers, on_done, lambda: self.cancel)
         E.save_session(self.photos, self.st, wd)
+        self._write_session_file()
         if self.cancel:
             return "Análisis cancelado (lo analizado se guarda para la próxima vez)."
         detected = ""
@@ -163,6 +165,13 @@ class Worker(QThread):
         return detected + f"Análisis: {keep} para editar, {n - keep} descartadas" + \
             (f", {warn} con avisos." if warn else ".") + saved
 
+    def _write_session_file(self):
+        """Deja «<sesión>.phootflow» en la carpeta: con doble clic vuelve a abrir esta sesión."""
+        try:
+            SF.write(self.src, self.out, __version__)
+        except OSError:
+            pass
+
     def _export_plan(self, counts) -> list:
         """Pasos de la exportación para el panel de progreso (los que no tocan se marcan «no hace falta»)."""
         c = counts or {}
@@ -177,8 +186,12 @@ class Worker(QThread):
             plan.append(("cloud", "Subir a Google Drive", None))
         elif kind == 2:
             plan.append(("cloud", "Copiar a la carpeta sincronizada", None))
-        if self.st.move_discards:
+        if self.st.delete_discards:
+            plan.append(("delete", "Borrar para siempre las descartadas", None))
+        elif self.st.move_discards:
             plan.append(("discards", "Mover las descartadas a «Descartadas»", None))
+        if self.st.archive_originals and self.st.trash_originals:
+            plan.append(("trash", "Mandar los RAW del ZIP a la Papelera", None))
         return plan
 
     def export(self, prefix: str = ""):
@@ -258,7 +271,8 @@ class Worker(QThread):
             self.step.emit("zip", "active", "")
             self.progress.emit(0, 0, "Comprimiendo originales…")
             zip_path = E.archive_originals(
-                self.photos, self.out, lambda a, b: self.progress.emit(a, b, f"Comprimiendo originales ({a}/{b})"))
+                self.photos, self.out, lambda a, b: self.progress.emit(a, b, f"Comprimiendo originales ({a}/{b})"),
+                src_dir=self.src)
             self.step.emit("zip", "done", os.path.basename(zip_path) if zip_path else "")
         elif self.st.archive_originals:
             self.step.emit("zip", "skip", "")
@@ -267,16 +281,45 @@ class Worker(QThread):
         link = self.upload(zip_path)
         if self.cloud.get("kind", 0) in (1, 2):
             self.step.emit("cloud", "done", "enlace copiado" if link else "")
-        if self.st.move_discards:
+        move = self.st.move_discards and not self.st.delete_discards
+        if move:
             self.step.emit("discards", "active", "")
-        moved = E.move_discards(self.photos, self.src) if self.st.move_discards else 0
-        if self.st.move_discards:
+        moved = E.move_discards(self.photos, self.src) if move else 0
+        if move:
             self.step.emit("discards", "done", f"{moved} archivos")
+        trashed = left = 0
+        if self.st.archive_originals and self.st.trash_originals:
+            if zip_path:
+                self.step.emit("trash", "active", "")
+                try:
+                    trashed, left = E.trash_archived_originals(
+                        self.photos, zip_path,
+                        lambda a, b: self.progress.emit(a, b, f"Comprobando el ZIP antes de quitar los RAW ({a}/{b})"))
+                    self.step.emit("trash", "done", f"{trashed} archivos" + (f", {left} se quedan" if left else ""))
+                except Exception as e:
+                    left = -1
+                    self.step.emit("trash", "error", f"{type(e).__name__}: {e}")
+            else:
+                self.step.emit("trash", "skip", "")
+        deleted = freed = 0
+        if self.st.delete_discards:
+            self.step.emit("delete", "active", "")
+            deleted, freed = E.delete_discards(self.photos, self.src)
+            self.step.emit("delete", "done", f"{deleted} archivos · {freed / 1e9:.1f} GB")
+        self._write_session_file()
         errs = sum(1 for p in keep if p.error)
         msg = prefix + f"Listo: {len(keep) - errs} fotos editadas ({files} archivos JPG nuevos) en " \
                        f"{_fmt_time(time.time() - t0)}."
         if moved:
             msg += f" {moved} originales descartados movidos a «Descartadas»."
+        if deleted:
+            msg += f" {deleted} originales descartados borrados ({freed / 1e9:.1f} GB liberados)."
+        if trashed:
+            msg += f" {trashed} originales a la Papelera (están en Originales.zip)."
+        if left > 0:
+            msg += f" {left} originales no coincidían con el ZIP y se han dejado."
+        elif left < 0:
+            msg += " No se han quitado los RAW: falló el paso a la Papelera."
         if errs:
             msg += f" {errs} fotos fallaron (ver informe.csv)."
         self.done.emit(msg, link)
@@ -284,7 +327,7 @@ class Worker(QThread):
     def upload(self, zip_path) -> str:
         kind = self.cloud.get("kind", 0)
         session = os.path.basename(os.path.normpath(self.src))
-        tree = [(r, f) for sub in ("Sugeridas", "Formatos", "ByN") for r, _, fs in os.walk(os.path.join(self.out, sub))
+        tree = [(r, f) for sub in E.OUTPUT_DIRS for r, _, fs in os.walk(os.path.join(self.out, sub))
                 for f in fs]
         if kind == 2:  # carpeta local que sincroniza otra aplicación
             dest = os.path.join(self.cloud["folder"], session)
@@ -854,7 +897,7 @@ class Main(QMainWindow):
                               ("1080", "1080 px", "1080 px de ancho (redes)")]:
             self.size_cb[k] = UI.as_chip(QCheckBox(label), tip=tip)
         self.c_bw = UI.as_chip(QCheckBox("Versión B/N"), "bw",
-                               "Además del color, una versión B/N de catálogo en «ByN/»: mezcla pensada para la piel,\n"
+                               "Además del color, una versión B/N de catálogo en «Entrega/Blanco y negro»: mezcla pensada para la piel,\n"
                                "contraste local, negros densos sin empastar, blancos limpios y grano fino.")
         self.bw_style_cb = QComboBox()
         self.bw_style_cb.addItems(list(E.BW_STYLES))
@@ -865,6 +908,14 @@ class Main(QMainWindow):
                                 "Exposición, giro, recorte y reducción de ruido; los descartes como «rechazadas».\n"
                                 "Nunca sobrescribe un XMP que ya exista.")
         self.c_zip = UI.as_chip(QCheckBox("ZIP de originales"), "archive", "Guardar los originales en un ZIP sin pérdida")
+        self.c_trash = UI.as_chip(QCheckBox("Quitar los RAW tras el ZIP"), "archive",
+                                  "Libera espacio: cuando el ZIP está hecho y comprobado foto a foto (tamaño y CRC),\n"
+                                  "los originales conservados van a la Papelera de reciclaje (se pueden restaurar).\n"
+                                  "Las descartadas no se tocan. «Recuperar sesión» los saca del ZIP para volver a editar.")
+        self.c_zip.toggled.connect(self.c_trash.setEnabled)
+        self.c_del_disc = UI.as_chip(QCheckBox("Borrar las descartadas"), "trash",
+                                     "Al terminar la exportación, las descartadas se borran PARA SIEMPRE (no van al ZIP\n"
+                                     "ni a la Papelera), también lo que haya en «Descartadas». Se pide confirmación.")
         self.c_review = UI.as_chip(QCheckBox("Revisar antes de exportar"), "review",
                                    "Antes de exportar se abre la revisión: aprobar/rechazar, ver B/N, recortes y\n"
                                    "retocar en Studio las que no convenzan.")
@@ -992,7 +1043,7 @@ class Main(QMainWindow):
         cv.addWidget(labeled("Fotos a la vez", self.workers))
         self.sheet.add(c)
         c, cv = card("Al exportar")
-        cv.addWidget(UI.flow([self.c_review, self.c_move, self.c_exif, self.c_xmp, self.c_zip]))
+        cv.addWidget(UI.flow([self.c_review, self.c_move, self.c_exif, self.c_xmp, self.c_zip, self.c_trash, self.c_del_disc]))
         self.sheet.add(c)
         c, cv = card("Nube")
         cv.addWidget(self.cloud)
@@ -1268,6 +1319,9 @@ class Main(QMainWindow):
         self.c_eyes.setChecked(b("eyes", False))
         self.style_cb.setCurrentText(g("style", S.AUTO))
         self.c_zip.setChecked(b("zip", True))
+        self.c_trash.setChecked(b("trash_orig", False))
+        self.c_trash.setEnabled(self.c_zip.isChecked())
+        self.c_del_disc.setChecked(b("del_disc", False))
         self.c_review.setChecked(b("review", True))
         self.c_up_orig.setChecked(b("up_orig", True))
         self.q.setValue(int(g("quality", 95)))
@@ -1283,7 +1337,7 @@ class Main(QMainWindow):
                      ("orig", st.export_original_ratio), ("exif", st.keep_exif), ("xmp", st.write_xmp), ("bw", st.bw), ("bw_style", st.bw_style), ("look", st.look),
                      ("uniform", st.uniform), ("cam", st.camera_look), ("eyes", st.cull_eyes),
                      ("style", self.style_cb.currentText()),
-                     ("zip", st.archive_originals), ("review", self.c_review.isChecked()), ("up_orig", self.c_up_orig.isChecked()),
+                     ("zip", st.archive_originals), ("trash_orig", self.c_trash.isChecked()), ("del_disc", self.c_del_disc.isChecked()), ("review", self.c_review.isChecked()), ("up_orig", self.c_up_orig.isChecked()),
                      ("quality", st.quality), ("workers", st.workers),
                      ("cloud", self.cloud.currentIndex()), ("cloud_folder", self.cloud_folder.text())]:
             self.s.setValue(k, v)
@@ -1313,7 +1367,9 @@ class Main(QMainWindow):
             export_original_ratio=self.r_orig.isChecked(),
             sizes=[k for k, c in self.size_cb.items() if c.isChecked()] or ["max"],
             quality=self.q.value(), move_discards=self.c_move.isChecked(),
-            archive_originals=self.c_zip.isChecked(), keep_exif=self.c_exif.isChecked(),
+            archive_originals=self.c_zip.isChecked(),
+            trash_originals=self.c_zip.isChecked() and self.c_trash.isChecked(),
+            delete_discards=self.c_del_disc.isChecked(), keep_exif=self.c_exif.isChecked(),
             write_xmp=self.c_xmp.isChecked(), workers=self.workers.value(), bw=self.c_bw.isChecked(),
             bw_style=self.bw_style_cb.currentText(), look=self.look_cb.currentText(),
             cache_dir=os.path.join(work_dir(self.out_dir()), "previas"), resume=True)
@@ -1577,14 +1633,24 @@ class Main(QMainWindow):
         ph = self.cur
         self.p_title.setText(ph.name)
         bits = []
-        if ph.iso:
-            bits.append(f"ISO {ph.iso}")
         if ph.thumb:
             bits.append(f"{ph.faces} cara(s)")
             bits.append(f"nitidez {ph.sharp:.3f}")
         state = ph.error or ph.reason or ("Para editar" if ph.thumb else "Sin analizar")
         info = " · ".join(bits)
-        self.p_info.setText(f"{state}{'  —  ' + info if info else ''}" + (f"\n⚠ {ph.warn}" if ph.warn else ""))
+        shot = E.shot_info(ph)
+        lines = [f"{state}{'  —  ' + info if info else ''}"]
+        if shot.get("fecha"):
+            lines.append(f"📅 {shot['fecha']}  ·  {shot.get('hora', '')}")
+        gear = " · ".join(shot[k] for k in ("camara", "objetivo") if k in shot)
+        if gear:
+            lines.append(f"📷 {gear}")
+        params = " · ".join(shot[k] for k in ("velocidad", "apertura", "iso", "focal") if k in shot)
+        if params:
+            lines.append(params)
+        if ph.warn:
+            lines.append(f"⚠ {ph.warn}")
+        self.p_info.setText("\n".join(lines))
         for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut, self.p_bw, self.p_look):
             w.blockSignals(True)
         self.p_look.setCurrentText(ph.look or "Como la sesión")
@@ -1705,6 +1771,13 @@ class Main(QMainWindow):
         src = self.src.text().strip()
         if not os.path.isdir(src):
             return QMessageBox.warning(self, APP, "Elige primero la carpeta de la sesión.")
+        missing = E.archived_missing(src, self.out_dir())
+        if missing and QMessageBox.question(
+                self, APP, f"{len(missing)} originales de esta sesión están guardados en «Originales.zip» "
+                           "pero ya no en la carpeta (se quitaron para ahorrar espacio).\n\n"
+                           "¿Recuperarlos para poder volver a editarlas? Se conservan la revisión y los retoques.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes:
+            self.restore_session(ask=False)
         self.photos = E.list_photos(src)
         if not self.photos:
             return QMessageBox.information(self, APP, "No hay fotos RAW ni JPG en esa carpeta.")
@@ -1721,7 +1794,44 @@ class Main(QMainWindow):
         self.fill_grid()
         self._review_after = bool(auto and self.c_review.isChecked())
         mode = "analyze" if (not auto or self._review_after) else "auto"
+        if mode == "auto" and not self.confirm_delete_discards(self.settings(), known=False):
+            return
         self.run(Worker(mode, self.photos, self.settings(), src, self.out_dir(), cloud))
+
+    def restore_session(self, ask: bool = True) -> int:
+        """Saca de «Originales.zip» los RAW que se quitaron, para volver a editar la sesión."""
+        src = self.src.text().strip()
+        if not os.path.isdir(src):
+            QMessageBox.warning(self, APP, "Elige primero la carpeta de la sesión.")
+            return 0
+        missing = E.archived_missing(src, self.out_dir())
+        if not missing:
+            if ask:
+                QMessageBox.information(self, APP, "No falta ningún original: la sesión ya está completa.")
+            return 0
+        if ask and QMessageBox.question(
+                self, APP, f"¿Sacar de «Originales.zip» los {len(missing)} originales que faltan en la carpeta?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
+            return 0
+        dlg = QProgressDialog("Recuperando los originales del ZIP…", "", 0, len(missing), self)
+        dlg.setCancelButton(None)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+
+        def prog(a, b):
+            dlg.setValue(a)
+            QApplication.processEvents()
+        try:
+            n = E.restore_originals(src, self.out_dir(), prog)
+        except Exception as e:
+            dlg.close()
+            QMessageBox.warning(self, APP, f"No se pudieron recuperar los originales:\n{e}")
+            return 0
+        dlg.close()
+        if ask:
+            QMessageBox.information(self, APP, f"{n} originales recuperados. Pulsa «Analizar» para retomar la sesión: "
+                                               "la revisión y los retoques siguen ahí.")
+        return n
 
     def cloud_params(self):
         cloud = {"kind": self.cloud.currentIndex(), "folder": self.cloud_folder.text().strip(),
@@ -1738,10 +1848,30 @@ class Main(QMainWindow):
             return None
         return cloud
 
+    def confirm_delete_discards(self, st, known: bool = True) -> bool:
+        """Borrar las descartadas no tiene vuelta atrás: se pregunta cada vez, con cuántas y cuánto ocupan."""
+        if not st.delete_discards:
+            return True
+        if known:
+            files = E.discard_files(self.photos, self.src.text().strip())
+            if not files:
+                return True
+            gb = sum(os.path.getsize(p) for p in files) / 1e9
+            what = f"{len(files)} archivos de fotos descartadas ({gb:.1f} GB)"
+        else:
+            what = "las fotos que se descarten"
+        r = QMessageBox.warning(
+            self, APP, f"Al terminar se borrarán PARA SIEMPRE {what}, también lo que haya en «Descartadas».\n\n"
+                       "No van al ZIP ni a la Papelera: no se podrán recuperar. ¿Seguir?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return r == QMessageBox.Yes
+
     def start_export(self, reviewed: bool = False):
         if self.c_review.isChecked() and not reviewed:
             return self.open_review()
         st = self.settings()
+        if not self.confirm_delete_discards(st):
+            return
         cloud = self.cloud_params()
         if cloud is None:
             return
@@ -1788,19 +1918,20 @@ class Main(QMainWindow):
                                    "Guardar el trabajo (Ctrl+S). Autoguardado: " +
                                    ("activado" if self.autosave else "desactivado (menú ⚙)"))
 
-    def open_session(self, folder: str):
+    def open_session(self, folder: str, out: str = ""):
         """Abre una carpeta. Si ya tiene trabajo guardado lo recupera tal cual, sin pulsar «Analizar»: tus
         aprobadas y rechazadas, recortes y looks; y si estabas revisando, vuelve a esa foto."""
         if not self.ask_save():
             return
         self.src.setText(folder)
-        self.out.setText("")
+        default = os.path.normcase(os.path.normpath(os.path.join(folder, "Editadas")))
+        self.out.setText("" if not out or os.path.normcase(os.path.normpath(out)) == default else out)
         self.photos, self.cur, self.dirty = [], None, False
         self.fill_grid()
         self.refresh_counts()
         self.h1.setText(os.path.basename(os.path.normpath(folder)))
         self.sub.setText(folder)
-        if E.has_saved_work(work_dir(self.out_dir())):
+        if E.has_saved_work(work_dir(self.out_dir())) or E.archived_missing(folder, self.out_dir()):
             self._resume = True
             self.status.setText("Recuperando el trabajo guardado de esta sesión…")
             self.start_analyze(False)
@@ -2207,6 +2338,8 @@ class Shell(QMainWindow):
                  lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(ev.out_dir()))),
                 ("sliders", "Ajustes de la sesión", "configuracion grano exposicion calidad lightroom xmp zip nube",
                  in_events(ev.open_settings)),
+                ("archive", "Recuperar sesión desde el ZIP", "originales raw descomprimir restaurar volver editar",
+                 in_events(ev.restore_session)),
                 ("bw", "Versión en blanco y negro (activar / desactivar)", "b/n byn bn", in_events(ev.c_bw.toggle)),
                 ("lut", "Importar LUT…", "cube color", in_events(ev.import_luts)),
                 ("wand", "Aprender mi estilo…", "preset aprender", in_events(ev.learn_style)),
@@ -2221,6 +2354,17 @@ class Shell(QMainWindow):
             if os.path.normcase(p.path) == os.path.normcase(path):
                 return p
         return None
+
+    def open_session_file(self, path: str):
+        """Abre la sesión de un archivo «.phootflow» (doble clic en el Explorador) o de una carpeta."""
+        try:
+            src, out = SF.read(path) if os.path.isfile(path) else (os.path.normpath(path), "")
+        except (OSError, ValueError) as e:
+            return QMessageBox.warning(self, APP, f"No se pudo abrir la sesión:\n{e}")
+        self.folder = src
+        self.switch(ENV_EVENTS)
+        self.events.open_session(src, out)
+        self.events.save()
 
     def open_folder(self):
         d = QFileDialog.getExistingDirectory(self, "Elegir carpeta de la sesión", self.folder)
@@ -2450,6 +2594,13 @@ def main():
         sys.exit(0)
     m = Shell()
     m.show()
+    try:
+        SF.register()  # doble clic en «<sesión>.phootflow» abre la sesión
+    except OSError:
+        pass
+    arg = SF.session_arg(sys.argv)
+    if arg:
+        QTimer.singleShot(0, lambda: m.open_session_file(arg))
     LIC.watch(m)
     code = app.exec()
     del m

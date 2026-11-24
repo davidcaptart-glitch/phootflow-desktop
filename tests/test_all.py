@@ -127,11 +127,12 @@ class PhootFlowExtras(unittest.TestCase):
         ps[0].meta = {"make": "SONY", "model": "ILCE-6700", "iso": 3200, "date": "2026:11:15 22:10:00"}
         out = os.path.join(self.d, "out")
         n = E.export_many(ps, st, out, "9.9")
-        bw = [f for f in os.listdir(os.path.join(out, "ByN"))]
-        self.assertEqual(len(bw), 1)
-        a = np.asarray(Image.open(os.path.join(out, "ByN", bw[0])).convert("RGB")).astype(int)
+        bw_dir = os.path.join(out, "Entrega", "Blanco y negro")
+        self.assertEqual(os.listdir(bw_dir), ["a.jpg"])  # nombre limpio, sin coletillas
+        self.assertEqual(sorted(os.listdir(out)), [".phootflow", "Entrega", "Formatos"])  # nada de Sugeridas ni ByN
+        a = np.asarray(Image.open(os.path.join(bw_dir, "a.jpg")).convert("RGB")).astype(int)
         self.assertLess(np.abs(a[..., 0] - a[..., 2]).max(), 3)  # neutro
-        ex = Image.open(os.path.join(out, "Sugeridas", os.listdir(os.path.join(out, "Sugeridas"))[0])).getexif()
+        ex = Image.open(os.path.join(out, "Entrega", "Color", "a.jpg")).getexif()
         self.assertEqual(ex.get(0x0110), "ILCE-6700")
         self.assertIn("PhootFlow", ex.get(0x0131))
         self.assertEqual(E.export_many(ps, st, out, "9.9"), 0)  # reanudar: no repite lo hecho
@@ -346,10 +347,10 @@ class StylesPerPhoto(unittest.TestCase):
         E.analyze(ps[0], st)
         ps[0].bw_style = E.BW_NONE  # a esta foto no le va el B/N
         E.export(ps[0], st, os.path.join(d, "out"))
-        self.assertFalse(os.path.isdir(os.path.join(d, "out", "ByN")))
+        self.assertFalse(os.path.isdir(os.path.join(d, "out", "Entrega", "Blanco y negro")))
         ps[0].bw_style = "Selenio"
         E.export(ps[0], st, os.path.join(d, "out"))
-        self.assertTrue(os.listdir(os.path.join(d, "out", "ByN")))
+        self.assertTrue(os.listdir(os.path.join(d, "out", "Entrega", "Blanco y negro")))
 
 
 class Masks(unittest.TestCase):
@@ -396,6 +397,117 @@ class ReviewFlow(unittest.TestCase):
         found = review.pending_studio_paths(d)
         self.assertEqual(list(found), [os.path.normcase(os.path.join(d, "a.jpg"))])
         self.assertEqual(found[os.path.normcase(os.path.join(d, "a.jpg"))]["exposure"], 0.4)
+
+    def test_studio_photo_exports_formats_and_bw_like_events(self):
+        """Las retocadas en Studio salen como las demás: color y B/N en «Entrega», formatos extra aparte."""
+        import studio_engine as SE
+        d = tempfile.mkdtemp()
+        scene().save(os.path.join(d, "a.jpg"), quality=93)
+        st = E.Settings(ratios=["1:1", "4:5"], sizes=["max"], bw=True)
+        ph = E.list_photos(d)[0]
+        E.analyze(ph, st)
+        s = SE.new_settings(angle=6.0, crop=[0.1, 0.0, 0.9, 1.0], crop_ratio="4:5")
+        out = os.path.join(d, "out")
+        files = SE.export_events(ph, s, st, out)
+        names = {os.path.relpath(f, out).replace("\\", "/") for f in files}
+        self.assertIn("Entrega/Color/a.jpg", names)
+        self.assertIn("Formatos/Original/a_original_max.jpg", names)
+        self.assertIn("Formatos/1x1/a_1x1_max.jpg", names)
+        self.assertNotIn("Formatos/4x5/a_4x5_max.jpg", names)  # el 4:5 ya es el de Studio
+        self.assertIn("Entrega/Blanco y negro/a.jpg", names)
+        w, h = Image.open(os.path.join(out, "Entrega", "Color", "a.jpg")).size
+        self.assertAlmostEqual(w / h, 0.8, delta=0.01)  # el giro no deforma la proporción elegida
+
+    def test_trash_only_originals_that_match_the_zip(self):
+        """Quitar los RAW tras el ZIP: solo los conservados sin error y que el ZIP guarda idénticos."""
+        d = tempfile.mkdtemp()
+        out = os.path.join(d, "Editadas")
+        ps = []
+        for n in ("a", "b", "c", "x"):
+            with open(os.path.join(d, n + ".ARW"), "wb") as f:
+                f.write(os.urandom(5000))
+            ps.append(E.Photo(path=os.path.join(d, n + ".ARW"), name=n, keep=n != "x"))
+        z = E.archive_originals(ps, out)
+        with open(ps[1].path, "ab") as f:  # b cambia después del ZIP: ya no coincide
+            f.write(b"!")
+        ps[2].error = "falló la edición"  # c: se deja para poder repetirla
+        got = []
+        sent, left = E.trash_archived_originals(ps, z, trash=got.extend)
+        self.assertEqual([os.path.basename(p) for p in got], ["a.ARW"])
+        self.assertEqual((sent, left), (1, 1))
+        with open(z, "r+b") as f:  # ZIP dañado: no se toca nada
+            f.seek(200)
+            f.write(b"\0" * 64)
+        with self.assertRaises(Exception):
+            E.trash_archived_originals(ps, z, trash=got.extend)
+        self.assertEqual(len(got), 1)
+
+    def test_session_folder_zip_restore_and_discards(self):
+        """Carpeta final: Editadas + Originales.zip + «<sesión>.phootflow»; la sesión se recupera desde el ZIP."""
+        import session_file as SF
+        root = tempfile.mkdtemp()
+        d = os.path.join(root, "Boda Ana")
+        os.makedirs(os.path.join(d, "Descartadas"))
+        out = os.path.join(d, "Editadas")
+        ps = []
+        for n, keep in (("a", True), ("b", True), ("x", False)):
+            with open(os.path.join(d, n + ".ARW"), "wb") as f:
+                f.write(os.urandom(4000))
+            ps.append(E.Photo(path=os.path.join(d, n + ".ARW"), name=n, keep=keep))
+        with open(os.path.join(d, "a.xmp"), "w") as f:
+            f.write("<x/>")
+        with open(os.path.join(d, "Descartadas", "viejo.ARW"), "wb") as f:  # de una exportación anterior
+            f.write(b"0" * 100)
+        os.makedirs(out)
+        with zipfile.ZipFile(os.path.join(out, "Originales.zip"), "w") as z:  # ZIP de versiones anteriores
+            z.writestr("antiguo.ARW", b"1" * 50)
+        mt = os.stat(ps[0].path).st_mtime_ns
+        zp = E.archive_originals(ps, out, src_dir=d)
+        self.assertEqual(zp, os.path.join(d, "Originales.zip"))  # junto a «Editadas»
+        self.assertFalse(os.path.exists(os.path.join(out, "Originales.zip")))  # el viejo pasa al nuevo
+        with zipfile.ZipFile(zp) as z:
+            self.assertEqual(sorted(z.namelist()), ["a.ARW", "a.xmp", "antiguo.ARW", "b.ARW"])  # x no va
+        self.assertEqual(sorted(os.path.basename(p) for p in E.discard_files(ps, d)), ["viejo.ARW", "x.ARW"])
+        n, size = E.delete_discards(ps, d)
+        self.assertEqual((n, size), (2, 4100))
+        self.assertFalse(os.path.exists(os.path.join(d, "Descartadas")))
+        self.assertTrue(os.path.exists(ps[0].path))  # las conservadas no se tocan
+        sf = SF.write(d, out, "9.9")
+        self.assertEqual(os.path.basename(sf), "Boda Ana.phootflow")
+        self.assertEqual(SF.read(sf), (d, out))
+        self.assertEqual(SF.session_arg(["app.py", sf]), sf)
+        for p in (ps[0].path, ps[1].path, os.path.join(d, "a.xmp")):  # como si se hubieran quitado los RAW
+            os.remove(p)
+        self.assertEqual(sorted(os.listdir(d)), ["Boda Ana.phootflow", "Editadas", "Originales.zip"])
+        self.assertEqual(sorted(E.archived_missing(d, out)), ["a.ARW", "a.xmp", "antiguo.ARW", "b.ARW"])
+        self.assertEqual(E.restore_originals(d, out), 4)
+        self.assertEqual(os.stat(ps[0].path).st_mtime_ns, mt)  # misma fecha: el análisis guardado vale
+        self.assertEqual(E.archived_missing(d, out), [])
+
+    def test_shot_info_and_exif_from_saved_session(self):
+        """Velocidad, apertura y focal también salen en el JPG cuando la sesión se recupera de la caché."""
+        import io
+        ph = E.Photo(path="x.ARW", name="x", iso=2000)
+        ph.meta = {"make": "SONY", "model": "ILCE-6700", "lens": "16mm F1.4", "exposure": "[1/2500]",
+                   "fnumber": "[7/2]", "focal": "[16]", "date": "2026:11:07 21:38:20", "iso": 2000}
+        s = E.shot_info(ph)
+        self.assertEqual((s["velocidad"], s["apertura"], s["iso"], s["focal"]), ("1/2500 s", "f/3.5", "ISO 2000", "16 mm"))
+        self.assertEqual((s["camara"], s["fecha"], s["hora"]), ("SONY ILCE-6700", "07/11/2026", "21:38:20"))
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(buf, "JPEG", exif=E.build_exif(ph, "t"))
+        e = Image.open(io.BytesIO(buf.getvalue())).getexif().get_ifd(0x8769)
+        self.assertAlmostEqual(float(e[0x829A]), 1 / 2500)
+        self.assertAlmostEqual(float(e[0x829D]), 3.5)
+        self.assertAlmostEqual(float(e[0x920A]), 16.0)
+
+    def test_fit_ratio_keeps_center_and_bounds(self):
+        import studio_engine as SE
+        r = SE.fit_ratio([0.1, 0.0, 0.9, 1.0], "4:5", 1000, 600)  # 800×600 → 4:5 vertical (o 5:4)
+        w, h = (r[2] - r[0]) * 1000, (r[3] - r[1]) * 600
+        self.assertAlmostEqual(w / h, 1.25, delta=1e-6)
+        self.assertAlmostEqual((r[0] + r[2]) / 2, 0.5, delta=1e-6)
+        self.assertTrue(0 <= r[0] and r[2] <= 1 and 0 <= r[1] and r[3] <= 1)
+        self.assertEqual(SE.fit_ratio([0.1, 0.2, 0.5, 0.9], "Libre", 1000, 600), [0.1, 0.2, 0.5, 0.9])
 
 
 class Zoom(unittest.TestCase):
@@ -902,7 +1014,7 @@ class Edits(unittest.TestCase):
         ph.keep = True
         out_dir = os.path.join(d, "Editadas")
         self.assertEqual(EE.export_for_events([ph], d, out_dir, ["1080"], 90), 1)
-        self.assertTrue(os.path.exists(os.path.join(out_dir, "Sugeridas", "a_edits_1080.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(out_dir, "Entrega", "Color", "a.jpg")))  # 1080 = el de entrega
 
 
 class Graphics(unittest.TestCase):

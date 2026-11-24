@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 118 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 122 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -26,6 +26,14 @@ python -m unittest discover -s tests   # 118 pruebas, sin fotos reales ni red
   Haar de respaldo), avisos (ojos, cara blanda), rasgos de escena, recortes. `cull()` marca descartes.
   `export_many()` revela en paralelo (≈15 s/foto con 2 hilos) aplicando `Settings.style`.
   Caché de análisis y reanudación en `<salida>/.phootflow/` (`save_session`/`load_session`, `exportadas.txt`).
+  Salida: `Entrega/Color` y `Entrega/Blanco y negro` (`<foto>.jpg`, tamaño de entrega = max; `delivery_path`,
+  `save_delivery`), `Otros tamaños/<n> px/…` y `Formatos/<proporción>/`. Edits sustituye la foto en Entrega/Color.
+- `session_file.py` — «<sesión>.phootflow» en la carpeta de la sesión (JSON, salida relativa): con doble clic abre
+  PhootFlow en esa sesión (`SF.register()` asocia la extensión en HKCU al arrancar; `main()` lee el argumento y
+  `Shell.open_session_file`). Se escribe tras analizar y exportar y oculta las carpetas `.phootflow`.
+  `Originales.zip` va junto a «Editadas» (`E.originals_zip`; el de dentro de Editadas de versiones anteriores se
+  traslada), con RAW, JPG gemelo y XMP; `originales.json` guarda la fecha de cada uno para que `restore_originals`
+  los devuelva tal cual y el análisis valga («Recuperar sesión desde el ZIP», o se ofrece al abrir).
 - `styles.py` — presets por tipo de evento, `detect_scene()` heurístico, `apply_color()` y aprendizaje:
   `learn_style()` (parejas original↔edición, curva L por CDF + color) y `learn_from_finals()` (solo acabadas:
   distribución objetivo). Estilos en `%APPDATA%\PhootFlow\estilos\*.json`.
@@ -43,8 +51,8 @@ python -m unittest discover -s tests   # 118 pruebas, sin fotos reales ni red
 - `studio.py` / `studio_engine.py` — entorno **Studio** (tipo Lightroom): `StudioView` (biblioteca, lienzo con
   antes/después, histograma, paneles de sliders, historial, presets, exportar) y el revelado no destructivo
   `render(lin, ajustes)`. Ajustes por foto en `<carpeta>/.phootflow/studio/<foto>.json`. Las retocadas para
-  Events (`_events_override`) se exportan con `export_events`: recorte de Studio en Sugeridas (`_studio`), los
-  demás formatos en Formatos y B/N en ByN, como el resto; `fit_ratio` mantiene la proporción aunque cambie el giro. Proxy de 2048 px y
+  Events (`_events_override`) se exportan con `export_events`: recorte de Studio en Entrega, los
+  demás formatos en Formatos, como el resto; `fit_ratio` mantiene la proporción aunque cambie el giro. Proxy de 2048 px y
   borrador de 1024 px mientras se arrastra. `Shell` (app.py) aloja Events (`Main`) y Studio con el interruptor.
   Máscaras (`masks.py`): zonas en `m["parts"]` de cualquier tipo que suman, restan o intersecan (`build` combina,
   `build_one` una zona), `invert` por zona e `invert_all` para la máscara; color dentro de la máscara (HSL por
@@ -126,7 +134,11 @@ python -m unittest discover -s tests   # 118 pruebas, sin fotos reales ni red
 
 ## Reglas que no se rompen
 
-- Nunca borrar originales: los descartes se **mueven** a `Descartadas/`; el ZIP no toca los RAW.
+- Nunca borrar originales: los descartes se **mueven** a `Descartadas/`; el ZIP no toca los RAW. Única excepción,
+  opcional y desactivada por defecto («Quitar los RAW tras el ZIP», `trash_originals`): los conservados sin error
+  que el ZIP guarda idénticos (tamaño + CRC, `trash_archived_originals`) van a la **Papelera**, nunca borrado directo.
+  La otra, también opcional y con confirmación cada vez: «Borrar las descartadas» (`delete_discards`) borra para
+  siempre los originales descartados y lo que haya en `Descartadas/` (nunca los de una foto conservada).
 - Nada se mueve en el análisis. Los XMP nunca pisan uno existente.
 - No subir fotos reales al repositorio (es público). Las pruebas usan imágenes sintéticas.
 - No guardar credenciales en el repo (la clave secreta de Supabase va en `%APPDATA%\PhootFlow\admin.env`).

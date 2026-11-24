@@ -11,10 +11,12 @@ import os
 import queue
 import re
 import shutil
+import stat
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 
 import cv2
@@ -85,6 +87,8 @@ class Settings:
     quality: int = 95
     move_discards: bool = True
     archive_originals: bool = True
+    delete_discards: bool = False  # borrar para siempre las descartadas (no van al ZIP)
+    trash_originals: bool = False  # tras comprobar el ZIP, los RAW conservados van a la Papelera
     keep_exif: bool = True
     write_xmp: bool = False
     workers: int = 2
@@ -1298,13 +1302,60 @@ def _tag(ratio: str) -> str:
 
 
 def _rat(v):
+    """Racional EXIF desde lo que dé exifread (Ratio o lista) o desde la caché de la sesión ("[1/2500]", "7/2")."""
     try:
         v = v[0] if isinstance(v, (list, tuple)) else v
         if hasattr(v, "num"):
             return TiffImagePlugin.IFDRational(int(v.num), int(v.den) or 1)
+        if isinstance(v, str):
+            v = v.strip("[] ").split(",")[0].strip()
+            if "/" in v:
+                a, b = v.split("/", 1)
+                return TiffImagePlugin.IFDRational(int(a), int(b) or 1)
         return TiffImagePlugin.IFDRational(float(v))
     except Exception:
         return None
+
+
+def _num(v) -> float | None:
+    r = _rat(v)
+    try:
+        return float(r) if r is not None else None
+    except (ZeroDivisionError, ValueError, TypeError):
+        return None
+
+
+def shot_info(ph: "Photo") -> dict:
+    """Datos de la toma, ya en texto: cámara, objetivo, velocidad, apertura, ISO, focal y fecha y hora."""
+    m = ph.meta or {}
+    out = {}
+    cam = " ".join(str(m[k]).strip() for k in ("make", "model") if m.get(k))
+    if cam:
+        out["camara"] = cam
+    if m.get("lens"):
+        out["objetivo"] = str(m["lens"]).strip()
+    t = _num(m.get("exposure")) if m.get("exposure") is not None else None
+    if t:
+        out["velocidad"] = f"1/{round(1 / t)} s" if t < 0.4 else f"{t:g} s"
+    f = _num(m.get("fnumber")) if m.get("fnumber") is not None else None
+    if f:
+        out["apertura"] = f"f/{f:g}"
+    iso = ph.iso or m.get("iso")
+    if iso:
+        out["iso"] = f"ISO {iso}"
+    fl = _num(m.get("focal")) if m.get("focal") is not None else None
+    if fl:
+        out["focal"] = f"{fl:g} mm"
+    when = ph.when
+    if when is None and m.get("date"):
+        try:
+            when = dt.datetime.strptime(str(m["date"]), "%Y:%m:%d %H:%M:%S")
+        except ValueError:
+            when = None
+    if when:
+        out["fecha"] = f"{when:%d/%m/%Y}"
+        out["hora"] = f"{when:%H:%M:%S}"
+    return out
 
 
 def build_exif(ph: Photo, version: str = "") -> bytes:
@@ -1362,22 +1413,51 @@ def export(ph: Photo, st: Settings, out_dir: str, version: str = "") -> list[str
     for ratio in wanted:
         x0, y0, x1, y1 = ph.crops[ratio]
         c = img[int(round(y0 * H)):int(round(y1 * H)), int(round(x0 * W)):int(round(x1 * W))]
-        folder = os.path.join(out_dir, "Sugeridas") if ratio == ph.best else os.path.join(
-            out_dir, "Formatos", _tag(ratio))
-        written += save_sizes(c, folder, f"{ph.name}_{_tag(ratio) if ratio != 'Original' else 'original'}", st, exif)
+        if ratio == ph.best:
+            written += save_delivery(c, out_dir, ph.name, False, st, exif)
+        else:
+            written += save_sizes(c, os.path.join(out_dir, FORMATS_DIR, _tag(ratio)),
+                                  f"{ph.name}_{_tag(ratio) if ratio != 'Original' else 'original'}", st, exif)
     if st.bw and not st.style.get("bw") and photo_bw_style(ph, st) != BW_NONE:  # B/N del formato sugerido
         x0, y0, x1, y1 = ph.crops[ph.best]
         c = img[int(round(y0 * H)):int(round(y1 * H)), int(round(x0 * W)):int(round(x1 * W))]
         del img
         bw = bw_editorial(c, seed=ph.dhash & 0xFFFFFFFF, style=photo_bw_style(ph, st))
-        tag = _tag(ph.best) if ph.best != "Original" else "original"
-        written += save_sizes(bw, os.path.join(out_dir, "ByN"), f"{ph.name}_bn_{tag}", st, exif, sharpen=False)
+        written += save_delivery(bw, out_dir, ph.name, True, st, exif, sharpen=False)
     return written
 
 
+# Carpetas de salida: lo que se manda al cliente va en «Entrega» (Color y Blanco y negro, a tamaño de entrega
+# y con el nombre de la foto, sin coletillas); los demás tamaños y los formatos extra quedan fuera de ella.
+DELIVERY_DIR, COLOR_DIR, BW_DIR = "Entrega", "Color", "Blanco y negro"
+FORMATS_DIR, SIZES_DIR = "Formatos", "Otros tamaños"
+OUTPUT_DIRS = (DELIVERY_DIR, FORMATS_DIR, SIZES_DIR)
+
+
+def delivery_size(sizes) -> str:
+    """El tamaño que va en «Entrega»: el máximo si se exporta; si no, el primero elegido."""
+    return "max" if "max" in sizes or not sizes else sizes[0]
+
+
+def delivery_path(out_dir: str, name: str, size: str, bw: bool, sizes) -> str:
+    """`Entrega/Color/<foto>.jpg` (o «Blanco y negro»); otros tamaños en `Otros tamaños/<n> px/Color/…`."""
+    sub = BW_DIR if bw else COLOR_DIR
+    if size == delivery_size(sizes):
+        return os.path.join(out_dir, DELIVERY_DIR, sub, f"{name}.jpg")
+    return os.path.join(out_dir, SIZES_DIR, f"{size} px", sub, f"{name}.jpg")
+
+
+def save_delivery(c: np.ndarray, out_dir: str, name: str, bw: bool, st: Settings, exif: bytes = b"",
+                  sharpen: bool = True) -> list[str]:
+    """Guarda la versión de entrega (color o B/N) de una foto en cada tamaño elegido."""
+    return save_sizes(c, "", "", st, exif, sharpen,
+                      path_for=lambda size: delivery_path(out_dir, name, size, bw, st.sizes))
+
+
 def save_sizes(c: np.ndarray, folder: str, stem: str, st: Settings, exif: bytes = b"",
-               sharpen: bool = True) -> list[str]:
-    """Guarda `c` en cada tamaño elegido como `<carpeta>/<stem>_<tamaño>.jpg` (1080 = ancho; nunca amplía)."""
+               sharpen: bool = True, path_for=None) -> list[str]:
+    """Guarda `c` en cada tamaño elegido como `<carpeta>/<stem>_<tamaño>.jpg` (1080 = ancho; nunca amplía).
+    `path_for(tamaño)` da otra ruta en lugar de esa."""
     written = []
     for size in st.sizes:
         ch, cw = c.shape[:2]
@@ -1391,7 +1471,7 @@ def save_sizes(c: np.ndarray, folder: str, stem: str, st: Settings, exif: bytes 
             r = cv2.resize(c, (int(round(cw * s)), int(round(ch * s))), interpolation=cv2.INTER_AREA)
             if sharpen:
                 r = np.clip(r + (r - cv2.GaussianBlur(r, (0, 0), 0.6)) * 0.35, 0, 1)
-        p = os.path.join(folder, f"{stem}_{size}.jpg")
+        p = path_for(size) if path_for else os.path.join(folder, f"{stem}_{size}.jpg")
         _save(np.clip(r, 0, 1), p, st.quality, exif)
         written.append(p)
     return written
@@ -1662,29 +1742,241 @@ def write_report(photos: list[Photo], out_dir: str) -> str:
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         wr = csv.writer(f, delimiter=";")
         wr.writerow(["archivo", "estado", "motivo", "formato_sugerido", "exposicion_ev", "giro_grados",
-                     "nitidez", "iso", "caras", "aviso"])
+                     "nitidez", "iso", "caras", "aviso", "fecha", "hora", "camara", "objetivo", "velocidad",
+                     "apertura", "focal"])
         for p in photos:
+            s = shot_info(p)
             wr.writerow([os.path.basename(p.path), "conservada" if p.keep else "descartada",
                          p.reason or p.error, p.best, f"{p.ev:+.2f}", f"{p.angle:+.2f}", f"{p.sharp:.4f}",
-                         p.iso or "", p.faces, p.warn])
+                         p.iso or "", p.faces, p.warn] + [s.get(k, "") for k in
+                                                          ("fecha", "hora", "camara", "objetivo", "velocidad",
+                                                           "apertura", "focal")])
     return path
 
 
-def archive_originals(photos: list[Photo], out_dir: str, progress=None) -> str:
-    """Guarda los originales conservados en un ZIP sin pérdida y lo verifica. No toca los originales."""
+ZIP_NAME = "Originales.zip"
+
+
+def originals_zip(out_dir: str, src_dir: str = "") -> str:
+    """Dónde va «Originales.zip»: junto a «Editadas», en la carpeta de la sesión (si la salida está dentro de ella;
+    si no, dentro de la salida, para no mezclar sesiones)."""
+    if src_dir:
+        a, b = os.path.normcase(os.path.abspath(out_dir)), os.path.normcase(os.path.abspath(src_dir))
+        if a.startswith(b.rstrip("\\/") + os.sep):
+            return os.path.join(src_dir, ZIP_NAME)
+    return os.path.join(out_dir, ZIP_NAME)
+
+
+def _existing_zip(out_dir: str, src_dir: str = "") -> str:
+    """El ZIP de originales que hay: el de ahora o el de versiones anteriores (dentro de «Editadas»)."""
+    for p in (originals_zip(out_dir, src_dir), os.path.join(out_dir, ZIP_NAME)):
+        if os.path.exists(p):
+            return p
+    return ""
+
+
+def original_files(ph: Photo) -> list[str]:
+    """Archivos originales de una foto que existen: el RAW, su JPG gemelo y su XMP."""
+    xmp = os.path.splitext(ph.path)[0] + ".xmp"
+    return [p for p in [ph.path] + ph.extras + [xmp] if os.path.exists(p)]
+
+
+def archive_originals(photos: list[Photo], out_dir: str, progress=None, src_dir: str = "") -> str:
+    """Guarda los originales conservados (RAW, JPG gemelo y XMP) en un ZIP sin pérdida y lo verifica.
+    No toca los originales. Lo que ya estaba en un ZIP anterior y ya no está en disco pasa al nuevo."""
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "Originales.zip")
-    files = [p for ph in photos if ph.keep for p in [ph.path] + ph.extras if os.path.exists(p)]
+    path = originals_zip(out_dir, src_dir)
+    old_path = _existing_zip(out_dir, src_dir)
+    files = [p for ph in photos if ph.keep for p in original_files(ph)]
+    names = {os.path.basename(p) for p in files}
+    carry = []
+    if old_path:
+        try:
+            with zipfile.ZipFile(old_path) as old:
+                carry = [i for i in old.infolist() if i.filename not in names]
+        except zipfile.BadZipFile:
+            carry = []
+    manifest = _read_manifest(out_dir)
     tmp = path + ".tmp"
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as z:
         for i, p in enumerate(files):
             z.write(p, os.path.basename(p))
+            manifest[os.path.basename(p)] = os.stat(p).st_mtime_ns
             if progress:
                 progress(i + 1, len(files))
+        if carry:
+            with zipfile.ZipFile(old_path) as old:
+                for info in carry:
+                    with old.open(info) as src, z.open(info, "w", force_zip64=True) as dst:
+                        shutil.copyfileobj(src, dst, 1 << 20)
     with zipfile.ZipFile(tmp) as z:
         bad = z.testzip()
-        if bad or len(z.namelist()) != len(files):
+        if bad or len(z.namelist()) != len(files) + len(carry):
             os.remove(tmp)
             raise RuntimeError(f"El ZIP de originales no pasó la verificación ({bad})")
     os.replace(tmp, path)
+    if old_path and os.path.normcase(old_path) != os.path.normcase(path):
+        os.remove(old_path)  # el de antes, dentro de «Editadas»: todo su contenido ya está en el nuevo
+    _write_manifest(out_dir, manifest)
     return path
+
+
+def _manifest_path(out_dir: str) -> str:
+    return os.path.join(out_dir, ".phootflow", "originales.json")
+
+
+def _read_manifest(out_dir: str) -> dict:
+    """{archivo: mtime_ns} de los originales del ZIP: al recuperarlos vuelven con su fecha y el análisis sirve."""
+    try:
+        with open(_manifest_path(out_dir), encoding="utf-8") as f:
+            return dict(json.load(f))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_manifest(out_dir: str, m: dict) -> None:
+    os.makedirs(os.path.dirname(_manifest_path(out_dir)), exist_ok=True)
+    with open(_manifest_path(out_dir), "w", encoding="utf-8") as f:
+        json.dump(m, f, indent=0)
+
+
+def archived_missing(src_dir: str, out_dir: str) -> list[str]:
+    """Originales que están en `Originales.zip` pero ya no en la carpeta de la sesión (ni en Descartadas)."""
+    path = _existing_zip(out_dir, src_dir)
+    if not path:
+        return []
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return []
+    return [n for n in names if not os.path.exists(os.path.join(src_dir, n))
+            and not os.path.exists(os.path.join(src_dir, "Descartadas", n))]
+
+
+def restore_originals(src_dir: str, out_dir: str, progress=None) -> int:
+    """Recupera la sesión: saca del ZIP los originales que faltan en la carpeta, con su fecha de antes
+    (así el análisis, la revisión y los retoques de Studio/Edits guardados vuelven a valer). No pisa nada."""
+    missing = archived_missing(src_dir, out_dir)
+    if not missing:
+        return 0
+    manifest = _read_manifest(out_dir)
+    n = 0
+    with zipfile.ZipFile(_existing_zip(out_dir, src_dir)) as z:
+        for i, name in enumerate(missing):
+            dest = os.path.join(src_dir, name)
+            tmp = dest + ".part"
+            with z.open(name) as src, open(tmp, "wb") as dst:
+                shutil.copyfileobj(src, dst, 1 << 20)
+            os.replace(tmp, dest)
+            mt = manifest.get(name)
+            if mt is None:
+                mt = int(dt.datetime(*z.getinfo(name).date_time).timestamp() * 1e9)
+            os.utime(dest, ns=(int(mt), int(mt)))
+            n += 1
+            if progress:
+                progress(i + 1, len(missing))
+    return n
+
+
+def discard_files(photos: list[Photo], src_dir: str) -> list[str]:
+    """Originales de las descartadas (RAW, JPG gemelo y XMP), estén aún en la carpeta o ya en «Descartadas»,
+    más todo lo que haya en «Descartadas» de exportaciones anteriores. Nunca uno de una foto conservada."""
+    out, seen = [], set()
+
+    def add(p):
+        k = os.path.normcase(os.path.abspath(p))
+        if os.path.isfile(p) and k not in seen:
+            seen.add(k)
+            out.append(p)
+    keep = {os.path.normcase(os.path.abspath(p)) for ph in photos if ph.keep for p in original_files(ph)}
+    for ph in photos:
+        if not ph.keep:
+            for p in [ph.path] + ph.extras + [os.path.splitext(ph.path)[0] + ".xmp"]:
+                add(p)
+                add(os.path.join(src_dir, "Descartadas", os.path.basename(p)))
+    d = os.path.join(src_dir, "Descartadas")
+    if os.path.isdir(d):
+        for fn in os.listdir(d):
+            add(os.path.join(d, fn))
+    return [p for p in out if os.path.normcase(os.path.abspath(p)) not in keep]
+
+
+def delete_discards(photos: list[Photo], src_dir: str) -> tuple[int, int]:
+    """Borra PARA SIEMPRE los originales descartados (no van al ZIP ni a la Papelera) y la carpeta «Descartadas»
+    si queda vacía. Devuelve (archivos borrados, bytes liberados)."""
+    n = size = 0
+    for p in discard_files(photos, src_dir):
+        try:
+            sz = os.path.getsize(p)
+            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)  # los RAW de la cámara vienen de solo lectura
+            os.remove(p)
+            n, size = n + 1, size + sz
+        except OSError:
+            pass
+    d = os.path.join(src_dir, "Descartadas")
+    try:
+        if os.path.isdir(d) and not os.listdir(d):
+            os.rmdir(d)
+    except OSError:
+        pass
+    return n, size
+
+
+def _crc32_file(path: str) -> int:
+    crc = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            crc = zlib.crc32(chunk, crc)
+    return crc & 0xFFFFFFFF
+
+
+def send_to_trash(paths: list[str]) -> None:
+    """Manda archivos a la Papelera de reciclaje de Windows (se pueden restaurar). Sin Papelera: error."""
+    if not paths:
+        return
+    if os.name != "nt":
+        raise OSError("La Papelera solo está disponible en Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", ctypes.c_uint), ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+
+    FO_DELETE, FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO = 3, 0x4, 0x10, 0x40
+    FOF_NOERRORUI, FOF_WANTNUKEWARNING = 0x400, 0x4000  # avisa en vez de borrar del todo si no cabe en la Papelera
+    op = SHFILEOPSTRUCTW(wFunc=FO_DELETE, pFrom="\0".join(os.path.abspath(p) for p in paths) + "\0\0",
+                         fFlags=FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING)
+    rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    if rc or op.fAnyOperationsAborted:
+        raise OSError(f"No se pudieron mandar a la Papelera (código {rc})")
+
+
+def trash_archived_originals(photos: list[Photo], zip_path: str, progress=None, trash=send_to_trash) -> tuple[int, int]:
+    """Manda a la Papelera los originales de las fotos conservadas (sin error) que el ZIP guarda intactos.
+
+    Antes comprueba uno a uno que el ZIP tiene el archivo con el mismo tamaño y el mismo CRC que el del disco;
+    lo que no cuadra se queda donde está. Devuelve (mandados a la Papelera, dejados por no cuadrar)."""
+    with zipfile.ZipFile(zip_path) as z:
+        if z.testzip() is not None:
+            raise RuntimeError("El ZIP de originales está dañado: no se toca ningún original")
+        info = {i.filename: i for i in z.infolist()}
+    cands = [p for ph in photos if ph.keep and not ph.error for p in original_files(ph)]
+    ok, kept = [], 0
+    for i, p in enumerate(cands):
+        zi = info.get(os.path.basename(p))
+        if zi and zi.file_size == os.path.getsize(p) and zi.CRC == _crc32_file(p):
+            ok.append(p)
+        else:
+            kept += 1
+        if progress:
+            progress(i + 1, len(cands))
+    for p in ok:  # los RAW de la cámara vienen de solo lectura
+        try:
+            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+    trash(ok)
+    return len(ok), kept

@@ -414,10 +414,69 @@ def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True, key: str 
     if s["angle"]:
         y = E.rotate(y, s["angle"])
     if crop and s["crop"] != [0.0, 0.0, 1.0, 1.0]:
-        x0, y0, x1, y1 = s["crop"]
         hh, ww = y.shape[:2]
-        y = y[int(y0 * hh):max(int(y0 * hh) + 1, int(y1 * hh)), int(x0 * ww):max(int(x0 * ww) + 1, int(x1 * ww))]
+        y = _cut(y, fit_ratio(s["crop"], s.get("crop_ratio"), ww, hh))
     return np.clip(y, 0, 1).astype(np.float32)
+
+
+def _cut(y: np.ndarray, rect) -> np.ndarray:
+    x0, y0, x1, y1 = rect
+    hh, ww = y.shape[:2]
+    return y[int(y0 * hh):max(int(y0 * hh) + 1, int(y1 * hh)), int(x0 * ww):max(int(x0 * ww) + 1, int(x1 * ww))]
+
+
+def fit_ratio(crop, name, w: int, h: int) -> list:
+    """Recorte ajustado a su proporción exacta en píxeles de una foto w×h, sin salirse y con el mismo centro.
+
+    El recorte se guarda en fracciones; si después cambia el giro, la foto girada cambia de proporción y el
+    recorte dejaría de ser 4:5, 16:9… Solo toca proporciones «a:b» (Libre, Personalizado y Original se respetan).
+    """
+    crop = list(crop)
+    if not name or ":" not in str(name) or w <= 0 or h <= 0:
+        return crop
+    try:
+        a, b = str(name).split(":")
+        v = float(a) / float(b)
+    except ValueError:
+        return crop
+    x0, y0, x1, y1 = crop
+    cw, ch = (x1 - x0) * w, (y1 - y0) * h
+    if cw <= 0 or ch <= 0:
+        return crop
+    cur = cw / ch
+    if abs(cur - 1 / v) < abs(cur - v):
+        v = 1 / v  # la misma proporción en vertical
+    if abs(cur - v) / v < 0.005:
+        return crop
+    nw, nh = (ch * v, ch) if cur > v else (cw, cw / v)
+    cx, cy = (x0 + x1) / 2 * w, (y0 + y1) / 2 * h
+    return [(cx - nw / 2) / w, (cy - nh / 2) / h, (cx + nw / 2) / w, (cy + nh / 2) / h]
+
+
+def export_events(ph: E.Photo, s: dict, st: E.Settings, out_dir: str, version: str = "") -> list[str]:
+    """Exporta una foto retocada en Studio igual que Events: su recorte de Studio en «Entrega/Color» (o en
+    «Blanco y negro» si en Studio es B/N), los demás formatos en «Formatos» y la versión B/N en «Entrega»."""
+    lin = E.load_linear(ph.path, half=False, rebuild_highlights=True)
+    full = render(lin, s, seed=hash(os.path.basename(ph.path)) & 0xFFFF, crop=False, key=ph.path + "#full")
+    del lin
+    H, W = full.shape[:2]
+    exif = E.build_exif(ph, version) if st.keep_exif else b""
+    own = s.get("crop_ratio") or "Original"
+    main = _cut(full, fit_ratio(s["crop"], own, W, H))
+    written = E.save_delivery(main, out_dir, ph.name, bool(s.get("bw")), st, exif)
+    wanted = ["Original"] if st.export_original_ratio and s["crop"] != [0.0, 0.0, 1.0, 1.0] else []
+    wanted += [r for r in st.ratios if r in ph.crops and r != own and r not in wanted]
+    for r in wanted:
+        rect = [0.0, 0.0, 1.0, 1.0] if r == "Original" else fit_ratio(ph.crops[r], r, W, H)
+        tag = "original" if r == "Original" else E._tag(r)
+        written += E.save_sizes(_cut(full, rect), os.path.join(out_dir, E.FORMATS_DIR, E._tag(r)),
+                                f"{ph.name}_{tag}", st, exif)
+    style = E.photo_bw_style(ph, st)
+    if st.bw and not s.get("bw") and not st.style.get("bw") and style != E.BW_NONE:
+        del full
+        bw = E.bw_editorial(main, seed=ph.dhash & 0xFFFFFFFF, style=style)
+        written += E.save_delivery(bw, out_dir, ph.name, True, st, exif, sharpen=False)
+    return written
 
 
 # ------------------------------------------------------------------ auto y puentes con Events
