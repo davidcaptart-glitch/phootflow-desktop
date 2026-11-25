@@ -73,6 +73,19 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   Cada sesión guarda los suyos en `<salida>/.phootflow/ajustes.json` (al aplicar un perfil y al analizar/exportar)
   y `open_session` los recupera. En la ventana: `Main.snapshot`/`apply_snapshot`, tarjeta en el panel ⚙ y
   selector en «Abrir carpeta» (`ModeDialog.preset_choice`: los de la sesión, los últimos usados o un perfil).
+- `session_setup.py` (sin Qt) + `session_setup_ui.py` — panel «¿Cómo quieres editar esta sesión?» de Events: al
+  elegir una carpeta nueva en «Abrir carpeta» (antes de analizar; con trabajo guardado se reanuda sin él) y luego
+  con «¿Cómo editar esta sesión?» de la barra lateral, el menú ⚙, Ctrl+K o Ctrl+Mayús+E (`Main.open_setup`). A la
+  izquierda las preconfiguraciones (las de la sesión, las últimas usadas y `SP.all_presets`; «Guardar como
+  perfil…»); a la derecha, en tarjetas con icono y una frase y en chips: tipo de sesión (`SS.TYPES`: Automático con
+  la IA, boda, comunión/bautizo, fiesta, discoteca, deporte, retrato, exterior y los estilos aprendidos;
+  `SS.propose` propone el resto sin tocar nube, calidad, hilos, perfil de cámara ni LUT), recorte inteligente y
+  formatos, retratos, «Mejorar con IA», desenfoque de fondo, color de la cámara, look, LUT, B/N, descartes, grano y
+  qué exportar. Trabaja sobre `Main.snapshot`/`apply_snapshot` (`Main.apply_setup`; con la sesión ya analizada
+  rehace al momento el recorte y la IA de las no revisadas). Claves nuevas `crop` y `enhance` (`Settings.smart_crop`
+  y `auto_enhance`, chips en ⚙ › Al exportar): tras el análisis, `SS.apply_rules` deja la entrega en «Original» si
+  no hay recorte automático y marca `ph.enhance` en las conservadas con `ph.fix`. Carpetas, hilos y carpeta de la
+  nube siguen en ⚙.
 - `styles.py` — presets por tipo de evento, `detect_scene()` heurístico, `apply_color()` y aprendizaje:
   `learn_style()` (parejas original↔edición, curva L por CDF + color) y `learn_from_finals()` (solo acabadas:
   distribución objetivo). Estilos en `%APPDATA%\PhootFlow\estilos\*.json`.

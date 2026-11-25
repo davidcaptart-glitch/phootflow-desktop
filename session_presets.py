@@ -61,6 +61,9 @@ BUILTIN: dict[str, dict] = {
         "zip": True, "trash_orig": False, "del_disc": False},
 }
 
+# del panel «¿Cómo quieres editar esta sesión?» (session_setup): recorte inteligente y «Mejorar con IA»
+KEYS = KEYS + ("crop", "enhance")
+
 
 def folder(cfg_dir: str) -> str:
     return os.path.join(cfg_dir, SUBDIR)

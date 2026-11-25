@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 import drive as gdrive
 import session_file as SF
 import session_presets as SP
+import session_setup as SSU
 import compare as CMP
 import zoomview as Z
 import engine as E
@@ -165,9 +166,11 @@ class Worker(QThread):
                 self.photo.emit(i)
         E.cull(self.photos, self.st)
         rev = E.load_review(self.photos, wd)  # lo ya revisado otro día manda sobre la propuesta automática
+        _, n_enh = SSU.apply_rules(self.photos, self.st.smart_crop, self.st.auto_enhance)
         keep = sum(p.keep for p in self.photos)
         warn = sum(1 for p in self.photos if p.warn)
         saved = f" Revisión guardada: {rev} ya revisadas; pulsa «Revisar» para seguir." if rev else ""
+        saved += f" {n_enh} marcadas para «Mejorar con IA»." if n_enh else ""
         return detected + f"Análisis: {keep} para editar, {n - keep} descartadas" + \
             (f", {warn} con avisos." if warn else ".") + saved
 
@@ -972,6 +975,13 @@ class Main(QMainWindow):
             "y Graphics. Apagado: la matriz de color genérica de LibRaw.")
         self._prof_name = DCP.AUTO  # un perfil fijo guardado en un ajuste se respeta mientras siga marcado
         self.c_prof.toggled.connect(lambda on: E.set_camera_profile(self.camera_profile()))
+        self.c_crop = UI.as_chip(QCheckBox("Recorte inteligente"), "crop",
+                                 "La entrega de cada foto con el recorte sugerido (la pareja, la pelota y quien la\n"
+                                 "disputa, lo que destaca). Apagado: con la proporción de la cámara.")
+        self.c_crop.setChecked(True)
+        self.c_enh = UI.as_chip(QCheckBox("Mejorar con IA las que lo piden"), "wand",
+                                "Tras el análisis, marca «Mejorar con IA» en las fotos blandas, con ruido o con caras\n"
+                                "poco nítidas (lento: ≈1 min por foto al exportar). En la revisión se quita foto a foto.")
         self.c_focus = QCheckBox("Desenfocadas")
         self.c_exp = QCheckBox("Mal expuestas")
         self.c_dup = QCheckBox("Repetidas")
@@ -1078,6 +1088,13 @@ class Main(QMainWindow):
                                          tip_fn=lambda t: "Tu estilo aprendido" if t.startswith("Mi estilo") else t)
         bv.addWidget(self.style_chips)
         bv.addWidget(self.style_info)
+        self.b_setup = button("  ¿Cómo editar esta sesión?", "ghost",
+                              "Tipo, recorte, retratos, IA, desenfoque, color, descartes y qué exportar, en un\n"
+                              "solo panel, con tus preconfiguraciones (Ctrl+Mayús+E)")
+        self.b_setup.setIcon(I.icon("wand", 16))
+        self.b_setup.clicked.connect(lambda: self.open_setup())
+        bv.addWidget(self.b_setup)
+        QShortcut(QKeySequence("Ctrl+Shift+E"), self, lambda: self.open_setup())
         v.addWidget(blk)
         blk, bv = UI.section("Look")
         bv.addWidget(UI.ComboChips(self.look_cb))
@@ -1176,6 +1193,7 @@ class Main(QMainWindow):
         c, cv = card("Al exportar")
         cv.addWidget(UI.flow([self.c_review, self.c_move, self.c_exif, self.c_xmp, self.c_zip, self.c_trash, self.c_del_disc]))
         cv.addWidget(labeled("Desenfocar fondo", self.bokeh_cb))
+        cv.addWidget(UI.flow([self.c_crop, self.c_enh]))
         self.sheet.add(c)
         c, cv = card("Nube")
         cv.addWidget(self.cloud)
@@ -1462,6 +1480,8 @@ class Main(QMainWindow):
         self.cloud.setCurrentIndex(int(g("cloud", 0)))
         self.cloud_folder.setText(g("cloud_folder", ""))
         self.bokeh_cb.setCurrentIndex(max(0, self.bokeh_cb.findData(g("bokeh", "") or "")))
+        self.c_crop.setChecked(b("crop", True))
+        self.c_enh.setChecked(b("enhance", False))
 
     def save(self):
         st = self.settings()
@@ -1475,6 +1495,7 @@ class Main(QMainWindow):
                      ("zip", st.archive_originals), ("trash_orig", self.c_trash.isChecked()), ("del_disc", self.c_del_disc.isChecked()), ("review", self.c_review.isChecked()), ("up_orig", self.c_up_orig.isChecked()),
                      ("quality", st.quality), ("workers", st.workers),
                      ("cloud", self.cloud.currentIndex()), ("cloud_folder", self.cloud_folder.text()),
+                     ("crop", st.smart_crop), ("enhance", st.auto_enhance),
                      ("bokeh", st.bokeh)]:
             self.s.setValue(k, v)
 
@@ -1520,6 +1541,7 @@ class Main(QMainWindow):
             write_xmp=self.c_xmp.isChecked(), workers=self.workers.value(), bw=self.c_bw.isChecked(),
             bw_style=self.bw_style_cb.currentText(), look=self.look_cb.currentText(),
             bokeh=self.bokeh_cb.currentData() or "",
+            smart_crop=self.c_crop.isChecked(), auto_enhance=self.c_enh.isChecked(),
             cache_dir=os.path.join(work_dir(self.out_dir()), "previas"), resume=True)
 
     # ---------------------------------------------------- ajustes guardados
@@ -1540,7 +1562,8 @@ class Main(QMainWindow):
             "cloud": self.cloud.currentIndex(), "cloud_folder": self.cloud_folder.text(),
             "up_orig": self.c_up_orig.isChecked(),
             "lut": self.lut_cb.currentData() or "", "lutk": self.lut_k.value(),
-            "cam_prof": self.camera_profile(), "bokeh": self.bokeh_cb.currentData() or ""}
+            "cam_prof": self.camera_profile(), "bokeh": self.bokeh_cb.currentData() or "",
+            "crop": self.c_crop.isChecked(), "enhance": self.c_enh.isChecked()}
 
     def apply_snapshot(self, d: dict):
         """Pone en la ventana los ajustes de `d`; las claves que no trae se quedan como están."""
@@ -1549,6 +1572,7 @@ class Main(QMainWindow):
                   "review": self.c_review, "move": self.c_move, "exif": self.c_exif, "xmp": self.c_xmp,
                   "zip": self.c_zip, "trash_orig": self.c_trash, "del_disc": self.c_del_disc,
                   "up_orig": self.c_up_orig}
+        checks.update(crop=self.c_crop, enhance=self.c_enh)
         combos = {"look": self.look_cb, "nr": self.nr, "sens": self.sens, "bw_style": self.bw_style_cb}
         if "style" in d and self.style_cb.findText(d["style"]) >= 0:
             self.style_cb.setCurrentText(d["style"])  # antes que el LUT: cambia la lista de LUT
@@ -1906,6 +1930,46 @@ class Main(QMainWindow):
         self.b_keep.setChecked(bool(on))
         self.b_drop.setChecked(not on)
 
+
+    def open_setup(self, start: bool = False) -> bool:
+        """«¿Cómo quieres editar esta sesión?»: todo lo que se aplica a la sesión entera, con las
+        preconfiguraciones a mano. `start`: al elegir la carpeta (el botón principal analiza)."""
+        import session_setup_ui as SSUI
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, APP, "Espera a que termine el trabajo en curso.")
+            return False
+        before = self.snapshot()
+        dlg = SSUI.SessionSetupDialog(self, CFG_DIR, start, CLOUDS)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        self.apply_setup(dlg.values(), dlg.preset_name, before)
+        if start:
+            self.start_analyze(False)
+        return True
+
+    def apply_setup(self, values: dict, preset: str = "", before: dict | None = None):
+        """Pone en Events lo elegido en el panel y, si la sesión ya está analizada, rehace al momento lo que
+        depende de ello (recorte de entrega y «Mejorar con IA» en las no revisadas)."""
+        before = before or self.snapshot()
+        self.apply_snapshot(values)
+        self.preset_name = preset
+        if preset:
+            self.reload_presets(preset)
+        self.save_session_settings()
+        self.s.setValue("setup/preset", preset)
+        if any(p.thumb for p in self.photos):
+            if values.get("crop", True) and not before.get("crop", True):
+                name = self.resolved_style()[0]
+                E.smart_crops(self.photos, name if name in S.PRESETS else S.detect_scene(self.photos)[0])
+            st = self.settings()
+            _, n_enh = SSU.apply_rules(self.photos, st.smart_crop, st.auto_enhance)
+            self.grid.viewport().update()
+            if self.cur is not None:
+                self.show_preview()
+            self.status.setText("Cambios aplicados a la sesión." +
+                                (f" {n_enh} fotos marcadas para «Mejorar con IA»." if n_enh else ""))
+        else:
+            self.status.setText("Listo: pulsa «1 Analizar» cuando quieras empezar.")
     def open_settings(self):
         self.sheet.open_at(self, "left")
 
@@ -2620,6 +2684,8 @@ class Shell(QMainWindow):
         b_menu = UI.icon_button("gear", "Ajustes, licencia y actualizaciones")
         b_menu.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(b_menu)
+        menu.addAction(I.icon("wand", 16), "¿Cómo editar esta sesión?…", lambda: (self.switch(ENV_EVENTS),
+                                                                          self.events.open_setup()))
         menu.addAction(I.icon("sliders", 16), "Ajustes de la sesión…", lambda: (self.switch(ENV_EVENTS),
                                                                              self.events.open_settings()))
         menu.addAction(I.icon("save", 16), "Guardar el trabajo  (Ctrl+S)", lambda: self.events.save_now())
@@ -2685,6 +2751,8 @@ class Shell(QMainWindow):
                 ("zap", "Procesar todo", "automatico desatendido", in_events(lambda: ev.start_analyze(True))),
                 ("open", "Abrir la carpeta de salida", "editadas resultado",
                  lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(ev.out_dir()))),
+                ("wand", "¿Cómo editar esta sesión?", "panel tipo recorte retrato mejorar ia desenfoque bokeh lut "
+                 "color camara blanco negro descartes exportar perfil preconfiguracion", in_events(ev.open_setup)),
                 ("sliders", "Ajustes de la sesión", "configuracion grano exposicion calidad lightroom xmp zip nube",
                  in_events(ev.open_settings)),
                 ("archive", "Recuperar sesión desde el ZIP", "originales raw descomprimir restaurar volver editar",
@@ -2726,6 +2794,9 @@ class Shell(QMainWindow):
         self.folder = d
         if dlg.choice == ENV_EVENTS:
             self.events.open_session(d, preset=dlg.preset_choice())  # recupera el trabajo guardado, si lo hay
+            ev = self.events
+            if not (E.has_saved_work(work_dir(ev.out_dir())) or E.archived_missing(d, ev.out_dir())):
+                QTimer.singleShot(0, lambda: ev.open_setup(start=True))  # sesión nueva: ¿cómo editarla?
         else:
             self.events.src.setText(d)
             if dlg.preset_choice() not in (SP.KEEP, SP.OWN):

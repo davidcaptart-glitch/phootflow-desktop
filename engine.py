@@ -180,6 +180,8 @@ class Settings:
     cull_eyes: bool = False   # descartar (no solo avisar) fotos con ojos cerrados claros
     camera_profile: str = dcp.AUTO  # perfil DCP de los RAW (AUTO = el estilo de la cámara; NONE = LibRaw)
     bokeh: str = ""         # desenfocar fondo en las fotos con sujeto claro (bokeh.LEVELS; "" = no)
+    smart_crop: bool = True     # la entrega con el recorte inteligente (False: con la proporción de la cámara)
+    auto_enhance: bool = False  # «Mejorar con IA» en las que lo sugieren, sin esperar a la revisión
 
 
 @dataclass
