@@ -89,7 +89,7 @@ class HighEfficiencyNef(unittest.TestCase):
         self.calls = []
         real = E._develop_raw
 
-        def develop(path, half, rebuild):
+        def develop(path, half, rebuild, src=""):
             if path.lower().endswith(".nef"):
                 raise RuntimeError("LibRawFileUnsupportedError")  # como con TicoRAW
             return np.full((30, 40, 3), 0.2, np.float32) if path.endswith(".dng") else real(path, half, rebuild)

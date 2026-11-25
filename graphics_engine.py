@@ -748,14 +748,15 @@ def list_designs(folder: str) -> list[tuple[str, dict]]:
 # ------------------------------------------------------------------ fotos
 
 def load_rgb(path: str, max_side: int = 0) -> np.ndarray | None:
-    """Foto como RGB uint8 (los RAW se revelan con el balance de la cámara). Sin tocar el original."""
+    """Foto como RGB uint8. Los RAW se revelan como en Events: balance y perfil de la cámara (DCP),
+    exposición automática y curva base filmic. Sin tocar el original."""
     from PIL import Image, ImageOps
     import engine as E
     try:
         if E.is_raw(path) and E.rawpy is not None:
-            with E.rawpy.imread(path) as r:
-                a = r.postprocess(use_camera_wb=True, output_bps=8, half_size=bool(max_side and max_side <= 3000))
-            im = Image.fromarray(a)
+            lin = E.load_linear(path, half=bool(max_side and max_side <= 3000))
+            ev = E.estimate_ev(lin)[0]
+            im = Image.fromarray((E.tone(lin, ev) * 255 + 0.5).astype(np.uint8))
         else:
             im = Image.open(path)
             if max_side:

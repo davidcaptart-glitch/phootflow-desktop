@@ -27,6 +27,7 @@ import session_presets as SP
 import compare as CMP
 import zoomview as Z
 import engine as E
+import dcp as DCP
 import license as LIC
 import luts as L
 import styles as S
@@ -957,6 +958,16 @@ class Main(QMainWindow):
         self.look_cb = QComboBox()
         self.look_cb.addItems(list(E.COLOR_LOOKS))
         self.look_cb.currentTextChanged.connect(lambda _: self.show_preview() if hasattr(self, "preview") else None)
+        self.c_prof = QCheckBox("Color de la cámara")  # perfil DCP del estilo de la cámara, en todo PhootFlow
+        self.c_prof.setChecked(True)
+        self.c_prof.setToolTip(
+            "Revela los RAW con el perfil de color del estilo que tenía la cámara al disparar cada foto\n"
+            "(Estándar, Vívido, Retrato…), como se ve en su pantalla; si no se sabe, el Estándar o Adobe Standard.\n"
+            "Los de blanco y negro se revelan en color (el B/N lo hace PhootFlow aparte).\n"
+            "Usa los perfiles .dcp que instala el Adobe DNG Converter (gratis). Vale para Events, Studio, Edits\n"
+            "y Graphics. Apagado: la matriz de color genérica de LibRaw.")
+        self._prof_name = DCP.AUTO  # un perfil fijo guardado en un ajuste se respeta mientras siga marcado
+        self.c_prof.toggled.connect(lambda on: E.set_camera_profile(self.camera_profile()))
         self.c_focus = QCheckBox("Desenfocadas")
         self.c_exp = QCheckBox("Mal expuestas")
         self.c_dup = QCheckBox("Repetidas")
@@ -969,7 +980,8 @@ class Main(QMainWindow):
                             (self.c_move, "move", "Al exportar, mover los descartes a «Descartadas» (nunca se borran)")):
             w_.setChecked(True)
             UI.as_chip(w_, ic, tip)
-        for w_, ic in ((self.straight, "crop"), (self.c_uniform, "sliders"), (self.c_cam, "studio_photo")):
+        for w_, ic in ((self.straight, "crop"), (self.c_uniform, "sliders"), (self.c_cam, "studio_photo"),
+                       (self.c_prof, "palette")):
             UI.as_chip(w_, ic)
         self.sens = QComboBox()
         self.sens.addItems(list(E.SENS))
@@ -1142,7 +1154,7 @@ class Main(QMainWindow):
         c, cv = card("Revelado")
         cv.addWidget(labeled("Reducción de grano", self.nr))
         cv.addWidget(labeled("Compensar exposición", self.evc))
-        cv.addWidget(UI.flow([self.straight, self.c_uniform, self.c_cam]))
+        cv.addWidget(UI.flow([self.straight, self.c_uniform, self.c_cam, self.c_prof]))
         self.sheet.add(c)
         c, cv = card("Blanco y negro y calidad")
         cv.addWidget(labeled("Estilo B/N", self.bw_style_cb))
@@ -1423,6 +1435,7 @@ class Main(QMainWindow):
         self.look_cb.setCurrentText(g("look", "Natural"))
         self.c_uniform.setChecked(b("uniform", True))
         self.c_cam.setChecked(b("cam", True))
+        self.set_camera_profile(g("cam_prof", DCP.AUTO))
         self.c_eyes.setChecked(b("eyes", False))
         self.style_cb.setCurrentText(g("style", S.AUTO))
         self.c_zip.setChecked(b("zip", True))
@@ -1443,11 +1456,23 @@ class Main(QMainWindow):
                      ("ratios", ",".join(st.ratios)), ("sizes", ",".join(st.sizes)),
                      ("orig", st.export_original_ratio), ("exif", st.keep_exif), ("xmp", st.write_xmp), ("bw", st.bw), ("bw_style", st.bw_style), ("look", st.look),
                      ("uniform", st.uniform), ("cam", st.camera_look), ("eyes", st.cull_eyes),
+                     ("cam_prof", st.camera_profile),
                      ("style", self.style_cb.currentText()),
                      ("zip", st.archive_originals), ("trash_orig", self.c_trash.isChecked()), ("del_disc", self.c_del_disc.isChecked()), ("review", self.c_review.isChecked()), ("up_orig", self.c_up_orig.isChecked()),
                      ("quality", st.quality), ("workers", st.workers),
                      ("cloud", self.cloud.currentIndex()), ("cloud_folder", self.cloud_folder.text())]:
             self.s.setValue(k, v)
+
+    # ---------------------------------------------------- perfil de cámara (DCP)
+    def camera_profile(self) -> str:
+        return self._prof_name if self.c_prof.isChecked() else DCP.NONE
+
+    def set_camera_profile(self, name: str):
+        name = name or DCP.AUTO
+        if name != DCP.NONE:
+            self._prof_name = name
+        self.c_prof.setChecked(name != DCP.NONE)
+        E.set_camera_profile(self.camera_profile())
 
     def resolved_style(self) -> tuple[str, dict]:
         name = self.style_cb.currentText()
@@ -1466,7 +1491,7 @@ class Main(QMainWindow):
             style = dict(style, **{k: v for k, v in self.session_extra.items() if k != "_cube"})
         return E.Settings(style=style, style_name=style_name,
             uniform=self.c_uniform.isChecked(), camera_look=self.c_cam.isChecked(),
-            cull_eyes=self.c_eyes.isChecked(),
+            camera_profile=self.camera_profile(), cull_eyes=self.c_eyes.isChecked(),
             nr=self.nr.currentText(), straighten=self.straight.isChecked(), ev_comp=self.evc.value(),
             cull_focus=self.c_focus.isChecked(), cull_exposure=self.c_exp.isChecked(),
             cull_dupes=self.c_dup.isChecked(), sensitivity=self.sens.currentText(),
@@ -1498,7 +1523,8 @@ class Main(QMainWindow):
             "trash_orig": self.c_trash.isChecked(), "del_disc": self.c_del_disc.isChecked(),
             "cloud": self.cloud.currentIndex(), "cloud_folder": self.cloud_folder.text(),
             "up_orig": self.c_up_orig.isChecked(),
-            "lut": self.lut_cb.currentData() or "", "lutk": self.lut_k.value()}
+            "lut": self.lut_cb.currentData() or "", "lutk": self.lut_k.value(),
+            "cam_prof": self.camera_profile()}
 
     def apply_snapshot(self, d: dict):
         """Pone en la ventana los ajustes de `d`; las claves que no trae se quedan como están."""
@@ -1528,6 +1554,8 @@ class Main(QMainWindow):
                     sp.setValue(type(sp.value())(d[k]))
                 except (TypeError, ValueError):
                     pass
+        if d.get("cam_prof"):
+            self.set_camera_profile(str(d["cam_prof"]))
         if "cloud" in d:
             self.cloud.setCurrentIndex(max(0, min(len(CLOUDS) - 1, int(d["cloud"] or 0))))
         if "cloud_folder" in d:

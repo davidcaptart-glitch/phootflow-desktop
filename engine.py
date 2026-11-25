@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageCms, ImageOps, TiffImagePlugin
 
+import dcp
 import luts
 import styles
 
@@ -176,6 +177,7 @@ class Settings:
     uniform: bool = True    # una sola curva y color para toda la sesión + exposición igualada
     camera_look: bool = True  # partir del aspecto del JPEG que lleva el RAW (contraste y color de la cámara)
     cull_eyes: bool = False   # descartar (no solo avisar) fotos con ojos cerrados claros
+    camera_profile: str = dcp.AUTO  # perfil DCP de los RAW (AUTO = el estilo de la cámara; NONE = LibRaw)
 
 
 @dataclass
@@ -323,7 +325,7 @@ def load_linear(path: str, half: bool, rebuild_highlights: bool = False) -> np.n
         if rawpy is None:
             raise RuntimeError("Falta la librería rawpy para leer RAW")
         if path in _DNG_OF:
-            return _develop_raw(_DNG_OF[path], half, rebuild_highlights)
+            return _develop_raw(_DNG_OF[path], half, rebuild_highlights, src=path)
         if path in PREVIEW_ONLY and dng_converter():  # el conversor se instaló después: a calidad completa
             PREVIEW_ONLY.discard(path)
         if path not in PREVIEW_ONLY:
@@ -335,7 +337,7 @@ def load_linear(path: str, half: bool, rebuild_highlights: bool = False) -> np.n
                 dng = converted_dng(path)  # con el Adobe DNG Converter, a calidad completa
                 if dng:
                     try:
-                        x = _develop_raw(dng, half, rebuild_highlights)
+                        x = _develop_raw(dng, half, rebuild_highlights, src=path)
                         _DNG_OF[path] = dng
                         return x
                     except Exception:
@@ -372,11 +374,104 @@ def _to_linear(x: np.ndarray) -> np.ndarray:
     return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4).astype(np.float32)
 
 
-def _develop_raw(path: str, half: bool, rebuild_highlights: bool) -> np.ndarray:
+CAMERA_PROFILE = dcp.AUTO  # perfil DCP con que se revelan los RAW (AUTO = el estilo de la cámara; NONE = LibRaw)
+_CAMS: dict = {}            # ruta -> (marca, modelo, estilo de la cámara)
+_FUJI_FILM = {0x000: "provia", 0x100: "portrait", 0x110: "portrait", 0x120: "astia", 0x130: "portrait",
+              0x200: "velvia", 0x300: "portrait", 0x400: "velvia", 0x500: "pronegstd", 0x501: "proneghi",
+              0x600: "classicchrome", 0x700: "eterna", 0x800: "classicneg", 0x900: "bleachbypass",
+              0xA00: "nostalgicneg", 0xB00: "realaace"}
+
+
+def set_camera_profile(name: str) -> None:
+    global CAMERA_PROFILE
+    CAMERA_PROFILE = name or dcp.NONE
+
+
+def _style_from_tags(t: dict) -> str:
+    """Estilo elegido en la cámara: Sony Creative Style/Look, Nikon Picture Control, Fujifilm simulación."""
+    v = t.get("MakerNote CreativeStyle")
+    if v is not None:
+        return str(v).strip("\x00 ")
+    v = t.get("MakerNote PictureControl") or t.get("MakerNote PictureControlData")
+    if v is not None:
+        vals = v.values if isinstance(v.values, (list, tuple, bytes)) else []
+        try:
+            b = bytes(int(x) & 0xFF for x in vals)
+            return b[4:24].split(b"\0")[0].decode("ascii", "ignore").strip()
+        except Exception:
+            return ""
+    v = t.get("MakerNote Tag 0x1401")  # Fujifilm FilmMode
+    if v is not None:
+        try:
+            return _FUJI_FILM.get(int(v.values[0]), "")
+        except Exception:
+            return ""
+    return ""
+
+
+def camera_of(path: str) -> tuple[str, str]:
+    """(marca, modelo) del EXIF del archivo, con caché."""
+    return _camera_info(path)[:2]
+
+
+def camera_style(path: str) -> str:
+    """El estilo de imagen con que se disparó («Standard», «VV2», «VIVID», «classicchrome»…) o ""."""
+    return _camera_info(path)[2]
+
+
+def _camera_info(path: str) -> tuple[str, str, str]:
+    if path not in _CAMS:
+        mk = mo = st = ""
+        if exifread is not None:
+            try:
+                with open(path, "rb") as f:
+                    t = exifread.process_file(f, details=True)
+                mk, mo = str(t.get("Image Make") or "").strip(), str(t.get("Image Model") or "").strip()
+                st = _style_from_tags(t)
+            except Exception:
+                pass
+        _CAMS[path] = (mk, mo, st)
+    return _CAMS[path]
+
+
+def camera_profile_for(path: str, name: str | None = None) -> "dcp.Profile | None":
+    """El DCP que se usará con este RAW (None: sin perfil instalado o elegido «Sin perfil»).
+    Automático: el perfil «Camera …» del estilo con que se disparó (Estándar si no se reconoce)."""
+    name = CAMERA_PROFILE if name is None else name
+    if not name or name == dcp.NONE:
+        return None
+    mk, mo, st = _camera_info(path)
+    if not mo:
+        return None
+    if name == dcp.AUTO:
+        return dcp.style_profile(mk, mo, st)
+    return dcp.find(mk, mo, name)
+
+
+def _develop_raw(path: str, half: bool, rebuild_highlights: bool, src: str = "") -> np.ndarray:
+    pr = None
+    try:
+        pr = camera_profile_for(src or path)  # del NEF original: el DNG no lleva sus MakerNotes
+        if pr is None and src and src != path and CAMERA_PROFILE != dcp.NONE and not camera_of(src)[1]:
+            pr = camera_profile_for(path)
+    except Exception:
+        pr = None
     with rawpy.imread(path) as r:
         hm = rawpy.HighlightMode.Reconstruct(4) if rebuild_highlights else rawpy.HighlightMode.Blend
+        neutral = None
+        if pr is not None:
+            try:
+                desc = bytes(r.color_desc)
+                mul = np.asarray(r.camera_whitebalance, float)[:3]
+                if not np.all(mul > 0):
+                    mul = np.asarray(r.daylight_whitebalance, float)[:3]
+                if desc[:3] == b"RGB" and r.num_colors in (3, 4) and np.all(mul > 0):
+                    neutral = 1.0 / mul
+            except Exception:
+                neutral = None
         kw = dict(use_camera_wb=True, no_auto_bright=True, output_bps=16, gamma=(1, 1),
-                  output_color=rawpy.ColorSpace.sRGB, highlight_mode=hm)
+                  output_color=rawpy.ColorSpace.raw if neutral is not None else rawpy.ColorSpace.sRGB,
+                  highlight_mode=hm)
         if half:
             rgb = r.postprocess(half_size=True, **kw)
         else:
@@ -385,7 +480,10 @@ def _develop_raw(path: str, half: bool, rebuild_highlights: bool) -> np.ndarray:
             extra = dict(demosaic_algorithm=rawpy.DemosaicAlgorithm.DHT,
                          fbdd_noise_reduction=rawpy.FBDDNoiseReductionMode.Full) if bayer else {}
             rgb = r.postprocess(**extra, **kw)
-    return rgb.astype(np.float32) / 65535.0
+    x = rgb.astype(np.float32) / 65535.0
+    if neutral is not None:  # RGB de la cámara ya equilibrado -> perfil DCP -> sRGB lineal
+        x = dcp.apply(x, pr, neutral)
+    return x
 
 
 def _raw_preview(path: str, half: bool) -> np.ndarray | None:
@@ -1876,6 +1974,7 @@ def analyze_many(photos: list[Photo], st: Settings, workers: int = 2, on_done=No
             analyze(photos[i], st)
         return i
 
+    set_camera_profile(st.camera_profile)
     if threading.current_thread() is threading.main_thread():  # si no, lo llama quien lanza el hilo (app.Main.run)
         prepare_detectors(max(1, workers))
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
@@ -1889,6 +1988,7 @@ def export_many(photos: list[Photo], st: Settings, out_dir: str, version: str = 
     """Exporta en paralelo (`st.workers` hilos). Un fallo en una foto queda en `ph.error` y no para el lote.
     `on_done(hechas, total)` tras cada foto. `on_event(fase, foto)` desde los hilos: "start", "done", "skip"
     (ya exportada otra vez) o "error". Devuelve el número de archivos JPG escritos."""
+    set_camera_profile(st.camera_profile)
     done_before = exported_names(out_dir) if st.resume else set()
     lock = threading.Lock()
     os.makedirs(os.path.dirname(_done_file(out_dir)), exist_ok=True)

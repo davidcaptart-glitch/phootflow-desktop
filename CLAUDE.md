@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 129 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -33,6 +33,18 @@ python -m unittest discover -s tests   # 129 pruebas, sin fotos reales ni red
   incrustado (`PREVIEW_ONLY`, aviso `PREVIEW_WARN`, y `Main._warn_dng` ofrece descargarlo).
   Salida: `Entrega/Color` y `Entrega/Blanco y negro` (`<foto>.jpg`, tamaño de entrega = max; `delivery_path`,
   `save_delivery`), `Otros tamaños/<n> px/…` y `Formatos/<proporción>/`. Edits sustituye la foto en Entrega/Color.
+- `dcp.py` — perfiles de cámara DCP (sin Qt): `_develop_raw` revela en el RGB de la cámara (`output_color=raw`,
+  balance de la toma) y `dcp.apply` aplica ForwardMatrix (interpolada por temperatura entre los dos iluminantes),
+  HueSatMap, BaselineExposureOffset y LookTable en ProPhoto lineal → sRGB lineal, por franjas. La ProfileToneCurve no
+  se usa (la curva base es la filmic de `tone()`/`_tonemap_lut`). Perfiles en `%ProgramData%\Adobe\CameraRaw\
+  CameraProfiles` (los instala el DNG Converter), `%APPDATA%\Adobe\…` y `%APPDATA%\PhootFlow\perfiles`; se buscan
+  por `UniqueCameraModel`. Por defecto en todo PhootFlow, `E.CAMERA_PROFILE = dcp.AUTO`: el estilo con que se
+  disparó (`E.camera_style`, de las MakerNotes: Sony CreativeStyle — «Off» en automático inteligente —, Nikon
+  PictureControl, Fujifilm FilmMode) -> su perfil «Camera …» (`dcp.style_profile`; los de B/N, en color con el
+  Estándar; sin estilo, el Estándar; sin perfiles de cámara, Adobe Standard; sin ninguno, LibRaw). Con un NEF
+  convertido a DNG se lee el estilo del NEF original (`_develop_raw(src=…)`). Única opción en la ventana: chip
+  «Color de la cámara» (⚙ › Revelado, `Main.c_prof`; apagado = `dcp.NONE`), guardado como `cam_prof` en la sesión
+  (`Settings.camera_profile`). Graphics (`load_rgb`) revela los RAW igual que Events (`load_linear` + `tone`).
 - `session_file.py` — «<sesión>.phootflow» en la carpeta de la sesión (JSON, salida relativa): con doble clic abre
   PhootFlow en esa sesión (`SF.register()` asocia la extensión en HKCU al arrancar; `main()` lee el argumento y
   `Shell.open_session_file`). Se escribe tras analizar y exportar y oculta las carpetas `.phootflow`.

@@ -22,7 +22,7 @@ OWN = "Los de esta sesión"         # opción de «Abrir carpeta»: los que guar
 # claves que entiende la ventana (las demás se ignoran al aplicar)
 KEYS = ("style", "look", "nr", "evc", "straight", "uniform", "cam", "focus", "exp", "dup", "eyes", "sens",
         "ratios", "sizes", "orig", "bw", "bw_style", "quality", "workers", "review", "move", "exif", "xmp",
-        "zip", "trash_orig", "del_disc", "cloud", "cloud_folder", "up_orig", "lut", "lutk")
+        "zip", "trash_orig", "del_disc", "cloud", "cloud_folder", "up_orig", "lut", "lutk", "cam_prof")
 
 BUILTIN: dict[str, dict] = {
     "Boda": {
