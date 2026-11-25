@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDate
 import admin_licencias as AL
 import theme as T
 
-DESCARGA = "https://github.com/davidcaptart-glitch/phootflow-releases/releases/latest"
+DESCARGA = "https://phootflow.com/"
 
 # (texto, meses) — None: sin fin; -1: hasta una fecha concreta; 0: mantener la actual (solo al editar)
 DURACIONES = [("Sin fin (la corto yo cuando quiera)", None), ("1 mes", 1), ("3 meses", 3),
