@@ -977,6 +977,7 @@ class EditsView(QWidget):
         self._act(new, "Rayos de luz", lambda: self.add_layer("rays"))
         self._act(new, "Partículas (nieve, confeti, bokeh…)", lambda: self.add_layer("particles"))
         self._act(new, "Filtro artístico (acuarela, óleo, cómic…)", lambda: self.add_layer("artistic"))
+        self._act(new, "Mejorar con IA (enfocar, ruido, caras)", self.add_enhance_layer)
         self._act(new, "Velocidad (barrido)", lambda: self.add_layer("speed"))
         self._act(new, "Doble exposición…", self.double_exposure)
         adj = c.addMenu("Nueva capa de ajuste")
@@ -1373,6 +1374,7 @@ class EditsView(QWidget):
         mnew.addAction("Rayos de luz", lambda: self.add_layer("rays"))
         mnew.addAction("Partículas (nieve, confeti, bokeh…)", lambda: self.add_layer("particles"))
         mnew.addAction("Filtro artístico (acuarela, óleo, cómic…)", lambda: self.add_layer("artistic"))
+        mnew.addAction("Mejorar con IA (enfocar, ruido, caras)", self.add_enhance_layer)
         mnew.addAction("Velocidad (barrido)", lambda: self.add_layer("speed"))
         mnew.addAction("Doble exposición…", self.double_exposure)
         mnew.addAction("Grupo (con las capas elegidas)", self.group_layers)
@@ -1714,6 +1716,24 @@ class EditsView(QWidget):
             self.art_w[key] = sr
         lay.addWidget(self._label("Convierte la foto (o lo que haya debajo) en acuarela, óleo, cómic, tinta, lápiz "
                                   "o pop art. Con una máscara, solo en una zona."))
+
+        lay = page("enhance")
+        self.enh_w = {}
+        for key, label, tip in (("detail", "Enfocar y limpiar", "Real-ESRGAN: quita ruido y artefactos y redibuja los bordes"),
+                                ("faces", "Caras", "GFPGAN: restaura las caras blandas; inventa pestañas, iris y dientes"),
+                                ("light", "Aclarar", "Sube la luz de lo que sigue oscuro (sin IA)")):
+            c = QCheckBox(label)
+            c.setToolTip(tip)
+            c.toggled.connect(lambda on, k=key: self._enh_prop(k, on))
+            lay.addWidget(c)
+            self.enh_w[key] = c
+        sr = SliderRow("amount", "Intensidad", 0, 100, 1, 60)
+        sr.changed.connect(lambda k, val, f: self._set_prop(k, float(val), f, delay=not f))
+        lay.addWidget(sr)
+        self.enh_amt = sr
+        lay.addWidget(self._label("Para fotos algo blandas, con ruido o caras poco nítidas. La IA reconstruye el "
+                                  "detalle que falta (pestañas, iris, texturas): compara con el ojo de la capa. "
+                                  "Con una máscara, solo en una zona. Tarda unos segundos (≈1 min al exportar)."))
 
         lay = page("speed")
         self.speed_det = QComboBox()
@@ -2501,6 +2521,29 @@ class EditsView(QWidget):
             self.txt.setFocus()
             self.txt.selectAll()
 
+    def add_enhance_layer(self):
+        """Capa «Mejorar con IA» (descarga antes los modelos que falten, preguntando)."""
+        if not self.doc:
+            return
+        import fx_ui
+        if not fx_ui.ensure_enhance_models(self, [{"detail": True, "faces": True}]):
+            if not FX.upscaler_ready():
+                return
+        lay = EE.add_layer(self.doc, "enhance", faces=FX.face_ready())
+        self.layer_id = lay["id"]
+        self._commit("Nueva capa: " + lay["name"].lower())
+
+    def _enh_prop(self, key, on):
+        if on and key != "light":
+            import fx_ui
+            need = {"detail": key == "detail", "faces": key == "faces"}
+            if not fx_ui.ensure_enhance_models(self, [need]):
+                self.enh_w[key].blockSignals(True)
+                self.enh_w[key].setChecked(False)
+                self.enh_w[key].blockSignals(False)
+                return
+        self._set_prop(key, bool(on), True)
+
     # ---------------------------------------------------------- grupos
     def _selected_ids(self) -> list:
         ids = [it.data(ROLE) for it in self.layer_list.selectedItems() if it.data(ROLE)]
@@ -2640,7 +2683,7 @@ class EditsView(QWidget):
                    "rays": "Rayos de luz", "portrait": "Retrato (IA)",
                    "particles": FX.PARTICLES.get((l.get("p") or {}).get("kind"), "Partículas"),
                    "artistic": FX.ARTISTIC.get(l.get("art"), "Filtro artístico"),
-                   "speed": "Velocidad (barrido)"}.get(l["kind"], "")
+                   "speed": "Velocidad (barrido)", "enhance": "Mejorar con IA"}.get(l["kind"], "")
         if n:
             sub += " · " + _count(n, "trazo")
         if l.get("blend", "normal") != "normal":
@@ -2857,6 +2900,12 @@ class EditsView(QWidget):
             self.speed_auto.blockSignals(False)
             for key, sr in self.speed_w.items():
                 sr.set_value(lay.get(key, sr.neutral))
+        elif kind == "enhance":
+            for key, c in self.enh_w.items():
+                c.blockSignals(True)
+                c.setChecked(bool(lay.get(key)))
+                c.blockSignals(False)
+            self.enh_amt.set_value(lay.get("amount", 60))
         elif kind == "artistic":
             self.art_cb.blockSignals(True)
             self.art_cb.setCurrentIndex(max(0, self.art_cb.findData(lay.get("art", "watercolor"))))

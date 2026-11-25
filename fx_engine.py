@@ -224,6 +224,190 @@ def upscale(img: np.ndarray, factor: float = 2.0, ai: bool = True, progress=None
     return np.clip(big, 0, 1).astype(np.float32)
 
 
+# ------------------------------------------------------------------ mejorar con IA (enfocar, ruido, caras, luz)
+# Ver docs/enfocar_ia.md. «Enfocar y limpiar» = Real-ESRGAN x4v3 (el mismo modelo de ampliar) con el truco
+# reducir ×0,5 → ampliar ×4 → reducir a ×1: quita ruido y artefactos JPEG y redibuja los bordes de una foto algo
+# blanda (≈70 s por foto de 26 MP). «Caras» = GFPGAN 1.4 (descarga aparte, 340 MB; ≈1,3 s por cara). La IA no
+# recupera detalle perdido: lo inventa, por eso siempre se mezcla con la foto según la intensidad.
+
+FACE_URL = "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx"
+FACE_SHA256 = "accc4757b26bdb89b32b4d3500d4f79c9dff97c1dd7c7104bf9dcb95e3311385"
+FACE_MB = 340
+FACE_DIR, FACE_FILE = "gfpgan_1.4", "gfpgan_1.4.onnx"
+FACE_MIN = 14  # px entre los ojos por debajo de los cuales la cara es demasiado pequeña (no se toca)
+# plantilla FFHQ de 512 px (ojo izq., ojo der., nariz, comisura izq., comisura der.; en la imagen)
+FFHQ_5 = np.array([[192.98138, 239.94708], [318.90277, 240.1936], [256.63416, 314.01935],
+                   [201.26117, 371.41043], [313.08905, 371.15118]], np.float32)
+ENHANCE_DEFAULT = {"detail": True, "faces": True, "light": False, "amount": 60}
+_FACE = {"session": None, "lock": threading.Lock()}
+
+
+def face_model_path() -> str:
+    return os.path.join(models_dir(), FACE_DIR, FACE_FILE)
+
+
+def face_ready() -> bool:
+    return os.path.exists(face_model_path())
+
+
+def ensure_face_model(progress=None, cancel=None) -> str:
+    """Descarga GFPGAN 1.4 (ONNX, ≈340 MB) la primera vez, comprobando su SHA-256."""
+    if face_ready():
+        return face_model_path()
+    import urllib.request
+    import net
+    out = os.path.join(models_dir(), FACE_DIR)
+    os.makedirs(out, exist_ok=True)
+    part = face_model_path() + ".part"
+    resp = net.urlopen(urllib.request.Request(FACE_URL, headers={"User-Agent": "PhootFlow"}), 60)
+    total = int(resp.headers.get("Content-Length") or FACE_MB * 1_000_000)
+    h = hashlib.sha256()
+    done = 0
+    with open(part, "wb") as f:
+        while True:
+            if cancel and cancel():
+                f.close()
+                os.remove(part)
+                raise RuntimeError("Cancelado")
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            f.write(chunk)
+            h.update(chunk)
+            done += len(chunk)
+            if progress:
+                progress(done, total)
+    if h.hexdigest() != FACE_SHA256:
+        os.remove(part)
+        raise RuntimeError("El modelo de caras no supera la verificación SHA-256")
+    os.replace(part, face_model_path())
+    return face_model_path()
+
+
+def _face_session():
+    with _FACE["lock"]:
+        if _FACE["session"] is None:
+            import onnxruntime as ort
+            _FACE["session"] = ort.InferenceSession(face_model_path(), providers=["CPUExecutionProvider"])
+    return _FACE["session"]
+
+
+def enhance_opts(opts: dict | None) -> dict:
+    """Opciones completas (las que falten, por defecto). `amount` en 0..100."""
+    o = dict(ENHANCE_DEFAULT)
+    o.update({k: v for k, v in (opts or {}).items() if k in ENHANCE_DEFAULT})
+    return o
+
+
+def enhance_seconds(h: int, w: int, faces: int = 0, opts: dict | None = None) -> float:
+    o = enhance_opts(opts)
+    t = upscale_seconds(h // 2, w // 2) if o["detail"] else 0.0
+    return t + (1.4 * faces if o["faces"] else 0.0)
+
+
+def brighten(rgb: np.ndarray, amount: float = 1.0) -> np.ndarray:
+    """Aclara una foto oscura (sRGB 0..1): sube la exposición en lineal hasta un medio tono normal, con hombro
+    suave para no quemar, y un poco de contraste local en las sombras. Sin IA (el ruido que aparece lo quita
+    «Enfocar y limpiar»). En RAW, la exposición de Events ya hace casi todo: esto es para lo que queda oscuro."""
+    amount = float(np.clip(amount, 0, 1))
+    y = cv2.cvtColor(rgb.astype(np.float32), cv2.COLOR_RGB2GRAY)
+    med = float(np.median(cv2.resize(y, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)))
+    if med >= 0.40 or amount <= 0:
+        return rgb
+    gain = min((0.42 / max(med, 0.02)) ** 2.2, 8.0) ** amount
+    lin = np.power(np.clip(rgb, 0, 1), 2.2) * gain
+    k = 0.6
+    lin = lin * (1 + k) / (1 + k * lin)  # hombro: 1 → 1, lo que pasa de 1 se comprime
+    out = np.power(np.clip(lin, 0, 1), 1 / 2.2).astype(np.float32)
+    lab = cv2.cvtColor(out, cv2.COLOR_RGB2LAB)
+    L8 = np.clip(lab[..., 0] * 2.55, 0, 255).astype(np.uint8)
+    Lc = cv2.createCLAHE(1.5, (8, 8)).apply(L8).astype(np.float32) / 2.55
+    lab[..., 0] += (Lc - lab[..., 0]) * 0.5 * amount
+    return np.clip(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB), 0, 1)
+
+
+def enhance_detail(rgb: np.ndarray, amount: float = 0.6, progress=None, cancel=None) -> np.ndarray:
+    """Enfocar y limpiar con Real-ESRGAN (truco ×0,5 → ×4 → ×1), mezclado con la foto según `amount` (0..1)."""
+    h, w = rgb.shape[:2]
+    small = cv2.resize(rgb.astype(np.float32), (max(8, w // 2), max(8, h // 2)), interpolation=cv2.INTER_AREA)
+    big = _esrgan_x4(small, progress, cancel)
+    out = cv2.resize(big, (w, h), interpolation=cv2.INTER_AREA)
+    return np.clip(rgb + (out - rgb) * float(amount), 0, 1).astype(np.float32)
+
+
+def _face_mask() -> np.ndarray:
+    m = np.zeros((512, 512), np.float32)
+    cv2.ellipse(m, (256, 300), (175, 225), 0, 0, 360, 1, -1)
+    return cv2.GaussianBlur(m, (0, 0), 22)
+
+
+def restore_faces(rgb: np.ndarray, points: list, amount: float = 0.7, cancel=None) -> np.ndarray:
+    """Restaura cada cara (5 puntos de YuNet en píxeles de `rgb`) con GFPGAN: alinea a la plantilla FFHQ de 512,
+    infiere, devuelve el grano de la cara original (si no, la piel queda de plástico junto al resto) y la pega con
+    una máscara difuminada mezclada según `amount` (0..1). Solo trabaja en la caja de cada cara."""
+    if not points or amount <= 0:
+        return rgb
+    sess = _face_session()
+    out = rgb.astype(np.float32, copy=True)
+    H, W = out.shape[:2]
+    mask = _face_mask()
+    for lm in points:
+        if cancel and cancel():
+            raise RuntimeError("Cancelado")
+        lm = np.asarray(lm, np.float32).reshape(5, 2)
+        if np.linalg.norm(lm[0] - lm[1]) < FACE_MIN:
+            continue
+        M, _ = cv2.estimateAffinePartial2D(lm, FFHQ_5, method=cv2.LMEDS)
+        if M is None:
+            continue
+        Mi = cv2.invertAffineTransform(M)
+        corners = cv2.transform(np.array([[[0, 0], [511, 0], [0, 511], [511, 511]]], np.float32), Mi)[0]
+        x0, y0 = np.floor(corners.min(0)).astype(int)
+        x1, y1 = np.ceil(corners.max(0)).astype(int) + 1
+        x0, y0, x1, y1 = max(0, x0), max(0, y0), min(W, x1), min(H, y1)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            continue
+        crop = cv2.warpAffine(out, M, (512, 512), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
+        x = ((np.clip(crop, 0, 1) - 0.5) / 0.5).transpose(2, 0, 1)[None].astype(np.float32)
+        y = sess.run(None, {sess.get_inputs()[0].name: np.ascontiguousarray(x)})[0][0].transpose(1, 2, 0)
+        y = np.clip((y + 1) / 2, 0, 1)
+        # grano: el ruido fino de la cara original vuelve encima de la restaurada
+        y = np.clip(y + (crop - cv2.GaussianBlur(crop, (0, 0), 1.2)) * 0.6, 0, 1)
+        Mr = Mi.copy()
+        Mr[:, 2] -= (x0, y0)
+        size = (x1 - x0, y1 - y0)
+        back = cv2.warpAffine(y, Mr, size, flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+        mb = cv2.warpAffine(mask, Mr, size, flags=cv2.INTER_LINEAR)[..., None] * float(amount)
+        roi = out[y0:y1, x0:x1]
+        out[y0:y1, x0:x1] = roi * (1 - mb) + back * mb
+    return np.clip(out, 0, 1)
+
+
+def enhance(rgb: np.ndarray, opts: dict | None = None, faces_fn=None, progress=None, cancel=None) -> np.ndarray:
+    """«Mejorar con IA» de una foto revelada (sRGB 0..1, RGB): aclarar → enfocar y limpiar → caras.
+    `faces_fn(rgb) -> [5 puntos]` localiza las caras (engine.face_points). Lo que no esté disponible (modelo
+    sin descargar) se salta. `progress(hecho, total)` con total = 100."""
+    o = enhance_opts(opts)
+    a = float(np.clip(o["amount"], 0, 100)) / 100
+    img = rgb[..., :3].astype(np.float32)
+    if o["light"]:
+        img = brighten(img, min(1.0, 0.5 + a))
+    if progress:
+        progress(5, 100)
+    if o["detail"] and upscaler_ready():
+        img = enhance_detail(img, a, (lambda k, n: progress(5 + int(80 * k / n), 100)) if progress else None,
+                             cancel)
+    if o["faces"] and face_ready() and faces_fn is not None:
+        pts = faces_fn(img)
+        if pts:
+            img = restore_faces(img, pts, min(1.0, 0.25 + a), cancel)
+    if progress:
+        progress(100, 100)
+    if rgb.shape[2] == 4:
+        img = np.dstack([img, rgb[..., 3]])
+    return img
+
+
 # ------------------------------------------------------------------ partículas (nieve, confeti…)
 
 PARTICLES = {"snow": "Nieve", "rain": "Lluvia", "confetti": "Confeti", "petals": "Pétalos", "bokeh": "Bokeh",

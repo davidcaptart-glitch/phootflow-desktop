@@ -114,7 +114,7 @@ def _glyph_icon(kind: str, size=THUMB) -> QPixmap:
     else:
         glyph = {"retouch": "✚", "skin": "◐", "light": "◉", "liquify": "≈", "background": "◫",
                  "logo": "◆", "image": "▣", "paint": "✎", "rays": "✺", "portrait": "☺",
-                 "particles": "❄", "artistic": "❦"}.get(kind, "■")
+                 "particles": "❄", "artistic": "❦", "enhance": "✦"}.get(kind, "■")
         f = QFont(p.font())
         f.setPixelSize(int(size * 0.5))
         p.setFont(f)

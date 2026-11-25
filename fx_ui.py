@@ -585,3 +585,55 @@ class DoubleExposureDialog(QDialog):
             QMessageBox.information(self, "Doble exposición", "Elige primero la segunda foto.")
             return
         self.accept()
+
+
+def ensure_enhance_models(parent, opts_list) -> bool:
+    """«Mejorar con IA»: descarga (preguntando antes) los modelos que pidan estas opciones. True si están."""
+    import threading
+    up = any(o.get("detail") for o in opts_list) and not FX.upscaler_ready()
+    fc = any(o.get("faces") for o in opts_list) and not FX.face_ready()
+    if not (up or fc):
+        return True
+    what = []
+    if up:
+        what.append(f"• Real-ESRGAN para enfocar y limpiar (≈{FX.UPSCALE_MB} MB, licencia BSD-3)")
+    if fc:
+        what.append(f"• GFPGAN 1.4 para las caras (≈{FX.FACE_MB} MB; código Apache-2.0, entrenado con FFHQ, "
+                    "de uso no comercial: ver docs/enfocar_ia.md)")
+    if QMessageBox.question(parent, "Mejorar con IA", "Hay que descargar una vez:\n\n" + "\n".join(what) +
+                            "\n\nSe guardan en la carpeta de modelos de PhootFlow. ¿Descargar ahora?") \
+            != QMessageBox.Yes:
+        return False
+    from PySide6.QtWidgets import QApplication, QProgressDialog
+    dlg = QProgressDialog("Descargando los modelos de IA…", "Cancelar", 0, 1000, parent)
+    dlg.setWindowModality(Qt.WindowModal)
+    dlg.setMinimumDuration(0)
+    stt = {"done": 0, "total": 1, "err": None, "end": False, "cancel": False}
+
+    def prog(done, total):
+        stt["done"], stt["total"] = done, max(1, total)
+
+    def job():
+        try:
+            if up:
+                FX.ensure_upscaler(prog)
+            if fc:
+                FX.ensure_face_model(prog, cancel=lambda: stt["cancel"])
+        except Exception as e:
+            stt["err"] = e
+        finally:
+            stt["end"] = True
+
+    threading.Thread(target=job, daemon=True).start()
+    while not stt["end"]:
+        QApplication.processEvents()
+        dlg.setValue(int(1000 * stt["done"] / stt["total"]))
+        if dlg.wasCanceled():
+            stt["cancel"] = True
+        time.sleep(0.05)
+    dlg.close()
+    if stt["err"] is not None:
+        if not stt["cancel"]:
+            QMessageBox.warning(parent, "Mejorar con IA", f"No se pudo descargar: {stt['err']}")
+        return False
+    return True

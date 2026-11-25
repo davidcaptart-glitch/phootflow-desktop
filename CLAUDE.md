@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 221 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -208,6 +208,20 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   partículas y efectos; Ver: Retícula y guías `d["grid"]`, como GuideGuide; ficha de capa, como Ink, en Capas y
   Ctrl+Mayús+I), Edits (capas `particles` y `artistic`, Doble exposición con capas normales, exportar ×2 con IA,
   ficha de capa al pasar el ratón).
+  «Mejorar con IA» (`FX.enhance`, ver `docs/enfocar_ia.md`): aclarar (`brighten`, sin IA) → enfocar y limpiar
+  (`enhance_detail`: Real-ESRGAN con el truco ×0,5→×4→×1, ≈70 s por foto de 26 MP) → caras (`restore_faces`: GFPGAN
+  1.4 alineado con los 5 puntos de YuNet a la plantilla FFHQ, con el grano devuelto; 340 MB que se descargan solo
+  si se piden, `ensure_face_model`; ≈1,3 s por cara), mezclado según `amount`. En Events: `E.suggest_fixes` (al
+  final de `cull`) deja en `ph.fix` cara blanda / foto blanda o con ruido / oscura, relativo a la sesión; en la
+  revisión, tarjeta «Mejorar con IA» (I), filtro «Para reparar con IA», «A las sugeridas…», vista mejorada en un
+  hilo y antes/después; también la casilla «Mejorar con IA» de la ficha de la foto en la ventana principal, con la
+  vista previa y el zoom mejorados en un hilo (`Main._enhanced_preview`, `enh_ready`); lo elegido va en `ph.enhance`
+  (revision.json) y `E.export` lo aplica (`enhance_photo`) al revelado. La revisión muestra también la IA de las
+  fotos retocadas en Studio. Studio: sección «Mejorar con IA» en Detalle (ajustes `ai`, `ai_detail`, `ai_faces`, `ai_light`,
+  `ai_amount`, fuera de los presets); `SE.render(..., ai=True)` solo en la vista definitiva, el zoom y al exportar,
+  con `ai_stage` en caché (lo de después —LUT, B/N, recorte, efectos— no la repite). Edits: capa «enhance» (Capa ›
+  Nueva capa › Mejorar con IA), con máscara y opacidad. Descarga de modelos común: `fx_ui.ensure_enhance_models`;
+  caras desde cualquier hilo con `E.face_points_shared`.
 - `bokeh.py` — desenfocar fondo y efecto velocidad (sin Qt). Sujeto: persona con `masks.segment` (IA), si no
   GrabCut desde la saliencia de `smartcrop`, o una máscara dada; a ≤1024 px (`subject_lowres`, caché por foto) y borde
   ajustado al pelo con filtro guiado rápido (coeficientes a ≤2048 px aplicados por franjas a resolución completa).

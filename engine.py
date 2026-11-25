@@ -236,6 +236,8 @@ class Photo:
     lut_strength: float | None = None  # intensidad del LUT en esta foto (None = la de la sesión)
     bw_style: str = ""          # estilo de B/N de esta foto ("" = el de la sesión; BW_NONE = sin B/N)
     look: str = ""              # look de color de esta foto ("" = el de la sesión)
+    fix: list = field(default_factory=list)      # reparaciones con IA sugeridas (FIX_*), de `suggest_fixes`
+    enhance: dict = field(default_factory=dict)  # «Mejorar con IA» elegido en la revisión ({} = no)
     bokeh: str = ""             # desenfocar fondo: "" = la regla de la sesión, BOKEH_NONE = no, o un nivel
     speed: dict = field(default_factory=dict)    # efecto velocidad (revisión): {amount, angle (None = auto), trail}
     retouch: str = ""           # retoque de retrato: "" = la regla de la sesión, RETOUCH_NONE = no, RETOUCH_ON = sí
@@ -1304,6 +1306,101 @@ def cull(photos: list[Photo], st: Settings) -> None:
                     group = []
             group.append(p)
         close(group)
+    suggest_fixes(photos)
+
+
+# ------------------------------------------------------------------ reparar con IA (sugerencias y aplicación)
+# Ver docs/enfocar_ia.md. El análisis solo SUGIERE (no cambia ni mueve nada); en la revisión se elige qué fotos
+# se mejoran y se aplica al exportar, sobre el revelado final (fx_engine.enhance).
+
+FIX_FACES, FIX_DETAIL, FIX_LIGHT = "caras", "detalle", "luz"
+FIX_LABELS = {FIX_FACES: "cara blanda", FIX_DETAIL: "foto blanda o con ruido", FIX_LIGHT: "oscura"}
+FIX_ISO = 6400       # a partir de aquí el ruido pide «Enfocar y limpiar» aunque la foto esté nítida
+FIX_SOFT = 0.6       # nitidez por debajo de esta fracción de la mediana de la sesión = foto blanda
+FIX_FACE_SOFT = 0.7  # ídem con la nitidez de la cara frente a la mediana de las caras
+FIX_DARK = 0.035     # luminancia lineal mediana tras la exposición por debajo de la cual queda oscura
+
+
+def suggest_fixes(photos: list[Photo]) -> int:
+    """Marca en `ph.fix` lo que «Mejorar con IA» podría arreglar: cara blanda, foto blanda o con ruido, oscura.
+    Relativo a la sesión (la nitidez depende del objetivo, la distancia y el ISO). Devuelve cuántas tienen algo."""
+    ok = [p for p in photos if not p.error and p.sharp > 0]
+    med = float(np.median([p.sharp for p in ok])) if len(ok) >= 5 else 0.0
+    faced = [p.face_sharp for p in ok if p.face_sharp > 0]
+    med_f = float(np.median(faced)) if len(faced) >= 5 else 0.0
+    ids = {id(p) for p in ok}
+    n = 0
+    for p in photos:
+        fix = []
+        if id(p) in ids:
+            if p.face_sharp > 0 and (p.face_sharp < 0.5 * p.sharp or (med_f and p.face_sharp < FIX_FACE_SOFT * med_f)):
+                fix.append(FIX_FACES)
+            if (med and p.sharp < FIX_SOFT * med) or p.iso >= FIX_ISO:
+                fix.append(FIX_DETAIL)
+            gain = 2 ** p.ev
+            dark_face = p.face_lin > 0 and p.face_lin * gain < 2 * FIX_DARK
+            if (p.lum_med > 0 and p.lum_med * gain < FIX_DARK) or dark_face:
+                fix.append(FIX_LIGHT)
+        p.fix = fix
+        n += bool(fix)
+    return n
+
+
+def fix_text(ph: Photo) -> str:
+    return ", ".join(FIX_LABELS[f] for f in ph.fix if f in FIX_LABELS)
+
+
+def suggested_enhance(ph: Photo) -> dict:
+    """Opciones de «Mejorar con IA» según lo sugerido (si no hay sugerencia, enfocar y caras)."""
+    import fx_engine as FX
+    o = FX.enhance_opts({})
+    if ph.fix:
+        o.update(detail=FIX_DETAIL in ph.fix or FIX_FACES not in ph.fix, faces=FIX_FACES in ph.fix,
+                 light=FIX_LIGHT in ph.fix)
+    return o
+
+
+def face_points(rgb: np.ndarray, min_eyes: float = 14.0, det=None) -> list:
+    """Caras de una imagen RGB 0..1 (o uint8) como 5 puntos (ojos, nariz, comisuras) en sus píxeles, con YuNet.
+    `det`: un detector propio (creado en el hilo principal) si se llama desde un hilo suelto."""
+    det = _detector("yunet") if det is None else det
+    if det is False:
+        return []
+    h, w = rgb.shape[:2]
+    s = min(1.0, 1600 / max(h, w))
+    a = rgb[..., :3]
+    a8 = a if a.dtype == np.uint8 else (np.clip(a, 0, 1) * 255).astype(np.uint8)
+    small = cv2.resize(a8, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_AREA) if s < 1 else a8
+    bgr = np.ascontiguousarray(small[..., ::-1])
+    det.setInputSize((bgr.shape[1], bgr.shape[0]))
+    _, found = det.detect(bgr)
+    pts = []
+    for f in (found if found is not None else []):
+        lm = (np.asarray(f[4:14], np.float32).reshape(5, 2) / s)
+        if f[14] >= 0.75 and np.linalg.norm(lm[0] - lm[1]) >= min_eyes:
+            pts.append(lm)
+    return pts
+
+
+_SHARED_YUNET = {"det": None, "lock": threading.Lock()}
+
+
+def face_points_shared(rgb: np.ndarray) -> list:
+    """`face_points` desde cualquier hilo (zoom, render de Studio, exportar): un solo YuNet con cerrojo,
+    guardado en `_KEEP` para que no se destruya al acabar el hilo que lo creó."""
+    with _SHARED_YUNET["lock"]:
+        if _SHARED_YUNET["det"] is None:
+            d = _make_yunet()
+            _KEEP.append(d)
+            _SHARED_YUNET["det"] = d
+        det = _SHARED_YUNET["det"]
+        return [] if det is False else face_points(rgb, det=det)
+
+
+def enhance_photo(img: np.ndarray, opts: dict, progress=None, cancel=None) -> np.ndarray:
+    """Aplica «Mejorar con IA» al revelado (RGB 0..1). Sin modelos descargados devuelve lo que pueda (o igual)."""
+    import fx_engine as FX
+    return FX.enhance(img, opts, faces_fn=face_points_shared, progress=progress, cancel=cancel)
 
 
 # ------------------------------------------------------------------ revelado
@@ -1755,6 +1852,8 @@ def portrait_fx(img: np.ndarray, ph: Photo, st: Settings, key: str = "") -> np.n
 def export(ph: Photo, st: Settings, out_dir: str, version: str = "") -> list[str]:
     """Revela la foto y guarda el formato sugerido más los formatos elegidos, en cada tamaño."""
     img = develop(ph, st)
+    if ph.enhance:
+        img = enhance_photo(img, ph.enhance)
     img = portrait_fx(img, ph, st)
     img = blur_fx(img, ph, st)
     exif = build_exif(ph, version) if st.keep_exif else b""
@@ -1916,8 +2015,8 @@ def save_session(photos: list[Photo], st: Settings, work_dir: str) -> None:
 
 
 CUSTOM_CROP = "Personalizado"  # recorte dibujado a mano en la revisión
-_REVIEW_FIELDS = ("keep", "reviewed", "reason", "best", "look", "bw_style", "lut_strength", "bokeh", "speed",
-                  "retouch")
+_REVIEW_FIELDS = ("keep", "reviewed", "reason", "best", "look", "bw_style", "lut_strength", "enhance", "bokeh",
+                  "speed", "retouch")
 
 
 def has_saved_work(work_dir: str) -> bool:
@@ -1971,6 +2070,7 @@ def load_review(photos: list[Photo], work_dir: str) -> int:
             ph.best = r["best"]
         ph.look, ph.bw_style = r.get("look") or "", r.get("bw_style") or ""
         ph.lut_strength = r.get("lut_strength")
+        ph.enhance = dict(r.get("enhance") or {})
         ph.bokeh, ph.speed = r.get("bokeh") or "", dict(r.get("speed") or {})
         ph.retouch = r.get("retouch") or ""
         if r.get("reviewed"):

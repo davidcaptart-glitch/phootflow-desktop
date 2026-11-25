@@ -757,7 +757,7 @@ class StudioView(QWidget):
         panels = dict(SE.PANELS)
         layout = [("sun", "Luz", ["Básico", "Presencia", "Curva tonal"]),
                   ("palette", "Color", ["_color", "_splash", "_hsl", "Gradación de color"]),
-                  ("detail", "Detalle", ["Detalle", "Efectos", "_blur"]),
+                  ("detail", "Detalle", ["_ai", "Detalle", "Efectos", "_blur"]),
                   ("mask", "Máscaras", ["_masks"]),
                   ("crop", "Recorte y geometría", ["_crop", "Geometría"])]
         self._tab_btns = []
@@ -772,6 +772,8 @@ class StudioView(QWidget):
                     bv.addWidget(self._build_splash())
                 elif t == "_blur":
                     bv.addWidget(self._build_blur())
+                elif t == "_ai":
+                    bv.addWidget(self._build_ai())
                 elif t == "_color":
                     sec = Section("Perfil, LUT y B/N")
                     row = QHBoxLayout()
@@ -1949,7 +1951,7 @@ class StudioView(QWidget):
             t = time.time()
             try:
                 img = SE.render(lin, s, seed=hash(path) & 0xFFFF, key=path, show_mask=show,
-                                crop=cropped)
+                                crop=cropped, ai=not draft and show is None)
             except Exception as e:
                 self.rendered.emit(n, None, f"{type(e).__name__}: {e}", draft)
                 continue
@@ -1982,7 +1984,7 @@ class StudioView(QWidget):
                    c[0] + box[2] * (c[2] - c[0]), c[1] + box[3] * (c[3] - c[1]))
         flat = dict(s, angle=0, crop=[0.0, 0.0, 1.0, 1.0])
         return Z.region(lin, float(s.get("angle", 0)), box_rot,
-                        lambda part: SE.render(part, flat, seed=hash(it.path) & 0xFFFF, key=it.path + "#zona"),
+                        lambda part: SE.render(part, flat, seed=hash(it.path) & 0xFFFF, key=it.path + "#zona", ai=True),
                         E._safe_rect)
 
     def _on_rendered(self, n, img, info, draft):
@@ -2116,6 +2118,73 @@ class StudioView(QWidget):
         self.splash_skin.toggled.connect(lambda on: self._set("splash_skin", bool(on), True))
         sec.lay.addWidget(self.splash_skin)
         return sec
+
+    def _build_ai(self):
+        """«Mejorar con IA»: enfocar y limpiar (Real-ESRGAN), caras (GFPGAN) y aclarar. Se ve en la vista definitiva
+        (unos segundos) y en el zoom al 100 %, y se aplica al exportar."""
+        sec = Section("Mejorar con IA", open_=False)
+        intro = QLabel("Para fotos algo blandas, con ruido o caras poco nítidas. La IA reconstruye el detalle que "
+                       "falta (pestañas, iris, texturas): compara antes y después. Tarda unos segundos en la vista "
+                       "y ≈1 min por foto al exportar.")
+        intro.setWordWrap(True)
+        intro.setObjectName("meta")
+        sec.lay.addWidget(intro)
+        self.ai_cb = QCheckBox("Mejorar con IA")
+        self.ai_cb.toggled.connect(self._ai_toggled)
+        sec.lay.addWidget(self.ai_cb)
+        row = QHBoxLayout()
+        self.ai_checks = {}
+        for key, text, tip in (("ai_detail", "Enfocar y limpiar", "Real-ESRGAN: quita ruido y artefactos y redibuja los bordes"),
+                               ("ai_faces", "Caras", "GFPGAN: restaura las caras blandas; inventa pestañas, iris y dientes"),
+                               ("ai_light", "Aclarar", "Sube la luz de lo que sigue oscuro (sin IA)")):
+            c = QCheckBox(text)
+            c.setToolTip(tip)
+            c.toggled.connect(lambda on, k=key: self._ai_opt(k, on))
+            self.ai_checks[key] = c
+            row.addWidget(c)
+        sec.lay.addLayout(row)
+        for c in SE.AI_CTRLS:
+            r = SliderRow(*c)
+            r.changed.connect(self._set)
+            self.rows[c[0]] = r
+            sec.lay.addWidget(r)
+        return sec
+
+    def _sync_ai_ui(self):
+        if not hasattr(self, "ai_cb"):
+            return
+        s = self.cur.settings if self.cur else {}
+        on = bool(s.get("ai"))
+        self.ai_cb.blockSignals(True)
+        self.ai_cb.setChecked(on)
+        self.ai_cb.blockSignals(False)
+        for k, c in self.ai_checks.items():
+            c.blockSignals(True)
+            c.setChecked(bool(s.get(k, SE.DEFAULTS[k])))
+            c.blockSignals(False)
+            c.setEnabled(on)
+        self.rows["ai_amount"].setEnabled(on)
+
+    def _ai_ready(self, s: dict) -> bool:
+        import fx_ui
+        return fx_ui.ensure_enhance_models(self, [SE.ai_opts(s)])
+
+    def _ai_toggled(self, on):
+        if not self.cur:
+            return
+        if on and not self._ai_ready(self.cur.settings):
+            self._sync_ai_ui()
+            return
+        self._set("ai", bool(on), True)
+        self._sync_ai_ui()
+
+    def _ai_opt(self, key, on):
+        if not self.cur:
+            return
+        if on and key != "ai_light" and not self._ai_ready(dict(self.cur.settings, **{key: True})):
+            self._sync_ai_ui()
+            return
+        self._set(key, bool(on), True)
 
     def _build_blur(self):
         """Desenfocar fondo (bokeh con discos en las luces) y Velocidad (barrido con estela): el sujeto nítido."""
@@ -2352,6 +2421,7 @@ class StudioView(QWidget):
         self._sync_bw_ui(bool(s.get("bw")))
         self._sync_splash_ui()
         self._sync_blur_ui()
+        self._sync_ai_ui()
         if hasattr(self, "crop_angle"):
             self._sync_angle_rows(float(s.get("angle", 0) or 0))
         i = self.lut_cb.findData(s.get("lut") or None)

@@ -62,14 +62,14 @@ DOC_VERSION = 1
 KINDS = {"liquify": "Licuar", "retouch": "Retoque", "skin": "Piel", "light": "Ojos y luz", "portrait": "Retrato",
          "background": "Fondo", "text": "Texto", "logo": "Logo", "image": "Imagen", "adjust": "Ajuste",
          "paint": "Pintura", "group": "Grupo", "rays": "Rayos de luz", "particles": "Partículas",
-         "artistic": "Filtro artístico", "speed": "Velocidad"}
+         "artistic": "Filtro artístico", "speed": "Velocidad", "enhance": "Mejorar con IA"}
 OVERLAY = ("text", "logo")
 CLIPPABLE = ("adjust", "image", "paint")  # lo que puede ir recortado a una imagen o pintura
 CLIP_BASES = ("image", "paint")  # capas con píxeles propios: base de una máscara de recorte
 IMAGE_EXT = tuple(sorted(E.IMG_EXT))  # JPEG, PNG, TIFF, WebP, BMP, AVIF y HEIF (si está pillow-heif)
 CUTS = {"none": "No quitar el fondo", "color": "Logo o fondo liso (por color)",
         "object": "Objeto o producto (automático)", "person": "Persona (IA)"}
-PIXEL_ORDER = ("liquify", "retouch", "skin", "light", "portrait", "background", "adjust", "artistic", "image", "paint",
+PIXEL_ORDER = ("liquify", "retouch", "enhance", "skin", "light", "portrait", "background", "adjust", "artistic", "image", "paint",
                "rays", "particles", "speed", "group")
 # efectos de capa (imagen y pintura). Tamaños y distancias en % del lado largo; ángulos en grados
 FX_DEFAULTS = {"shadow": {"on": False, "color": "#000000", "opacity": 60, "angle": 120, "distance": 1.0,
@@ -125,7 +125,8 @@ def new_layer(kind: str, **kw) -> dict:
                       seed=7),
          "particles": dict(p=_fx().particle_defaults("snow")),
          "artistic": dict(art="watercolor", amount=100.0, detail=50.0),
-         "speed": dict(amount=50.0, auto=True, angle=0.0, trail=50.0, detect="auto")}[kind]
+         "speed": dict(amount=50.0, auto=True, angle=0.0, trail=50.0, detect="auto"),
+         "enhance": dict(detail=True, faces=True, light=False, amount=60.0)}[kind]
     p.update(kw)
     lay = {"id": uuid.uuid4().hex[:8], "kind": kind, "name": KINDS[kind], "visible": True, "opacity": 100,
            "blend": "normal", **p}
@@ -1573,7 +1574,9 @@ def _layer_active(l: dict) -> bool:
             "group": True, "rays": l.get("amount", 0) > 0,
             "particles": float((l.get("p") or {}).get("density", 0)) > 0,
             "artistic": bool(l.get("art")) and float(l.get("amount", 0)) > 0,
-            "speed": float(l.get("amount", 0)) > 0}.get(k, False)
+            "speed": float(l.get("amount", 0)) > 0,
+            "enhance": float(l.get("amount", 0)) > 0 and any(l.get(x) for x in ("detail", "faces", "light")),
+            }.get(k, False)
 
 
 # ------------------------------------------------------------------ pintura (pincel y borrador)
@@ -2006,6 +2009,9 @@ def apply_pixel_layer(img: np.ndarray, lay: dict, key: str = "", frame=None):
         import bokeh as BK
         out = BK.speed(img, float(lay.get("amount", 50)), None if lay.get("auto", True) else float(lay.get("angle", 0)),
                        float(lay.get("trail", 50)), lay.get("detect", "auto"), key)
+    elif k == "enhance":  # Mejorar con IA (fx_engine.enhance): enfocar y limpiar, caras y aclarar
+        out = E.enhance_photo(np.clip(img, 0, 1).astype(np.float32),
+                              {x: lay.get(x) for x in ("detail", "faces", "light", "amount")})
     elif k == "artistic":
         out = _fx().artistic(img, lay.get("art", "watercolor"), float(lay.get("amount", 100)),
                              float(lay.get("detail", 50)))

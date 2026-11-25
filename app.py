@@ -171,8 +171,11 @@ class Worker(QThread):
         warn = sum(1 for p in self.photos if p.warn)
         saved = f" Revisión guardada: {rev} ya revisadas; pulsa «Revisar» para seguir." if rev else ""
         saved += f" {n_enh} marcadas para «Mejorar con IA»." if n_enh else ""
+        fix = sum(1 for p in self.photos if p.keep and p.fix)
+        fix_t = (f" {fix} se podrían mejorar con IA (filtro «Para reparar con IA» en la revisión)."
+                 if fix else "")
         return detected + f"Análisis: {keep} para editar, {n - keep} descartadas" + \
-            (f", {warn} con avisos." if warn else ".") + saved
+            (f", {warn} con avisos." if warn else ".") + fix_t + saved
 
     def _write_session_file(self):
         """Deja «<sesión>.phootflow» en la carpeta: con doble clic vuelve a abrir esta sesión."""
@@ -854,6 +857,7 @@ class Main(QMainWindow):
     request_studio = Signal(object)    # la revisión pide retocar esta foto en Studio
     request_edits = Signal(object)     # … o retocarla en Edits
     models_status = Signal(str)        # mensajes de la descarga/carga de los modelos de IA
+    enh_ready = Signal(object)         # vista previa «Mejorar con IA» calculada en segundo plano
 
     def __init__(self):
         super().__init__()
@@ -1441,6 +1445,14 @@ class Main(QMainWindow):
         self.p_look.setToolTip("Look de color solo para esta foto.")
         self.p_look.currentTextChanged.connect(self.on_photo_look)
         cv.addWidget(labeled("Look", self.p_look))
+        self.p_enh = QCheckBox("Mejorar con IA")
+        self.p_enh.setToolTip("Enfoca, quita ruido, restaura caras y aclara esta foto (se ve en la vista previa en unos "
+                              "segundos y se exporta así). Opciones e intensidad, en la revisión (I)")
+        self.p_enh.toggled.connect(self.on_photo_enhance)
+        cv.addWidget(self.p_enh)
+        self._enh_view: dict = {}
+        self._enh_busy: set = set()
+        self.enh_ready.connect(lambda _k: self.show_preview())
         v.addWidget(c)
         self.p_card = c
         c.setEnabled(False)
@@ -2006,8 +2018,10 @@ class Main(QMainWindow):
         if ph.warn:
             lines.append(f"⚠ {ph.warn}")
         self.p_info.setText("\n".join(lines))
-        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut, self.p_bw, self.p_look):
+        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut, self.p_bw, self.p_look, self.p_enh):
             w.blockSignals(True)
+        self.p_enh.setChecked(bool(ph.enhance))
+        self.p_enh.setText("Mejorar con IA" + (f" (sugerido: {E.fix_text(ph)})" if ph.fix else ""))
         self.p_look.setCurrentText(ph.look or "Como la sesión")
         self.p_bw.setCurrentText(ph.bw_style or "Como la sesión")
         has_lut = self.lut_cb.currentData() is not None
@@ -2026,7 +2040,7 @@ class Main(QMainWindow):
         self.p_fmt.setToolTip(why)
         self.p_fmt_chips.setToolTip(why)
         self.p_fmt_chips.rebuild()  # (con las señales bloqueadas, los chips no se enteran solos)
-        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut, self.p_bw, self.p_look):
+        for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut, self.p_bw, self.p_look, self.p_enh):
             w.blockSignals(False)
         self.p_card.setEnabled(bool(ph.thumb) and not ph.error and not self.worker)
         self.show_preview()
@@ -2036,15 +2050,87 @@ class Main(QMainWindow):
         if not ph or not (ph.preview or ph.preview_path):
             pm = self.thumb_pixmap(ph) if ph else None
             return self.preview.set_image(pm, None)
-        pm = np_to_pixmap(render_preview(ph, self.settings().style))
+        arr = render_preview(ph, self.settings().style)
         before = np_to_pixmap(render_before(ph)) if self.preview.cmp.active else None
+        if ph.enhance:
+            e = self._enhanced_preview(ph, arr)
+            if e is not None:
+                if self.preview.cmp.active:  # antes/después: la misma edición sin la IA
+                    before = np_to_pixmap(E.cv2.resize(arr, (e.shape[1], e.shape[0]), interpolation=E.cv2.INTER_AREA))
+                arr = e
+        pm = np_to_pixmap(arr)
         self.preview.set_image(pm, ph.crops.get(ph.best), dim=not ph.keep, before=before)
         style = self.settings().style
         self.preview.zoom.reset(key=(ph.path, round(ph.ev, 2), round(ph.angle, 2), ph.look, ph.bw_style,
-                                     str(sorted((k, str(v)) for k, v in style.items() if k != "lut"))[:400]),
+                                     str(sorted((k, str(v)) for k, v in style.items() if k != "lut"))[:400],
+                                     str(sorted(ph.enhance.items()))),
                                 full_size=E.full_size(ph.path))
-        self.preview.zoom.provider = lambda box, ph=ph: self.zone_tile(ph, box, False)
+        self.preview.zoom.provider = lambda box, ph=ph: self._enh_tile(ph, self.zone_tile(ph, box, False))
         self.preview.zoom.schedule()
+
+    # ---------------------------------------------------------- mejorar con IA (vista previa)
+    def _enhanced_preview(self, ph, arr):
+        """Vista previa mejorada con IA: se calcula en un hilo (None mientras tanto) y `enh_ready` la muestra."""
+        import zlib
+        small = arr[::16, ::16]
+        k = (ph.path, str(sorted(ph.enhance.items())), arr.shape, zlib.crc32(np.ascontiguousarray(small).tobytes()))
+        if k in self._enh_view:
+            return self._enh_view[k]
+        if k not in self._enh_busy:
+            self._enh_busy.add(k)
+            src = arr.astype(np.float32) / 255 if arr.dtype == np.uint8 else arr.astype(np.float32)
+            f = 1600 / max(src.shape[:2])
+            if f < 1:
+                src = E.cv2.resize(src, (int(src.shape[1] * f), int(src.shape[0] * f)), interpolation=E.cv2.INTER_AREA)
+            opts = dict(ph.enhance)
+
+            def job():
+                try:
+                    out = (np.clip(E.enhance_photo(src, opts), 0, 1) * 255 + 0.5).astype(np.uint8)
+                except Exception:
+                    out = None
+                if out is not None:
+                    self._enh_view[k] = out
+                    while len(self._enh_view) > 12:
+                        self._enh_view.pop(next(iter(self._enh_view)))
+                self._enh_busy.discard(k)
+                if out is not None and self.cur is not None and self.cur.path == k[0]:
+                    self.enh_ready.emit(k)
+
+            threading.Thread(target=job, daemon=True).start()
+        return None
+
+    def _enh_tile(self, ph, tile):
+        """Zona al 100 % (zoom, en un hilo), mejorada con IA si la foto lo lleva."""
+        if tile is None or not ph.enhance:
+            return tile
+        if tile.dtype == np.uint8:
+            out = E.enhance_photo(tile.astype(np.float32) / 255, ph.enhance)
+            return (np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8)
+        return E.enhance_photo(tile.astype(np.float32), ph.enhance)
+
+    def on_photo_enhance(self, on: bool):
+        ph = self.cur
+        if not ph or not ph.thumb:
+            return
+        if on:
+            import fx_engine as FX
+            import fx_ui
+            o = E.suggested_enhance(ph)
+            if not fx_ui.ensure_enhance_models(self, [o]):
+                o["faces"] = o["faces"] and FX.face_ready()
+                o["detail"] = o["detail"] and FX.upscaler_ready()
+                if not (o["faces"] or o["detail"] or o["light"]):
+                    self.p_enh.blockSignals(True)
+                    self.p_enh.setChecked(False)
+                    self.p_enh.blockSignals(False)
+                    return
+            ph.enhance = o
+        else:
+            ph.enhance = {}
+        self.save_review()
+        self.show_preview()
+        self.grid.viewport().update()
 
     def zone_tile(self, ph, box_rot, bw_view: bool):
         """Zona visible a resolución completa con el revelado real de Events (para el zoom > vista previa)."""

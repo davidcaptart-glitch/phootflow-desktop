@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 import numpy as np
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame, QHBoxLayout,
-                               QLabel, QListView, QListWidget, QListWidgetItem, QPushButton, QRadioButton,
+                               QLabel, QListView, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QRadioButton,
                                QSizePolicy, QSlider, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
 
 import compare as CMP
@@ -18,10 +19,11 @@ import icons as I
 import zoomview as Z
 import bokeh as BK
 import engine as E
+import fx_engine as FX
 import theme as T
 
 ROLE = Qt.UserRole + 11
-FILTERS = ["Todas", "Aprobadas", "Rechazadas", "Pendientes de revisar"]
+FILTERS = ["Todas", "Aprobadas", "Rechazadas", "Pendientes de revisar", "Para reparar con IA"]
 
 
 def _pm(a: np.ndarray) -> QPixmap:
@@ -91,6 +93,9 @@ class StripDelegate(QStyledItemDelegate):
         if self.dlg.is_studio(ph):
             p.setPen(QColor(T.ACCENT))
             p.drawText(r.adjusted(4, 2, -4, -2), Qt.AlignRight | Qt.AlignTop, "S")
+        if getattr(ph, "enhance", None) or getattr(ph, "fix", None):  # IA: elegida (color) o sugerida (gris)
+            p.setPen(QColor(T.ACCENT if ph.enhance else T.MUTED))
+            p.drawText(r.adjusted(4, 2, -4, -2), Qt.AlignLeft | Qt.AlignTop, "IA")
         p.restore()
 
 
@@ -180,6 +185,7 @@ class ReviewDialog(QDialog):
     `studio_photo` en Studio o en Edits) o "" (cerrar sin exportar). Los cambios (aprobar/rechazar, recorte) se
     aplican directamente a las fotos."""
     studio_requested = Signal(object)
+    enh_ready = Signal(object)  # una vista «Mejorar con IA» calculada en segundo plano
 
     def __init__(self, main, render_fn, studio_render_fn, is_studio_fn, start=0, bw_style="Editorial",
                  bw_on=False, look="Natural", before_fn=None, tile_fn=None, on_change=None, prop=None):
@@ -195,7 +201,6 @@ class ReviewDialog(QDialog):
         self.setWindowTitle("Revisión antes de exportar")
         self.setWindowState(Qt.WindowMaximized)
         self.main = main
-        self._blur_cache: dict = {}  # vistas con desenfoque de fondo o velocidad
         self.render_fn, self.studio_render_fn, self.is_studio = render_fn, studio_render_fn, is_studio_fn
         self.photos = [p for p in main.photos if p.thumb and not p.error]
         self.action, self.studio_photo = "", None
@@ -207,6 +212,12 @@ class ReviewDialog(QDialog):
         self.tile_fn = tile_fn      # tile_fn(ph, caja en la foto girada, bw) -> zona a resolución completa
         self._before: dict = {}
         self._cache: dict = {}
+        self._enh: dict = {}        # vistas mejoradas con IA ya calculadas
+        self._enh_busy: set = set()
+        self._blur_cache: dict = {}  # vistas con desenfoque de fondo o velocidad
+        self._ylock = threading.Lock()
+        self._yunet = E._make_yunet()  # detector de caras propio, creado aquí (hilo principal), para los hilos
+        self._syncing = False
 
         v = QVBoxLayout(self)
         v.setContentsMargins(16, 12, 16, 12)
@@ -298,8 +309,44 @@ class ReviewDialog(QDialog):
         for b in (self.b_pcopy, self.b_ppaste, self.b_papply):
             prow.addWidget(b)
         self.prop_info = QLabel("")
-        self.prop_info.setObjectName("muted")
-        self.prop_info.setWordWrap(True)
+        self.enh_t = QLabel("MEJORAR CON IA")
+        self.enh_t.setObjectName("cardTitle")
+        self.enh_info = QLabel("")
+        self.enh_info.setObjectName("muted")
+        self.enh_info.setWordWrap(True)
+        self.b_enh = _ibtn("auto", "Mejorar con IA esta foto: enfoca, quita ruido, restaura caras y aclara (I). "
+                                   "La IA reconstruye lo que falta: compara antes y después. Se aplica al exportar",
+                           True, text="Mejorar con IA")
+        self.b_enh.toggled.connect(self._enh_toggle)
+        self.b_enh_all = _btn("A las sugeridas…", "ghost", "Marcar «Mejorar con IA» en las aprobadas que lo sugiere "
+                                                           "el análisis (cara blanda, foto blanda o con ruido, oscura)")
+        self.b_enh_all.clicked.connect(self._enh_all)
+        erow = QHBoxLayout()
+        erow.addWidget(self.b_enh, 1)
+        erow.addWidget(self.b_enh_all)
+        orow = QHBoxLayout()
+        self.c_detail = QCheckBox("Enfocar y limpiar")
+        self.c_detail.setToolTip("Real-ESRGAN: quita ruido y artefactos y redibuja los bordes (≈1 min por foto al exportar)")
+        self.c_faces = QCheckBox("Caras")
+        self.c_faces.setToolTip("GFPGAN: restaura las caras blandas (≈1 s por cara). Inventa pestañas, iris y dientes")
+        self.c_light = QCheckBox("Aclarar")
+        self.c_light.setToolTip("Sube la luz de lo que sigue oscuro (sin IA)")
+        for c in (self.c_detail, self.c_faces, self.c_light):
+            c.toggled.connect(self._enh_opts_changed)
+            orow.addWidget(c)
+        mrow = QHBoxLayout()
+        self.enh_amt = QSlider(Qt.Horizontal)
+        self.enh_amt.setRange(0, 100)
+        self.enh_amt.setToolTip("Intensidad: cuánto de la versión de la IA se mezcla con la foto")
+        self.enh_amt.sliderReleased.connect(self._enh_opts_changed)
+        self.enh_amt_lbl = QLabel("60 %")
+        self.enh_amt_lbl.setObjectName("muted")
+        self.enh_amt_lbl.setFixedWidth(40)
+        self.enh_amt.valueChanged.connect(lambda v: self.enh_amt_lbl.setText(f"{v} %"))
+        mrow.addWidget(QLabel("Intensidad"))
+        mrow.addWidget(self.enh_amt, 1)
+        mrow.addWidget(self.enh_amt_lbl)
+        self.enh_ready.connect(lambda _k: self.show_photo())
         # desenfocar fondo y velocidad de esta foto (bokeh.py; se aplican al exportar)
         self.blur_t = QLabel("FONDO Y VELOCIDAD")
         self.blur_t.setObjectName("cardTitle")
@@ -318,8 +365,8 @@ class ReviewDialog(QDialog):
             self.speed_cb.addItem(label, ang)
         self.speed_cb.activated.connect(self._blur_changed)
         self.speed_amt = QComboBox()
-        for label, v in (("Suave", 30), ("Media", 55), ("Fuerte", 85)):
-            self.speed_amt.addItem(label, v)
+        for label, amt in (("Suave", 30), ("Media", 55), ("Fuerte", 85)):  # (no `v`: es el diseño de la ventana)
+            self.speed_amt.addItem(label, amt)
         self.speed_amt.setCurrentIndex(1)
         self.speed_amt.activated.connect(self._blur_changed)
         brow = QHBoxLayout()
@@ -334,6 +381,8 @@ class ReviewDialog(QDialog):
         self.ret_cb.addItem("Retrato: retocar", E.RETOUCH_ON)
         self.ret_cb.activated.connect(self._ret_changed)
         self._ret_cache: dict = {}
+        self.prop_info.setObjectName("muted")
+        self.prop_info.setWordWrap(True)
         self.bw_t = QLabel("ESTILO B/N DE ESTA FOTO")
         self.bw_t.setObjectName("cardTitle")
         self.bw_list = QListWidget()
@@ -406,6 +455,11 @@ class ReviewDialog(QDialog):
             sv.addWidget(self.prop_t)
             sv.addLayout(prow)
             sv.addWidget(self.prop_info)
+        sv.addWidget(self.enh_t)
+        sv.addLayout(erow)
+        sv.addLayout(orow)
+        sv.addLayout(mrow)
+        sv.addWidget(self.enh_info)
         sv.addSpacing(6)
         sv.addWidget(self.blur_t)
         sv.addWidget(self.bokeh_cb)
@@ -451,7 +505,7 @@ class ReviewDialog(QDialog):
                       ("Y", lambda: (self.big.cmp.next_split(), self.set_compare(self.big.cmp.mode))),
                       ("Z", lambda: self.big.zoom.toggle(None, self.big._area(), self.big.pm.size())
                        if self.big.pm is not None else None),
-                      ("E", self._studio), ("Shift+E", self._edits), ("C", self.b_crop.toggle),
+                      ("E", self._studio), ("Shift+E", self._edits), ("I", self.b_enh.toggle), ("C", self.b_crop.toggle),
                       ("Ctrl+C", self._copy_edit), ("Ctrl+V", self._paste_edit), (Qt.Key_Right, lambda: self.step(1)), (Qt.Key_Left, lambda: self.step(-1))):
             QShortcut(QKeySequence(k), self, fn)
         self._done_keys = []  # Intro / Esc: terminar de ajustar el recorte
@@ -484,7 +538,7 @@ class ReviewDialog(QDialog):
         for row in range(self.strip.count()):
             ph = self.photos[self.strip.item(row).data(ROLE)]
             rev = getattr(ph, "reviewed", False)
-            show = [True, ph.keep, not ph.keep, not rev][f]
+            show = [True, ph.keep, not ph.keep, not rev, bool(getattr(ph, "fix", None) or ph.enhance)][f]
             self.strip.item(row).setHidden(not show)
 
     def _state_buttons(self):
@@ -562,6 +616,18 @@ class ReviewDialog(QDialog):
                 if len(self._before) > 20:
                     self._before.pop(next(iter(self._before)))
             before = _pm(crop(b, box))
+        # IA: la elegida aquí o, en las retocadas en Studio, la de su sección «Mejorar con IA»
+        ai = ph.enhance if not studio else (self._studio_ai(ss) if ss is not None else None)
+        if ai and not self.crop_on:
+            e = self._enhanced_view(ph, img, (tuple(round(float(v), 4) for v in box), self.bw,
+                                              self.photo_look(ph), bws), ai)
+            if e is None:
+                label += "  ·  Mejorando con IA…"
+            else:
+                if self.big.cmp.active:  # antes/después: la misma edición sin la IA
+                    before = _pm(E.cv2.resize(img, (e.shape[1], e.shape[0]), interpolation=E.cv2.INTER_AREA))
+                img = e
+                label += "  ·  Mejorada con IA"
         if not studio and not self.crop_on and self._retouch_on(ph):
             img, extra = self._ret_view(ph, img, box)
             label += extra
@@ -569,6 +635,7 @@ class ReviewDialog(QDialog):
             img, extra = self._blur_view(ph, img, box)
             label += extra
         self.big.set(_pm(img), label, rejected=not ph.keep, before=before)
+        self._enh_sync(ph, studio)
         self._blur_sync(ph, studio)
         self.ret_cb.setEnabled(not studio)
         self.ret_cb.setCurrentIndex(max(0, self.ret_cb.findData(ph.retouch or "")))
@@ -590,11 +657,12 @@ class ReviewDialog(QDialog):
             self.big.zoom.pct, self.big.zoom.provider = None, None
         elif self.tile_fn and not studio:
             fw, fh = E.full_size(ph.path)
-            self.big.zoom.reset(key=(ph.path, ph.best, self.bw, self.photo_look(ph), self.photo_bw(ph)),
+            self.big.zoom.reset(key=(ph.path, ph.best, self.bw, self.photo_look(ph), self.photo_bw(ph),
+                                     json.dumps(ph.enhance, sort_keys=True)),
                                 full_size=(int(fw * (box[2] - box[0])) or fw, fh))
-            self.big.zoom.provider = lambda b, ph=ph, box=box: self.tile_fn(
-                ph, (box[0] + b[0] * (box[2] - box[0]), box[1] + b[1] * (box[3] - box[1]),
-                     box[0] + b[2] * (box[2] - box[0]), box[1] + b[3] * (box[3] - box[1])), self.bw)
+            self.big.zoom.provider = lambda b, ph=ph, box=box: self._tile(ph, (
+                box[0] + b[0] * (box[2] - box[0]), box[1] + b[1] * (box[3] - box[1]),
+                box[0] + b[2] * (box[2] - box[0]), box[1] + b[3] * (box[3] - box[1])))
             self.big.zoom.schedule()
         else:
             self.big.zoom.provider = None
@@ -602,6 +670,241 @@ class ReviewDialog(QDialog):
         self._fill_crops(ph, base, ss)
         self._fill_bw(ph, color if self.bw and not studio else crop(base, box), studio, ss)
         self._refresh_prop()
+
+    # ---------------------------------------------------------- desenfocar fondo y velocidad
+    def _bokeh_amt(self, ph) -> int:
+        st = E.Settings(bokeh=(getattr(self.main, "bokeh_cb", None) and self.main.bokeh_cb.currentData()) or "")
+        return E.photo_bokeh(ph, st)
+
+    def _blur_view(self, ph, img, box):
+        """La vista con el desenfoque o la velocidad (en caché: se calcula una vez por foto y ajuste)."""
+        amt = self._bokeh_amt(ph)
+        k = (ph.path, tuple(round(float(v), 4) for v in box), amt, json.dumps(ph.speed, sort_keys=True), img.shape)
+        out = self._blur_cache.get(k)
+        if out is None:
+            x = img.astype(np.float32) / 255 if img.dtype == np.uint8 else img.astype(np.float32)
+            key = ph.path + "#review"
+            try:
+                if amt:
+                    x = BK.bokeh(x, amt, "auto", key)
+                if ph.speed:
+                    sp = ph.speed
+                    x = BK.speed(x, float(sp.get("amount", 55)), sp.get("angle"), float(sp.get("trail", 50)),
+                                 "auto", key)
+            except Exception:
+                return img, "  ·  (no se pudo previsualizar el desenfoque)"
+            out = (np.clip(x, 0, 1) * 255 + 0.5).astype(np.uint8) if img.dtype == np.uint8 else x
+            self._blur_cache[k] = out
+            if len(self._blur_cache) > 12:
+                self._blur_cache.pop(next(iter(self._blur_cache)))
+        bits = []
+        if amt:
+            bits.append("fondo desenfocado")
+        if ph.speed:
+            bits.append("velocidad")
+        return out, "  ·  " + " y ".join(bits)
+
+    def _blur_sync(self, ph, studio=False):
+        for w in (self.bokeh_cb, self.speed_cb, self.speed_amt):
+            w.blockSignals(True)
+            w.setEnabled(not studio)
+        self.bokeh_cb.setCurrentIndex(max(0, self.bokeh_cb.findData(ph.bokeh or "")))
+        sp = ph.speed or {}
+        i = 0
+        if sp:
+            ang = sp.get("angle")
+            i = next((j for j, (_l, a) in enumerate(SPEED_DIRS) if j and a == (AUTO_DIR if ang is None else ang)), 1)
+            self.speed_amt.setCurrentIndex(max(0, self.speed_amt.findData(int(sp.get("amount", 55)))))
+        self.speed_cb.setCurrentIndex(i)
+        for w in (self.bokeh_cb, self.speed_cb, self.speed_amt):
+            w.blockSignals(False)
+
+    def _blur_changed(self, *_):
+        ph = self.cur()
+        if not ph:
+            return
+        ph.bokeh = self.bokeh_cb.currentData() or ""
+        ang = self.speed_cb.currentData()
+        if ang is None:
+            ph.speed = {}
+        else:
+            ph.speed = {"amount": int(self.speed_amt.currentData()), "angle": None if ang == AUTO_DIR else float(ang),
+                        "trail": 50}
+        self.on_change()
+        self.show_photo()
+
+    # ---------------------------------------------------------- retoque de retrato
+    def _retouch_on(self, ph) -> bool:
+        chip = getattr(self.main, "c_portrait", None)
+        return E.photo_retouch(ph, E.Settings(portrait=bool(chip is not None and chip.isChecked())))
+
+    def _ret_view(self, ph, img, box):
+        """La vista con el retoque de retrato (en caché: una vez por foto y encuadre)."""
+        k = (ph.path, tuple(round(float(v), 4) for v in box), img.shape)
+        out = self._ret_cache.get(k)
+        if out is None:
+            import edits_engine as EE
+            x = img.astype(np.float32) / 255 if img.dtype == np.uint8 else img.astype(np.float32)
+            try:
+                x = EE.auto_portrait(x, ph.path + "#review")
+            except Exception:
+                return img, "  ·  (no se pudo previsualizar el retoque)"
+            out = (np.clip(x, 0, 1) * 255 + 0.5).astype(np.uint8) if img.dtype == np.uint8 else x
+            self._ret_cache[k] = out
+            if len(self._ret_cache) > 12:
+                self._ret_cache.pop(next(iter(self._ret_cache)))
+        return out, "  ·  retrato retocado"
+
+    def _ret_changed(self, *_):
+        ph = self.cur()
+        if not ph:
+            return
+        ph.retouch = self.ret_cb.currentData() or ""
+        self.on_change()
+        self.show_photo()
+
+    # ---------------------------------------------------------- mejorar con IA
+    def _faces(self, rgb):
+        if self._yunet is False:
+            return []
+        with self._ylock:
+            return E.face_points(rgb, det=self._yunet)
+
+    def _tile(self, ph, box):
+        """Zona al 100 % para el zoom (en un hilo): la de Events y, si se mejora con IA, mejorada."""
+        t = self.tile_fn(ph, box, self.bw)
+        if t is None or not ph.enhance:
+            return t
+        t = t.astype(np.float32) / 255 if t.dtype == np.uint8 else t.astype(np.float32)
+        return FX.enhance(t, ph.enhance, faces_fn=self._faces)
+
+    @staticmethod
+    def _studio_ai(ss) -> dict | None:
+        if not ss.get("ai"):
+            return None
+        import studio_engine as SE
+        return SE.ai_opts(ss)
+
+    def _enhanced_view(self, ph, img, key, opts=None):
+        """Vista mejorada (calculada en segundo plano; None mientras tanto, y `enh_ready` al terminar)."""
+        opts = dict(opts if opts is not None else ph.enhance)
+        k = (ph.path, key, json.dumps(opts, sort_keys=True))
+        if k in self._enh:
+            return self._enh[k]
+        if k not in self._enh_busy:
+            self._enh_busy.add(k)
+            src = img.astype(np.float32) / 255 if img.dtype == np.uint8 else img.astype(np.float32)
+            s = 1600 / max(src.shape[:2])
+            if s < 1:
+                src = E.cv2.resize(src, (int(src.shape[1] * s), int(src.shape[0] * s)),
+                                   interpolation=E.cv2.INTER_AREA)
+
+            def job():
+                try:
+                    out = FX.enhance(src, opts, faces_fn=self._faces)
+                except Exception:
+                    out = None
+                if out is not None:
+                    self._enh[k] = out
+                    if len(self._enh) > 16:
+                        self._enh.pop(next(iter(self._enh)))
+                self._enh_busy.discard(k)
+                if out is not None:
+                    self.enh_ready.emit(k)
+
+            threading.Thread(target=job, daemon=True).start()
+        return None
+
+    def _enh_sync(self, ph, studio=False):
+        """Controles de «Mejorar con IA» según la foto actual."""
+        self._syncing = True
+        try:
+            on = bool(ph.enhance)
+            o = FX.enhance_opts(ph.enhance or E.suggested_enhance(ph))
+            self.b_enh.setChecked(on)
+            self.b_enh.setEnabled(not studio)
+            self.b_enh_all.setEnabled(any(p.fix and p.keep and not p.enhance for p in self.photos))
+            for c, k in ((self.c_detail, "detail"), (self.c_faces, "faces"), (self.c_light, "light")):
+                c.setChecked(bool(o[k]))
+                c.setEnabled(on)
+            self.enh_amt.setValue(int(o["amount"]))
+            self.enh_amt.setEnabled(on)
+            bits = []
+            if studio:
+                bits.append("Editada en Studio: «Mejorar con IA» se elige allí (panel Detalle).")
+            elif ph.fix:
+                bits.append("Sugerido: " + E.fix_text(ph) + ".")
+            if on and o["faces"] and not FX.face_ready():
+                bits.append("Caras: falta descargar el modelo.")
+            self.enh_info.setText(" ".join(bits))
+        finally:
+            self._syncing = False
+
+    def _read_opts(self) -> dict:
+        return {"detail": self.c_detail.isChecked(), "faces": self.c_faces.isChecked(),
+                "light": self.c_light.isChecked(), "amount": int(self.enh_amt.value())}
+
+    def _ensure_models(self, opts_list) -> bool:
+        import fx_ui
+        return fx_ui.ensure_enhance_models(self, opts_list)
+
+    def _enh_toggle(self, on):
+        ph = self.cur()
+        if self._syncing or not ph:
+            return
+        if on:
+            o = FX.enhance_opts(E.suggested_enhance(ph))
+            if not self._ensure_models([o]):
+                o["faces"] = o["faces"] and FX.face_ready()
+                o["detail"] = o["detail"] and FX.upscaler_ready()
+                if not (o["faces"] or o["detail"] or o["light"]):
+                    self._enh_sync(ph)
+                    return
+            ph.enhance = o
+        else:
+            ph.enhance = {}
+        self.on_change()
+        self.strip.viewport().update()
+        self.show_photo()
+
+    def _enh_opts_changed(self, *_):
+        ph = self.cur()
+        if self._syncing or not ph or not ph.enhance:
+            return
+        o = self._read_opts()
+        if (o["faces"] and not FX.face_ready()) or (o["detail"] and not FX.upscaler_ready()):
+            if not self._ensure_models([o]):
+                o["faces"] = o["faces"] and FX.face_ready()
+                o["detail"] = o["detail"] and FX.upscaler_ready()
+        ph.enhance = o
+        self.on_change()
+        self.show_photo()
+
+    def _enh_all(self):
+        todo = [p for p in self.photos if p.fix and p.keep and not p.enhance and not self.is_studio(p)]
+        if not todo:
+            return
+        opts = [E.suggested_enhance(p) for p in todo]
+        secs = 0.0
+        for p, o in zip(todo, opts):
+            w, h = E.full_size(p.path)
+            secs += FX.enhance_seconds(h, w, p.faces, o)
+        if QMessageBox.question(
+                self, "Mejorar con IA",
+                f"Se marcará «Mejorar con IA» en {len(todo)} fotos aprobadas con sugerencia (cara blanda, foto blanda "
+                f"o con ruido, oscura). Se aplica al exportar: unos {max(1, round(secs / 60))} min más.\n\n"
+                "La IA reconstruye el detalle que falta: revisa las caras antes de entregar. ¿Seguir?") \
+                != QMessageBox.Yes:
+            return
+        if not self._ensure_models(opts):
+            return
+        for p, o in zip(todo, opts):
+            o["faces"] = o["faces"] and FX.face_ready()
+            o["detail"] = o["detail"] and FX.upscaler_ready()
+            p.enhance = o
+        self.on_change()
+        self.strip.viewport().update()
+        self.show_photo()
 
     def _studio_s(self, ph):
         """Ajustes de Studio de la foto (los mismos que se exportarán) o None."""
@@ -766,98 +1069,6 @@ class ReviewDialog(QDialog):
     def _export(self):
         self.action = "export"
         self.accept()
-
-    # ---------------------------------------------------------- retoque de retrato
-    def _retouch_on(self, ph) -> bool:
-        chip = getattr(self.main, "c_portrait", None)
-        return E.photo_retouch(ph, E.Settings(portrait=bool(chip is not None and chip.isChecked())))
-
-    def _ret_view(self, ph, img, box):
-        """La vista con el retoque de retrato (en caché: una vez por foto y encuadre)."""
-        k = (ph.path, tuple(round(float(v), 4) for v in box), img.shape)
-        out = self._ret_cache.get(k)
-        if out is None:
-            import edits_engine as EE
-            x = img.astype(np.float32) / 255 if img.dtype == np.uint8 else img.astype(np.float32)
-            try:
-                x = EE.auto_portrait(x, ph.path + "#review")
-            except Exception:
-                return img, "  ·  (no se pudo previsualizar el retoque)"
-            out = (np.clip(x, 0, 1) * 255 + 0.5).astype(np.uint8) if img.dtype == np.uint8 else x
-            self._ret_cache[k] = out
-            if len(self._ret_cache) > 12:
-                self._ret_cache.pop(next(iter(self._ret_cache)))
-        return out, "  ·  retrato retocado"
-
-    def _ret_changed(self, *_):
-        ph = self.cur()
-        if not ph:
-            return
-        ph.retouch = self.ret_cb.currentData() or ""
-        self.on_change()
-        self.show_photo()
-
-    # ---------------------------------------------------------- desenfocar fondo y velocidad
-    def _bokeh_amt(self, ph) -> int:
-        st = E.Settings(bokeh=(getattr(self.main, "bokeh_cb", None) and self.main.bokeh_cb.currentData()) or "")
-        return E.photo_bokeh(ph, st)
-
-    def _blur_view(self, ph, img, box):
-        """La vista con el desenfoque o la velocidad (en caché: se calcula una vez por foto y ajuste)."""
-        amt = self._bokeh_amt(ph)
-        k = (ph.path, tuple(round(float(v), 4) for v in box), amt, json.dumps(ph.speed, sort_keys=True), img.shape)
-        out = self._blur_cache.get(k)
-        if out is None:
-            x = img.astype(np.float32) / 255 if img.dtype == np.uint8 else img.astype(np.float32)
-            key = ph.path + "#review"
-            try:
-                if amt:
-                    x = BK.bokeh(x, amt, "auto", key)
-                if ph.speed:
-                    sp = ph.speed
-                    x = BK.speed(x, float(sp.get("amount", 55)), sp.get("angle"), float(sp.get("trail", 50)),
-                                 "auto", key)
-            except Exception:
-                return img, "  ·  (no se pudo previsualizar el desenfoque)"
-            out = (np.clip(x, 0, 1) * 255 + 0.5).astype(np.uint8) if img.dtype == np.uint8 else x
-            self._blur_cache[k] = out
-            if len(self._blur_cache) > 12:
-                self._blur_cache.pop(next(iter(self._blur_cache)))
-        bits = []
-        if amt:
-            bits.append("fondo desenfocado")
-        if ph.speed:
-            bits.append("velocidad")
-        return out, "  ·  " + " y ".join(bits)
-
-    def _blur_sync(self, ph, studio=False):
-        for w in (self.bokeh_cb, self.speed_cb, self.speed_amt):
-            w.blockSignals(True)
-            w.setEnabled(not studio)
-        self.bokeh_cb.setCurrentIndex(max(0, self.bokeh_cb.findData(ph.bokeh or "")))
-        sp = ph.speed or {}
-        i = 0
-        if sp:
-            ang = sp.get("angle")
-            i = next((j for j, (_l, a) in enumerate(SPEED_DIRS) if j and a == (AUTO_DIR if ang is None else ang)), 1)
-            self.speed_amt.setCurrentIndex(max(0, self.speed_amt.findData(int(sp.get("amount", 55)))))
-        self.speed_cb.setCurrentIndex(i)
-        for w in (self.bokeh_cb, self.speed_cb, self.speed_amt):
-            w.blockSignals(False)
-
-    def _blur_changed(self, *_):
-        ph = self.cur()
-        if not ph:
-            return
-        ph.bokeh = self.bokeh_cb.currentData() or ""
-        ang = self.speed_cb.currentData()
-        if ang is None:
-            ph.speed = {}
-        else:
-            ph.speed = {"amount": int(self.speed_amt.currentData()), "angle": None if ang == AUTO_DIR else float(ang),
-                        "trail": 50}
-        self.on_change()
-        self.show_photo()
 
     # ---------------------------------------------------------- recorte a mano
     def _ratio(self):

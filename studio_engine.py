@@ -84,6 +84,45 @@ DEFAULTS.update({"masks": [], "bw_style": "Editorial", "bw": False, "crop": [0.0
                  "rating": 0, "flag": 0, "profile": "Neutro"})
 
 
+# Mejorar con IA (fx_engine.enhance, docs/enfocar_ia.md): enfocar y limpiar, caras y aclarar. Se ve en la vista
+# definitiva (no en la rápida) y se aplica al exportar, sobre el revelado y antes del desenfoque, el LUT y el B/N.
+AI_CTRLS = [("ai_amount", "Intensidad", 0, 100, 1, 60)]
+AI_KEYS = ("ai", "ai_detail", "ai_faces", "ai_light", "ai_amount")
+DEFAULTS.update({"ai": False, "ai_detail": True, "ai_faces": True, "ai_light": False, "ai_amount": 60})
+
+
+_AI_CACHE: dict = {}
+# lo que va DESPUÉS de la IA en el revelado: cambiarlo no obliga a repetirla
+_AI_AFTER = ("lut", "bw", "splash", "vignette", "grain", "angle", "crop", "bokeh", "speed", "blur", "rating", "flag",
+             "_")
+
+
+def ai_stage(y: np.ndarray, s: dict, key: str = "") -> np.ndarray:
+    """«Mejorar con IA» sobre el revelado. En la vista (imágenes pequeñas) se guarda el resultado: tocar el LUT, el
+    B/N, el recorte o los efectos no la repite; al exportar (resolución completa) no se guarda."""
+    import hashlib
+    sig = hashlib.sha1(json.dumps({k: v for k, v in s.items() if not k.startswith(_AI_AFTER)}, sort_keys=True,
+                                  default=str).encode()).hexdigest()
+    if not key:  # sin nombre de foto: la propia imagen la identifica (dos fotos con los mismos ajustes)
+        import zlib
+        key = str(zlib.crc32(np.ascontiguousarray(y[::16, ::16]).tobytes()))
+    ck = (key, y.shape, sig)
+    hit = _AI_CACHE.get(ck)
+    if hit is not None:
+        return hit.copy()
+    out = E.enhance_photo(np.clip(y, 0, 1).astype(np.float32), ai_opts(s))
+    if y.shape[0] * y.shape[1] <= 4_000_000:
+        if len(_AI_CACHE) >= 4:
+            _AI_CACHE.pop(next(iter(_AI_CACHE)))
+        _AI_CACHE[ck] = out.copy()
+    return out
+
+
+def ai_opts(s: dict) -> dict:
+    return {"detail": bool(s.get("ai_detail", True)), "faces": bool(s.get("ai_faces", True)),
+            "light": bool(s.get("ai_light", False)), "amount": int(s.get("ai_amount", 60))}
+
+
 def new_settings(**kw) -> dict:
     s = copy.deepcopy(DEFAULTS)
     s.update(kw)
@@ -505,9 +544,10 @@ def blur_stage(y: np.ndarray, s: dict, key: str = "") -> np.ndarray:
 
 
 def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True, key: str = "",
-           show_mask: int | None = None) -> np.ndarray:
+           show_mask: int | None = None, ai: bool = False) -> np.ndarray:
     """Revelado completo. `lin`: sRGB lineal float32 (de engine.load_linear). Devuelve sRGB 0..1.
-    `key` identifica la foto (caché de las máscaras de IA); `show_mask`: índice de máscara a superponer."""
+    `key` identifica la foto (caché de las máscaras de IA); `show_mask`: índice de máscara a superponer;
+    `ai`: aplicar «Mejorar con IA» si está activo en `s` (lento: vista definitiva y exportar)."""
     import masks as M
     s = dict(DEFAULTS, **s)
     y = tone_stage(lin, s)
@@ -516,6 +556,8 @@ def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True, key: str 
     y = detail_stage(y, s)
     if s.get("masks"):
         y = M.apply_all(y, s["masks"], key)
+    if ai and s.get("ai"):
+        y = ai_stage(y, s, key)
     if s.get("bokeh") or s.get("speed"):
         y = blur_stage(y, s, key)
     if s.get("lut"):
@@ -576,7 +618,7 @@ def export_events(ph: E.Photo, s: dict, st: E.Settings, out_dir: str, version: s
     """Exporta una foto retocada en Studio igual que Events: su recorte de Studio en «Entrega/Color» (o en
     «Blanco y negro» si en Studio es B/N), los demás formatos en «Formatos» y la versión B/N en «Entrega»."""
     lin = E.load_linear(ph.path, half=False, rebuild_highlights=True)
-    full = render(lin, s, seed=hash(os.path.basename(ph.path)) & 0xFFFF, crop=False, key=ph.path + "#full")
+    full = render(lin, s, seed=hash(os.path.basename(ph.path)) & 0xFFFF, crop=False, key=ph.path + "#full", ai=True)
     del lin
     H, W = full.shape[:2]
     exif = E.build_exif(ph, version) if st.keep_exif else b""
@@ -667,7 +709,7 @@ def list_presets(cfg_dir: str) -> dict[str, dict]:
     return out
 
 
-PRESET_KEYS_EXCLUDED = {"crop", "crop_ratio", "angle", "rating", "flag", "exposure"}
+PRESET_KEYS_EXCLUDED = {"crop", "crop_ratio", "angle", "rating", "flag", "exposure", *AI_KEYS}
 
 
 def _preset_file(cfg_dir: str, name: str) -> str:
@@ -807,7 +849,7 @@ def export(photo_path: str, s: dict, out_path: str, quality: int = 95, long_side
            upscale: float = 1.0, progress=None) -> str:
     """Revela y guarda. `upscale` > 1 amplía con IA (Real-ESRGAN, fx_engine) para copias grandes."""
     lin = E.load_linear(photo_path, half=False, rebuild_highlights=True)
-    img = render(lin, s, seed=hash(os.path.basename(photo_path)) & 0xFFFF, key=photo_path + "#full")
+    img = render(lin, s, seed=hash(os.path.basename(photo_path)) & 0xFFFF, key=photo_path + "#full", ai=True)
     if upscale and upscale > 1:
         import fx_engine as FX
         if not FX.upscaler_ready():
