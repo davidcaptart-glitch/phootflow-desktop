@@ -177,6 +177,56 @@ def move_page(d: dict, delta: int) -> None:
         ensure_pages(d)
 
 
+def reflow(d: dict, W: float, H: float) -> None:
+    """Cambia el tamaño del diseño recolocando (como «Cambiar tamaño mágico»): todo escala con el lado menor; lo
+    que llena la página a lo ancho o a lo alto se estira hasta el nuevo borde, y cada elemento conserva su anclaje
+    (pegado a un borde, o centrado) en vez de quedar todo en medio con bandas vacías."""
+    sync_page(d)
+    w0, h0 = d["w"], d["h"]
+    s = min(W / w0, H / h0)
+
+    def place(a0, a1, L0, L, size):
+        """Nueva posición en un eje: anclado al borde más cercano o, si está centrado, al centro."""
+        c = (a0 + a1) / 2
+        if abs(c - L0 / 2) < L0 * 0.06:
+            return L / 2 - size / 2
+        if a0 < L0 - a1:
+            return a0 * s
+        return L - (L0 - a1) * s - size
+
+    for pg in d["pages"]:
+        for e in pg["elements"]:
+            x0, y0, x1, y1 = e["x"], e["y"], e["x"] + e["w"], e["y"] + e["h"]
+            full_w = x0 <= w0 * 0.02 and x1 >= w0 * 0.98 and not e.get("rot")
+            full_h = y0 <= h0 * 0.02 and y1 >= h0 * 0.98 and not e.get("rot")
+            nw, nh = e["w"] * s, e["h"] * s
+            for k in ("size", "size_max", "fit_h", "stroke_w", "radius", "outline_w"):
+                if k in e and isinstance(e[k], (int, float)):
+                    e[k] *= s
+            if full_w and e["type"] in ("image", "shape", "vector"):
+                nw = W * (e["w"] / w0)
+                nx = x0 / w0 * W
+            else:
+                nx = place(x0, x1, w0, W, nw)
+            if full_h and e["type"] in ("image", "shape", "vector"):
+                nh = H * (e["h"] / h0)
+                ny = y0 / h0 * H
+            elif full_w and e["type"] == "image" and (y0 <= h0 * 0.02 or y1 >= h0 * 0.98):
+                nh = e["h"] / h0 * H   # foto a todo el ancho pegada arriba o abajo: crece con la página
+                ny = 0.0 if y0 <= h0 * 0.02 else H - nh
+            else:
+                ny = place(y0, y1, h0, H, nh)
+            if e["type"] == "text":
+                e["w"] = nw if not full_w else W * (e["w"] / w0)
+                e["x"] = nx if not full_w else x0 / w0 * W
+                fit_text(e)
+                e["y"] = ny
+                continue
+            e.update(x=nx, y=ny, w=nw, h=nh)
+    d["w"], d["h"] = round(float(W), 2), round(float(H), 2)
+    ensure_pages(d)
+
+
 def design_from_preset(name: str) -> dict:
     for g, n, w, h, u in PRESETS:
         if n == name:
@@ -1438,6 +1488,34 @@ def edged_image(img, src_rect, w: float, h: float, img_px: float, max_img: int, 
     return off
 
 
+ADJUST = {"bright": "Brillo", "contrast": "Contraste", "sat": "Saturación", "warm": "Calidez",
+          "vignette": "Viñeta"}
+
+
+def adjust_rgb(a: np.ndarray, adj: dict) -> np.ndarray:
+    """Ajustes rápidos de una foto (como «Editar foto › Ajustar» de Canva), de -100 a 100 (viñeta, 0 a 100)."""
+    if not adj or not any(adj.values()):
+        return a
+    rgb = a[..., :3].astype(np.float32) / 255
+    b, c, s_, w_, v = (float(adj.get(k, 0)) / 100 for k in ("bright", "contrast", "sat", "warm", "vignette"))
+    if b:
+        rgb = 1 - (1 - rgb) ** (2 ** b) if b > 0 else rgb ** (2 ** -b)
+    if c:
+        rgb = np.clip((rgb - 0.5) * (1 + c * (0.9 if c > 0 else 0.7)) + 0.5, 0, 1)
+    if s_:
+        g = rgb @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+        rgb = np.clip(g[..., None] + (rgb - g[..., None]) * (1 + s_), 0, 1)
+    if w_:
+        rgb = np.clip(rgb + np.array([0.08, 0.02, -0.08], np.float32) * w_, 0, 1)
+    if v > 0:
+        h, w = rgb.shape[:2]
+        yy, xx = np.ogrid[-1:1:complex(0, h), -1:1:complex(0, w)]
+        r2 = (xx * xx + yy * yy) / 2
+        rgb = rgb * (1 - v * 0.75 * np.clip(r2, 0, 1) ** 1.5)[..., None]
+    out = (np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8)
+    return np.concatenate([out, a[..., 3:]], 2) if a.shape[2] == 4 else out
+
+
 class ImageCache:
     """Fotos ya cargadas como QImage, por (ruta, lado máximo, B/N, filtro, artístico).
 
@@ -1494,7 +1572,7 @@ class ImageCache:
 
     def _make(self, key):
         from PySide6.QtGui import QImage
-        path, max_side, bw, look, art = key
+        path, max_side, bw, look, art, adj = key
         a = self._base_rgb(path, max_side)
         if a is None:
             return None
@@ -1511,6 +1589,8 @@ class ImageCache:
             import fx_engine as FX
             f = FX.artistic(a.astype(np.float32) / 255, art[0], art[1], art[2])
             a = (np.clip(f, 0, 1) * 255 + 0.5).astype(np.uint8)
+        if adj:
+            a = adjust_rgb(a, dict(adj))
         if bw:
             g = cv2.cvtColor(np.ascontiguousarray(a[..., :3]), cv2.COLOR_RGB2GRAY)
             g = np.stack([g] * 3, 2)
@@ -1532,9 +1612,10 @@ class ImageCache:
 
     # ---------------------------------------------------------- pedir
     def get(self, path: str, max_side: int, bw: bool = False, look: str = "", art: tuple | None = None,
-            wait: bool = True):
-        """`art` = (tipo, cantidad, detalle) de un filtro artístico de fx_engine (acuarela, óleo, cómic…)."""
-        key = (path, max_side, bw, look, art)
+            wait: bool = True, adj: tuple | None = None):
+        """`art` = (tipo, cantidad, detalle) de un filtro artístico de fx_engine (acuarela, óleo, cómic…);
+        `adj` = ajustes rápidos como tupla de (clave, valor) (ver `ADJUST`)."""
+        key = (path, max_side, bw, look, art, adj)
         with self.lock:
             if key in self.d:
                 self.d.move_to_end(key)
@@ -1546,16 +1627,16 @@ class ImageCache:
             self._store(key, img)
             return img
         self._schedule(key)
-        return self.nearest(path, bw, look, art)
+        return self.nearest(path, bw, look, art, adj)
 
     def loading(self, path: str) -> bool:
         with self.lock:
             return any(k[0] == path for k in self.pending)
 
-    def nearest(self, path: str, bw: bool = False, look: str = "", art=None):
+    def nearest(self, path: str, bw: bool = False, look: str = "", art=None, adj=None):
         """Lo que ya haya de esa foto mientras llega lo pedido: mejor con los mismos filtros, y la mayor."""
         with self.lock:
-            cands = [(k[1:] == (k[1], bw, look, art), k[1], img) for k, img in self.d.items() if k[0] == path]
+            cands = [(k[2:] == (bw, look, art, adj), k[1], img) for k, img in self.d.items() if k[0] == path]
         if not cands:
             return None
         return max(cands, key=lambda c: (c[0], c[1]))[2]
@@ -1992,8 +2073,12 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
             art = el.get("art") or {}
             akey = (art["kind"], float(art.get("amount", 100)), float(art.get("detail", 50))) \
                 if art.get("kind") else None
+            adj = el.get("adj") or {}
+            adjkey = tuple(sorted((k, int(v)) for k, v in adj.items() if v)) or None
             img = cache.get(el["path"], min(step, max_img), bool(el.get("bw")), el.get("look", ""), akey,
-                            wait=wait)
+                            wait=wait, adj=adjkey)
+        if img is not None and not img.isNull() and (el.get("flip_x") or el.get("flip_y")):
+            img = img.mirrored(bool(el.get("flip_x")), bool(el.get("flip_y")))   # voltear la foto
         if img is not None and not img.isNull():
             x, y, cw, ch = cover_box(img.width(), img.height(), w, h, el.get("zoom", 1.0), el.get("fx", 0.5),
                                      el.get("fy", 0.5))
@@ -2180,13 +2265,123 @@ def export_raster(d: dict, path: str, cache: ImageCache, scale: float = 1.0, qua
     return path
 
 
+# ------------------------------------------------------------------ animaciones (como las de Canva)
+# el["anim"] = entrada del elemento; d["pages"][i]["dur"] = segundos que dura la página en el vídeo.
+ANIMS = {"": "Sin animación", "fade": "Aparecer", "rise": "Subir", "drop": "Caer", "slide": "Deslizar",
+         "zoom": "Acercar", "pop": "Rebote"}
+ANIM_DUR = 0.7     # lo que tarda cada entrada
+ANIM_STEP = 0.18   # y el escalonado entre un elemento animado y el siguiente
+PAGE_DUR = 3.0
+
+
+def page_duration(pg: dict) -> float:
+    return max(0.5, float(pg.get("dur") or PAGE_DUR))
+
+
+def animated(d: dict) -> bool:
+    sync_page(d)
+    return any(e.get("anim") for pg in d["pages"] for e in pg["elements"])
+
+
+def anim_state(kind: str, i: int, t: float, W: float, H: float) -> tuple[float, float, float, float]:
+    """(opacidad, dx, dy, escala) del i-ésimo elemento animado de la página en el segundo `t`."""
+    if not kind:
+        return 1.0, 0.0, 0.0, 1.0
+    p = min(1.0, max(0.0, (t - i * ANIM_STEP) / ANIM_DUR))
+    e = 1 - (1 - p) ** 3
+    if kind == "fade":
+        return e, 0.0, 0.0, 1.0
+    if kind == "rise":
+        return e, 0.0, (1 - e) * H * 0.08, 1.0
+    if kind == "drop":
+        return e, 0.0, -(1 - e) * H * 0.08, 1.0
+    if kind == "slide":
+        return e, -(1 - e) * W * 0.15, 0.0, 1.0
+    if kind == "zoom":
+        return e, 0.0, 0.0, 0.6 + 0.4 * e
+    if kind == "pop":
+        c = 1.70158
+        s = 1 + (c + 1) * (p - 1) ** 3 + c * (p - 1) ** 2   # «back out»: se pasa un poco y vuelve
+        return min(1.0, p * 3), 0.0, 0.0, max(0.01, s)
+    return 1.0, 0.0, 0.0, 1.0
+
+
+def render_frame(d: dict, cache: ImageCache, scale: float, t: float, wait: bool = True):
+    """Una página (`d` de una sola página) en el segundo `t` de su animación, como QImage opaca."""
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QImage, QPainter
+    W, H = max(2, round(d["w"] * scale) // 2 * 2), max(2, round(d["h"] * scale) // 2 * 2)
+    img = QImage(W, H, QImage.Format_RGB32)
+    img.fill(Qt.white)
+    p = QPainter(img)
+    p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
+    p.scale(W / d["w"], H / d["h"])
+    p.fillRect(QRectF(0, 0, d["w"], d["h"]), qcolor(d.get("bg", "#FFFFFF")))
+    i = 0
+    for el in d["elements"]:
+        if el.get("hidden"):
+            continue
+        op, dx, dy, sc = anim_state(el.get("anim", ""), i, t, d["w"], d["h"])
+        if el.get("anim"):
+            i += 1
+        if op <= 0.001:
+            continue
+        cx, cy = el["x"] + el["w"] / 2, el["y"] + el["h"] / 2
+        p.save()
+        p.setOpacity(op)
+        p.translate(cx + dx, cy + dy)
+        p.scale(sc, sc)
+        p.translate(-cx, -cy)
+        p.setTransform(element_transform(el), True)
+        paint_element(p, el, cache, editing=False, img_px=scale * sc, max_img=4000, wait=wait)
+        p.restore()
+    p.end()
+    return img
+
+
+def frames(d: dict, cache: ImageCache, scale: float, fps: float):
+    """Fotogramas (QImage) de todas las páginas seguidas, cada una el tiempo de su duración."""
+    sync_page(d)
+    for pg, v in zip(d["pages"], page_views(d)):
+        n = max(1, round(page_duration(pg) * fps))
+        for k in range(n):
+            yield render_frame(v, cache, scale, k / fps)
+
+
+def export_video(d: dict, path: str, cache: ImageCache, scale: float = 1.0, fps: int = 30, progress=None) -> str:
+    """Vídeo MP4 con las animaciones."""
+    import export_formats as EF
+    W, H = max(2, round(d["w"] * scale) // 2 * 2), max(2, round(d["h"] * scale) // 2 * 2)
+    tmp = path + ".part.mp4"
+    wr = None
+    # MPEG-4 (mp4v): lo lleva OpenCV y lo abre cualquier reproductor (H.264 necesitaría la DLL de OpenH264)
+    wr = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+    if wr is None or not wr.isOpened():
+        raise RuntimeError("Este equipo no puede escribir vídeo MP4")
+    try:
+        total = sum(max(1, round(page_duration(pg) * fps)) for pg in d["pages"])
+        for k, img in enumerate(frames(d, cache, scale, fps)):
+            a = EF.qimage_to_array(img)[..., :3]
+            wr.write(cv2.cvtColor(np.ascontiguousarray(a), cv2.COLOR_RGB2BGR))
+            if progress:
+                progress(k + 1, total)
+    finally:
+        wr.release()
+    os.replace(tmp, path)
+    return path
+
+
 def export_animation(d: dict, path: str, cache: ImageCache, scale: float = 1.0, duration_ms: int = 1500,
                      quality: int = 90) -> str:
-    """Las páginas del diseño como GIF o WebP animado (una página por fotograma)."""
+    """GIF o WebP animado: con animaciones, a 10 fotogramas por segundo (y como mucho 540 px, que el GIF pesa);
+    sin ellas, una página por fotograma."""
     import export_formats as EF
-    frames = [EF.qimage_to_array(render_image(v, cache, scale))
-              for v in page_views(d)]
-    return EF.save_animation(frames, path, duration_ms, quality=quality)
+    if animated(d):
+        s = min(scale, 540 / max(d["w"], d["h"]))
+        fr = [EF.qimage_to_array(f) for f in frames(d, cache, s, 10)]
+        return EF.save_animation(fr, path, 100, quality=quality)
+    fr = [EF.qimage_to_array(render_image(v, cache, scale)) for v in page_views(d)]
+    return EF.save_animation(fr, path, duration_ms, quality=quality)
 
 
 def export_vectorized(d: dict, path: str, cache: ImageCache, cmyk: bool = False, **params) -> str:

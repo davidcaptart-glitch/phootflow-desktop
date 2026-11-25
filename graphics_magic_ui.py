@@ -81,7 +81,12 @@ class StylesStrip(QWidget):
         one["pages"] = [copy.deepcopy(d["pages"][d.get("page", 0)])]
         one["page"] = 0
         G.ensure_pages(one)
-        self._vars = M.variants(one, 6, self.seed)
+        kit = getattr(self.owner, "brand", {}) or {}
+        extra = [M.style_from_palette("Marca: " + p.get("name", ""), p.get("colors", []),
+                                      kit.get("title_font", ""), kit.get("body_font", ""))
+                 for p in kit.get("palettes", []) if p.get("colors")]
+        self._vars = M.variants(one, 6, self.seed, extra)
+        self._styles = {s[0]: s for s in extra}
         self.list.clear()
         for i, (label, v) in enumerate(self._vars):
             img = GH.design_thumb(v, 84, self.cache, seed=i)
@@ -97,7 +102,7 @@ class StylesStrip(QWidget):
         name = label.split(" · ")[0]
         o = self.owner
         G.sync_page(o.d)
-        M.restyle(o.d, name)
+        M.restyle(o.d, getattr(self, "_styles", {}).get(name, name))
         if label.endswith("espejo"):
             M.mirror(o.d)
         o.canvas.resetCachedContent()

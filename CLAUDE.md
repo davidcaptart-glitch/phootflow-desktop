@@ -140,6 +140,17 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   y «Diseñar con las fotos de la sesión»: lee el análisis de Events (`Editadas/.phootflow`), ordena las fotos
   (nitidez, ojos, caras; descartadas al final; gemelas por dHash detrás; usa la editada de Entrega/Color si
   existe) y propone carrusel, álbumes y plantillas rellenas (vistas previas con las miniaturas de Events).
+  Lienzo al estilo Canva: barra contextual fija encima (`TaskBar`: fuente, tamaño, color, N K S, lista, efectos,
+  recortar, editar foto, voltear, transparencia, animar, posición), escribir en el lienzo con doble clic
+  (`InlineTextEditor` en graphics_richtext_ui), recortar la foto con doble clic (`Canvas.cropping`, rueda = zoom)
+  y ajustes rápidos (`el["adj"]`, `G.adjust_rgb`; `flip_x`/`flip_y`). `ImageCache` decodifica (o revela el RAW)
+  una vez a ≥ 2048 px como base y saca de ahí tamaños y filtros; el lienzo pide sin esperar (`wait=False`, hilo y
+  señal `_Loader`). Imán con varios y al escalar, distancias al mover, Alt+arrastrar duplica, Ctrl+C/V con el
+  portapapeles de Windows (`CLIP_MIME`), selector de color con cuentagotas, Subidos (`diseños\subidos`, RAW
+  enlazados en `enlaces.json`), paletas de marca (`brand["palettes"]`, `M.style_from_palette`), capas con
+  miniatura/ojo/candado y grupos plegables, «Redimensionar» con reflujo (`G.reflow`) y atajos en todo el editor
+  (`shortcut_table`). Animaciones de entrada (`el["anim"]`, `G.ANIMS`, `anim_state`), duración por página
+  (`pages[i]["dur"]`), vista previa ▶ y vídeo MP4 (`export_video`, mp4v de OpenCV) o GIF/WebP animado.
   Foto + formas/textos: «Recortar con la forma» (intersect) o «Restar de la foto» (`G.cut_image`, `el["cuts"]`
   en coordenadas de la foto, siguen al escalarla; `cut_src` para «Quitar recortes»). «Intercambiar» (`swap_places`):
   dos fotos cambian de foto, el resto de sitio. Asas: `ElementItem.shape` une las piezas (con addEllipse sobre

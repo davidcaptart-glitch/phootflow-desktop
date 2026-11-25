@@ -124,17 +124,49 @@ def color_map(d: dict, style) -> dict:
     return out
 
 
+def design_palette(d: dict, n: int = 5) -> list[str]:
+    """Los colores más usados del diseño (sin transparentes), para guardarlos como paleta de la marca."""
+    use: dict[str, int] = {}
+    for obj, k in _walk_colors(d):
+        p = _rgb(obj[k])
+        if p and p[1] != "00":
+            c = obj[k][:7].upper()
+            use[c] = use.get(c, 0) + 1
+    return sorted(use, key=lambda c: -use[c])[:n]
+
+
+def style_from_palette(name: str, colors: list[str], title_font: str = "", body_font: str = ""):
+    """Una paleta (de la marca) como fila de STYLES: el más oscuro, el más claro y los demás de acento.
+    Sin fuentes, `restyle` deja las que haya."""
+    cols = [c for c in colors if _rgb(c)]
+    if not cols:
+        cols = ["#05070F", "#FFFFFF"]
+    by_l = sorted(cols, key=lambda c: _lum(_rgb(c)[0]))
+    dark, light = by_l[0], by_l[-1]
+    if _lum(_rgb(dark)[0]) > 0.35:
+        dark = "#141414"
+    if _lum(_rgb(light)[0]) < 0.6:
+        light = "#FAFAFA"
+    rest = [c for c in cols if c not in (dark, light)] or [by_l[len(by_l) // 2]]
+    return (name, dark, light, rest[0], rest[1] if len(rest) > 1 else rest[0], title_font, body_font)
+
+
 def restyle(d: dict, style) -> dict:
     """Aplica la paleta y las fuentes de `style` (una fila de STYLES o su nombre) a todo el diseño, en su sitio."""
     if isinstance(style, str):
         style = next(s for s in STYLES if s[0] == style)
     cmap = color_map(d, style)
+    title_font, body_font = style[5] or "", style[6] or ""
     for obj, k in list(_walk_colors(d)):
         p = _rgb(obj[k])
         if p and obj[k][:7].upper() in cmap and p[1] != "00":
             obj[k] = cmap[obj[k][:7].upper()] + p[1]
     title_font, body_font = style[5], style[6]
     m = min(d["w"], d["h"])
+    if not title_font and not body_font:   # paleta sin fuentes: solo colores
+        G.ensure_pages(d)
+        d["style"] = style[0]
+        return d
     for pg in d["pages"]:
         for e in pg["elements"]:
             if e["type"] != "text":
@@ -168,13 +200,18 @@ def mirror(d: dict) -> dict:
     return d
 
 
-def variants(d: dict, n: int = 6, seed: int | None = None) -> list[tuple[str, dict]]:
-    """`n` variantes del diseño: estilos distintos al actual y, la mitad, con la composición en espejo."""
+def variants(d: dict, n: int = 6, seed: int | None = None, extra: list | None = None) -> list[tuple[str, dict]]:
+    """`n` variantes del diseño: estilos distintos al actual y, la mitad, con la composición en espejo. `extra`
+    (las paletas de la marca) van primero y sin espejo."""
     rnd = random.Random(seed)
     names = [s for s in STYLES if s[0] != d.get("style")]
     rnd.shuffle(names)
     out = []
-    for i, st in enumerate(names[:n]):
+    for st in (extra or [])[:3]:
+        v = copy.deepcopy(d)
+        restyle(v, st)
+        out.append((st[0], v))
+    for i, st in enumerate(names[:max(0, n - len(out))]):
         v = copy.deepcopy(d)
         restyle(v, st)
         label = st[0]

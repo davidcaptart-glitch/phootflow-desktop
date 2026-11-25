@@ -23,11 +23,11 @@ from PySide6.QtGui import (QColor, QIcon, QImage, QKeySequence, QPainter, QPaint
                            QPixmap, QShortcut, QTransform)
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFontComboBox, QFormLayout, QFrame,
-                               QGraphicsItem, QGraphicsScene, QGraphicsView, QGridLayout, QHBoxLayout, QLabel,
+                               QGraphicsItem, QGraphicsScene, QGraphicsView, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMenu, QMenuBar, QMessageBox,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QTabWidget, QToolButton,
                                QVBoxLayout,
-                               QWidget)
+                               QWidget, QWidgetAction)
 
 import engine as E
 import export_formats as EF
@@ -352,16 +352,72 @@ class ColorButton(QPushButton):
         self.setText(" Sin color" if self.value.endswith("00") and len(self.value) == 9 else " " + self.value[:7])
 
     def _menu(self):
+        """Panel de color: los del documento y la marca, una paleta por defecto, código hex, cuentagotas
+        (cualquier punto de la pantalla), sin color y el selector completo."""
         m = QMenu(self)
-        cols = list(dict.fromkeys(list(self.extra()) + G.PALETTE))[:24]
-        for c in cols:
-            a = m.addAction(_swatch_icon(c), c[:7])
-            a.triggered.connect(lambda _=False, c=c: self._pick(c))
-        m.addSeparator()
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(10, 8, 10, 8)
+        v.setSpacing(6)
+
+        def grid(title, cols):
+            if not cols:
+                return
+            lab = QLabel(title)
+            lab.setObjectName("muted")
+            v.addWidget(lab)
+            g = QGridLayout()
+            g.setSpacing(4)
+            for i, c in enumerate(cols):
+                b = QToolButton()
+                b.setFixedSize(24, 24)
+                b.setToolTip(c[:7].upper())
+                b.setCursor(Qt.PointingHandCursor)
+                b.setStyleSheet(f"QToolButton {{ background: {G.qcolor(c).name()}; border: 1px solid #3A3F4B; "
+                                "border-radius: 4px; } QToolButton:hover { border: 2px solid white; }")
+                b.clicked.connect(lambda _=False, c=c: (m.close(), self._pick(c)))
+                g.addWidget(b, i // 8, i % 8)
+            v.addLayout(g)
+        doc = [c for c in dict.fromkeys(self.extra()) if not (len(c) == 9 and c.endswith("00"))][:16]
+        grid("Colores del documento y de la marca", doc)
+        grid("Por defecto", DEFAULT_COLORS)
+        row = QHBoxLayout()
+        hx = QLineEdit(self.value[:7])
+        hx.setPlaceholderText("#RRGGBB")
+        hx.setMaximumWidth(100)
+
+        def take_hex():
+            t = hx.text().strip()
+            t = t if t.startswith("#") else "#" + t
+            if QColor(t).isValid() and len(t) in (4, 7, 9):
+                m.close()
+                self._pick(QColor(t).name(QColor.HexRgb).upper() if len(t) == 4 else t.upper())
+        hx.returnPressed.connect(take_hex)
+        row.addWidget(hx)
+        drop = QPushButton("Cuentagotas")
+        drop.setToolTip("Clic en cualquier punto de la pantalla (una foto del lienzo, por ejemplo)")
+        drop.clicked.connect(lambda: (m.close(), QTimer.singleShot(80, self._eyedropper)))
+        row.addWidget(drop)
+        v.addLayout(row)
+        row2 = QHBoxLayout()
         if self.allow_none:
-            m.addAction(_swatch_icon("#00000000"), "Sin color").triggered.connect(lambda: self._pick("#00000000"))
-        m.addAction("Personalizado…").triggered.connect(self._custom)
+            nb = QPushButton("Sin color")
+            nb.clicked.connect(lambda: (m.close(), self._pick("#00000000")))
+            row2.addWidget(nb)
+        more = QPushButton("Más colores…")
+        more.clicked.connect(lambda: (m.close(), self._custom()))
+        row2.addWidget(more)
+        v.addLayout(row2)
+        wa = QWidgetAction(m)
+        wa.setDefaultWidget(box)
+        m.addAction(wa)
         m.exec(self.mapToGlobal(self.rect().bottomLeft()))
+
+    def _eyedropper(self):
+        """El siguiente clic, en cualquier sitio, toma el color de ese píxel de la pantalla (Esc: cancelar)."""
+        self._dropper = _EyeDropper(self._pick)
+        QApplication.instance().installEventFilter(self._dropper)
+        QApplication.setOverrideCursor(Qt.CrossCursor)
 
     def _custom(self):
         c = QColorDialog.getColor(G.qcolor(self.value), self, "Color", QColorDialog.ShowAlphaChannel)
@@ -371,6 +427,38 @@ class ColorButton(QPushButton):
     def _pick(self, c):
         self.set(c)
         self.changed.emit(c)
+
+
+DEFAULT_COLORS = ["#000000", "#545454", "#737373", "#A6A6A6", "#D9D9D9", "#FFFFFF", "#FF3131", "#FF5757",
+                  "#FF66C4", "#CB6CE6", "#8C52FF", "#5E17EB", "#0097B2", "#0CC0DF", "#5CE1E6", "#38B6FF",
+                  "#5271FF", "#004AAD", "#00BF63", "#7ED957", "#C1FF72", "#FFDE59", "#FFBD59", "#FF914D"]
+
+
+class _EyeDropper(QObject):
+    def __init__(self, cb):
+        super().__init__()
+        self.cb = cb
+
+    def _end(self):
+        QApplication.instance().removeEventFilter(self)
+        QApplication.restoreOverrideCursor()
+
+    def eventFilter(self, obj, ev):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QCursor, QGuiApplication
+        if ev.type() == QEvent.KeyPress and ev.key() == Qt.Key_Escape:
+            self._end()
+            return True
+        if ev.type() == QEvent.MouseButtonPress:
+            pos = QCursor.pos()
+            scr = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+            g = scr.geometry()
+            img = scr.grabWindow(0, pos.x() - g.x(), pos.y() - g.y(), 1, 1).toImage()
+            self._end()
+            if not img.isNull():
+                self.cb(img.pixelColor(0, 0).name(QColor.HexRgb).upper())
+            return True
+        return False
 
 
 # ------------------------------------------------------------------ elemento en el lienzo
@@ -412,7 +500,41 @@ class ElementItem(QGraphicsItem):
         m = (self.H * 2 + 34) / self._s()
         if self.el["type"] == "text" and G._textfx_active(self.el):
             m += TFX.margin(self.el)   # sombras, resplandor y fondos salen de la caja
-        return QRectF(-m, -m, self.el["w"] + 2 * m, self.el["h"] + 2 * m)
+        r = QRectF(-m, -m, self.el["w"] + 2 * m, self.el["h"] + 2 * m)
+        if self.cv.cropping is self.el:
+            r = r.united(self.crop_full_rect())
+        return r
+
+    # ---------------------------------------------------------- recortar en el lienzo (doble clic en una foto)
+    def crop_geometry(self):
+        """(ancho, alto de la foto, caja visible en píxeles de la foto, escala foto → elemento)."""
+        iw, ih = self.cv.cache.full_size(self.el["path"])
+        iw, ih = max(1, iw), max(1, ih)
+        x, y, cw, ch = G.cover_box(iw, ih, self.el["w"], self.el["h"], self.el.get("zoom", 1.0),
+                                   self.el.get("fx", 0.5), self.el.get("fy", 0.5))
+        return iw, ih, (x, y, cw, ch), self.el["w"] / max(cw, 1e-6)
+
+    def crop_full_rect(self) -> QRectF:
+        iw, ih, (x, y, _, _), k = self.crop_geometry()
+        return QRectF(-x * k, -y * k, iw * k, ih * k)
+
+    def _paint_crop(self, p, s):
+        """La foto entera, apagada, alrededor del marco mientras se recorta."""
+        img = self.cv.cache.nearest(self.el["path"], bool(self.el.get("bw")), self.el.get("look", ""))
+        r = self.crop_full_rect()
+        p.save()
+        p.setOpacity(0.35)
+        if img is not None:
+            if self.el.get("flip_x") or self.el.get("flip_y"):
+                img = img.mirrored(bool(self.el.get("flip_x")), bool(self.el.get("flip_y")))
+            p.drawImage(r, img)
+        else:
+            p.fillRect(r, QColor(120, 120, 130))
+        p.setOpacity(1.0)
+        p.setPen(QPen(QColor("white"), 1.5 / s, Qt.DashLine))
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(r)
+        p.restore()
 
     def shape(self):
         # Las piezas se UNEN: sumadas con addEllipse sobre addRect, la regla par-impar dejaba un agujero justo
@@ -487,6 +609,8 @@ class ElementItem(QGraphicsItem):
     # ---------------------------------------------------------- pintar
     def paint(self, p: QPainter, opt, widget=None):
         s = self._s()
+        if self.cv.cropping is self.el:
+            self._paint_crop(p, s)
         ed = self.cv.editing
         if ed is None or ed.el is not self.el:   # mientras se escribe en él, lo pinta el editor
             G.paint_element(p, self.el, self.cv.cache, editing=True, img_px=s * 1.5, max_img=2000, wait=False)
@@ -569,6 +693,11 @@ class ElementItem(QGraphicsItem):
         if not self.isSelected() and self.cv.handle_owner(e.scenePos()) is not None:
             e.ignore()   # la asa del seleccionado queda debajo de este elemento: el clic es para ella
             return
+        if self.cv.cropping is self.el:   # recortando: arrastrar mueve la foto dentro del marco
+            self.mode = "crop"
+            self.start_el = copy.deepcopy(self.el)
+            self.start_pos = e.pos()
+            return
         if self.cv.tool == "direct" and self.el["type"] == "vector" and not self.el.get("locked"):
             if not self.isSelected():
                 self.scene().clearSelection()
@@ -615,12 +744,35 @@ class ElementItem(QGraphicsItem):
             self.cv.owner.live_geometry()
         elif self.mode == "node":
             self._move_node(e.pos(), bool(e.modifiers() & Qt.AltModifier))
+        elif self.mode == "crop":
+            self._drag_crop(e.pos())
         else:
             super().mouseMoveEvent(e)
+
+    def _drag_crop(self, pos):
+        e0 = self.start_el
+        iw, ih = self.cv.cache.full_size(e0["path"])
+        x, y, cw, ch = G.cover_box(max(1, iw), max(1, ih), e0["w"], e0["h"], e0.get("zoom", 1.0),
+                                   e0.get("fx", 0.5), e0.get("fy", 0.5))
+        k = e0["w"] / max(cw, 1e-6)
+        dx, dy = (pos.x() - self.start_pos.x()) / k, (pos.y() - self.start_pos.y()) / k
+        if e0.get("flip_x"):   # la foto se ve volteada: arrastrar a la derecha la mueve a la derecha
+            dx = -dx
+        if e0.get("flip_y"):
+            dy = -dy
+        if iw - cw > 0.5:
+            self.el["fx"] = min(1.0, max(0.0, (x - dx) / (iw - cw)))
+        if ih - ch > 0.5:
+            self.el["fy"] = min(1.0, max(0.0, (y - dy) / (ih - ch)))
+        self.prepareGeometryChange()
+        self.update()
 
     def mouseReleaseEvent(self, e):
         was = self.mode
         self.mode = None
+        if was == "crop":
+            self.cv.owner.commit(coalesce=f"{self.el['id']}:crop")
+            return
         if was == "node":
             self.normalize()
         super().mouseReleaseEvent(e)
@@ -642,6 +794,9 @@ class ElementItem(QGraphicsItem):
             return
         if self.el["type"] == "vector" and self.cv.tool == "select":
             self.cv.owner.set_tool("direct")
+            return
+        if self.el["type"] == "image" and self.el.get("path") and not self.el.get("locked"):
+            self.cv.owner.start_crop(self.el)
             return
         super().mouseDoubleClickEvent(e)
 
@@ -845,6 +1000,7 @@ class Canvas(QGraphicsView):
         self.draw = None  # (elemento, punto inicial) mientras se dibuja un rectángulo o elipse
         self._move_state = None
         self.editing = None   # InlineTextEditor mientras se escribe en el lienzo
+        self.cropping = None  # foto que se recorta en el lienzo (doble clic)
         self._pan = None
         self._space = False
         # las demás páginas, una debajo de otra como en Canva: la activa siempre en (0, 0) con sus elementos
@@ -970,7 +1126,7 @@ class Canvas(QGraphicsView):
         for j in range(n):
             inner.addRect(self.page_rect(j))
         bgc = QColor(VC["canvas"])
-        bgc.setAlpha(215)
+        bgc.setAlpha(215 if self.cropping is None else 90)   # recortando: que se vea la foto que sobra
         p.fillPath(outside.subtracted(inner), bgc)
         # nombre de cada página encima («01 - Nombre»); la activa, resaltada
         p.save()
@@ -1004,6 +1160,8 @@ class Canvas(QGraphicsView):
                     p.drawLine(QPointF(pg.left() + x, pg.top()), QPointF(pg.left() + x, pg.bottom()))
                 for y in ry:
                     p.drawLine(QPointF(pg.left(), pg.top() + y), QPointF(pg.right(), pg.top() + y))
+        if self.moving is not None and self._move_state is not None:
+            self._paint_distances(p, s)
         gx, gy = self.guides
         p.setPen(QPen(GUIDE, 1 / s))
         for x in gx:
@@ -1012,6 +1170,52 @@ class Canvas(QGraphicsView):
             p.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
         if self.tool == "pen" and self.pen_nodes:
             self._paint_pen(p, s)
+
+    def _paint_distances(self, p, s):
+        """Mientras se arrastra: distancia a lo más cercano de cada lado (o al borde de la página), como Canva."""
+        items = [i for i in self.sc.selectedItems() if isinstance(i, ElementItem)]
+        if not items:
+            return
+        boxes = [G.bbox(dict(i.el, x=i.pos().x(), y=i.pos().y())) for i in items]
+        x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+        x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+        ids = {i.el["id"] for i in items}
+        others = [G.bbox(e) for e in self.d["elements"] if e["id"] not in ids and not e.get("hidden")]
+        W, H = self.d["w"], self.d["h"]
+        left = max([b[2] for b in others if b[2] <= x0 and b[1] < y1 and b[3] > y0] + [0.0])
+        right = min([b[0] for b in others if b[0] >= x1 and b[1] < y1 and b[3] > y0] + [W])
+        top = max([b[3] for b in others if b[3] <= y0 and b[0] < x1 and b[2] > x0] + [0.0])
+        bottom = min([b[1] for b in others if b[1] >= y1 and b[0] < x1 and b[2] > x0] + [H])
+        cy, cx = (y0 + y1) / 2, (x0 + x1) / 2
+        col = QColor("#FF3D8B")
+        p.save()
+        p.setPen(QPen(col, 1 / s))
+        f = p.font()
+        f.setPixelSize(max(1, round(11 / s)))
+        f.setBold(True)
+        p.setFont(f)
+        segs = []
+        if 0 < x0 - left < W:
+            segs.append((QPointF(left, cy), QPointF(x0, cy), x0 - left))
+        if 0 < right - x1 < W:
+            segs.append((QPointF(x1, cy), QPointF(right, cy), right - x1))
+        if 0 < y0 - top < H:
+            segs.append((QPointF(cx, top), QPointF(cx, y0), y0 - top))
+        if 0 < bottom - y1 < H:
+            segs.append((QPointF(cx, y1), QPointF(cx, bottom), bottom - y1))
+        for a, b, dist in segs:
+            p.drawLine(a, b)
+            v = self.owner._to_unit(dist)
+            txt = f"{v:.1f} mm" if self.owner._mm() else f"{v:.0f}"
+            m = (a + b) / 2
+            fm = p.fontMetrics()
+            r = QRectF(m.x() - (fm.horizontalAdvance(txt) + 8 / s) / 2, m.y() - 9 / s,
+                       fm.horizontalAdvance(txt) + 8 / s, 18 / s)
+            p.fillRect(r, col)
+            p.setPen(QColor("white"))
+            p.drawText(r, Qt.AlignCenter, txt)
+            p.setPen(QPen(col, 1 / s))
+        p.restore()
 
     def _paint_pen(self, p, s):
         subs = [{"nodes": self.pen_nodes, "closed": False}]
@@ -1075,6 +1279,16 @@ class Canvas(QGraphicsView):
         self.owner.place_taskbar()
 
     def wheelEvent(self, e):
+        if self.cropping is not None and not e.modifiers() & Qt.ControlModifier:   # recortando: zoom de la foto
+            el = self.cropping
+            z = el.get("zoom", 1.0) * (1.1 if e.angleDelta().y() > 0 else 1 / 1.1)
+            el["zoom"] = round(min(8.0, max(1.0, z)), 4)
+            it = self.owner.items.get(el["id"])
+            if it is not None:
+                it.prepareGeometryChange()
+                it.update()
+            self.owner.commit(coalesce=f"{el['id']}:crop")
+            return
         # como en Canva: la rueda desplaza (Mayús: en horizontal) y Ctrl+rueda acerca o aleja
         if not e.modifiers() & Qt.ControlModifier:
             if e.modifiers() & Qt.ShiftModifier:
@@ -1101,6 +1315,9 @@ class Canvas(QGraphicsView):
     def keyPressEvent(self, e):
         if self.editing is not None:   # escribiendo en el lienzo: las teclas son del texto (espacio incluido)
             return super().keyPressEvent(e)
+        if self.cropping is not None and e.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape):
+            self.owner.end_crop()
+            return
         if e.key() == Qt.Key_Space and not e.isAutoRepeat():
             self._space = True
             self.viewport().setCursor(Qt.OpenHandCursor)
@@ -1125,7 +1342,11 @@ class Canvas(QGraphicsView):
             self._pan = e.position()
             self.viewport().setCursor(Qt.ClosedHandCursor)
             return
-        self.owner.taskbar.hide()
+        if self.cropping is not None:   # clic fuera de la foto que se recorta: terminar
+            it = self.owner.items.get(self.cropping["id"])
+            if it is None or not it.crop_full_rect().united(QRectF(0, 0, self.cropping["w"], self.cropping["h"])) \
+                    .contains(it.mapFromScene(sp)):
+                self.owner.end_crop()
         j = self.page_at(sp)
         if e.button() == Qt.LeftButton and j is not None and j != self.d.get("page", 0) and \
                 self.tool in ("select", "direct", "text", "rect", "ellipse"):
@@ -1210,6 +1431,7 @@ class Canvas(QGraphicsView):
             return
         super().mouseReleaseEvent(e)
         self.moving = None
+        self._move_state = None
         self.guides = ([], [])
         self.owner.after_interaction()
 
@@ -1270,110 +1492,274 @@ CLIP_MIME = "application/x-phootflow-elements"   # elementos copiados (también 
 
 
 class TaskBar(QFrame):
-    """Barra contextual flotante bajo la selección (como la «contextual task bar» de VectorCraft)."""
+    """Barra contextual fija encima del lienzo (como la de Canva): cambia según lo seleccionado. Texto: fuente,
+    tamaño, color, N K S, alineación, lista y efectos; foto: recortar, editar, quitar fondo, voltear…; siempre:
+    transparencia, posición, duplicar, bloquear y más."""
 
     def __init__(self, owner: "GraphicsView"):
-        super().__init__(owner.canvas.viewport())
+        super().__init__()
         self.owner = owner
-        self.setObjectName("vcTask")
-        self.h = QHBoxLayout(self)
-        self.h.setContentsMargins(8, 6, 8, 6)
-        self.h.setSpacing(6)
-        self.hide()
+        self.setObjectName("gCtx")
+        self.setFixedHeight(46)
+        self.setStyleSheet("QFrame#gCtx { background: #0d1018; border-bottom: 1px solid #23283a; } "
+                           "QFrame#gCtx QPushButton { padding: 4px 9px; } "
+                           "QFrame#gCtx QToolButton { padding: 4px 9px; background: transparent; color: #D9DCE3; "
+                           "border: 1px solid #2b3142; border-radius: 6px; } "
+                           "QFrame#gCtx QToolButton:hover { background: #1b2030; }")
+        # nunca ensancha la ventana: si no cabe todo, se desplaza en horizontal (rueda o barra fina)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.area = QScrollArea()
+        self.area.setFrameShape(QFrame.NoFrame)
+        self.area.setWidgetResizable(True)
+        self.area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.area.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; } "
+                                "QScrollBar:horizontal { height: 5px; }")
+        outer.addWidget(self.area)
+        inner = QWidget()
+        self.area.setWidget(inner)
+        self.h = QHBoxLayout(inner)
+        self.h.setContentsMargins(10, 5, 10, 2)
+        self.h.setSpacing(5)
+        self.sel = []
 
-    def update_for(self, sel):
+    def hide(self):   # fija: no se esconde (las llamadas antiguas de «hide» no hacen nada)
+        pass
+
+    def place(self):
+        pass
+
+    def _clear(self):
         while self.h.count():
             it = self.h.takeAt(0)
             w_ = it.widget()
-            if w_:  # fuera ya (no esperar al borrado diferido: se verían encima de los nuevos)
+            if w_:
                 w_.hide()
                 w_.setParent(None)
                 w_.deleteLater()
-        if not sel:
-            self.hide()
-            return
-        o = self.owner
-        acts = []
-        if len(sel) > 1:
-            if any(e["type"] == "image" for e in sel):
-                acts += [("Recortar con la forma", lambda: o.pathfinder("intersect")),
-                         ("Restar de la foto", lambda: o.pathfinder("subtract"))]
-            else:
-                acts += [("Unir", lambda: o.pathfinder("union")), ("Restar", lambda: o.pathfinder("subtract")),
-                         ("Intersecar", lambda: o.pathfinder("intersect")),
-                         ("Excluir", lambda: o.pathfinder("exclude"))]
-            if len(sel) == 2:
-                acts += [("Intercambiar", o.swap)]
-            acts += [("Agrupar", o.group)]
-        else:
-            t = sel[0]["type"]
-            if t == "text":
-                acts += [("Efectos", o.show_text_effects), ("Cromo, fuego…", o.fx_effect),
-                         ("T  Crear contornos", o.outline_text)]
-            elif t == "image" and sel[0].get("path"):
-                acts += [("Quitar fondo", o.remove_bg), ("Vectorizar", o.vectorize), ("Ampliar IA", o.upscale_image)]
-                if sel[0].get("cuts"):
-                    acts += [("Quitar recortes", o.uncut)]
-            elif t == "vector":
-                acts += [("Editar nodos", lambda: o.set_tool("direct")), ("Cromo, fuego…", o.fx_effect)]
-            elif t == "shape":
-                acts += [("Cromo, fuego…", o.fx_effect)]
-        acts += [("Duplicar", o.duplicate), ("▲ Delante", lambda: o.order("up")),
-                 ("▼ Detrás", lambda: o.order("down"))]
-        for txt, fn in acts:
-            b = QPushButton(txt)
-            b.setCursor(Qt.PointingHandCursor)
-            b.clicked.connect(fn)
-            self.h.addWidget(b)
-        lock = QPushButton("🔒" if not all(e.get("locked") for e in sel) else "🔓")
-        lock.setToolTip("Bloquear / desbloquear")
-        lock.clicked.connect(o.toggle_lock)
-        self.h.addWidget(lock)
-        more = QToolButton()
-        more.setText("···")
-        more.setPopupMode(QToolButton.InstantPopup)
-        more.setStyleSheet("QToolButton { background: transparent; border: none; padding: 4px 8px; } "
-                           "QToolButton::menu-indicator { image: none; }")
-        m = QMenu(more)
-        for t2, f2 in (("Traer al frente", lambda: o.order("front")), ("Enviar al fondo", lambda: o.order("back")),
-                       ("Agrupar", o.group), ("Desagrupar", o.ungroup), ("Eliminar", o.delete)):
-            m.addAction(t2).triggered.connect(f2)
-        more.setMenu(m)
-        self.h.addWidget(more)
-        self.adjustSize()
-        self.place()
 
-    def place(self):
-        sel = self.owner.canvas.sc.selectedItems() if self.owner.canvas.sc else []
-        if not sel or self.owner.canvas.tool not in ("select", "direct") or not self.h.count():
-            self.hide()
+    def _b(self, txt, fn, tip="", checked=None):
+        b = QPushButton(txt)
+        b.setCursor(Qt.PointingHandCursor)
+        if tip:
+            b.setToolTip(tip)
+        if checked is not None:
+            b.setCheckable(True)
+            b.setChecked(bool(checked))
+        b.clicked.connect(lambda *_: fn())
+        self.h.addWidget(b)
+        return b
+
+    def _menu_btn(self, txt, tip=""):
+        b = QToolButton()
+        b.setText(txt)
+        b.setToolTip(tip)
+        b.setPopupMode(QToolButton.InstantPopup)
+        b.setCursor(Qt.PointingHandCursor)
+        b.setStyleSheet("QToolButton::menu-indicator { image: none; }")
+        m = QMenu(b)
+        b.setMenu(m)
+        self.h.addWidget(b)
+        return m
+
+    def _sep(self):
+        f = QFrame()
+        f.setFixedSize(1, 24)
+        f.setStyleSheet("background: #2b3142;")
+        self.h.addWidget(f)
+
+    def _apply(self, key, val, refit=False):
+        o = self.owner
+        for e in self.sel:
+            if not e.get("locked"):
+                o.set_prop(e, key, val, refit_text=refit)
+        o.build_props()
+
+    def update_for(self, sel):
+        self._clear()
+        self.sel = sel
+        o = self.owner
+        if not sel:
+            lab = QLabel("Página")
+            lab.setObjectName("muted")
+            self.h.addWidget(lab)
+            cb = ColorButton(o.d.get("bg", "#FFFFFF"), False, o.design_colors)
+            cb.setToolTip("Color de fondo de la página")
+            cb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed); cb.setFixedWidth(92)
+            cb.changed.connect(lambda c: (o.d.__setitem__("bg", c), o.canvas.resetCachedContent(),
+                                          o.canvas.viewport().update(), o.commit(coalesce="bg")))
+            self.h.addWidget(cb)
+            self._b("Estilos", lambda: o.show_library(0), "Otras paletas y fuentes para este diseño")
+            self._b("Diseñar con mis fotos", o.open_session_designer)
+            self.h.addStretch(1)
+            hint = QLabel("Elige un elemento para ver sus opciones · doble clic: escribir o recortar")
+            hint.setObjectName("faint")
+            self.h.addWidget(hint)
             return
-        r = QRectF()
-        for it in sel:
-            r = r.united(it.mapRectToScene(QRectF(0, 0, it.el["w"], it.el["h"])))
-        cv = self.owner.canvas
-        bottom = cv.mapFromScene(QPointF(r.center().x(), r.bottom()))
-        top = cv.mapFromScene(QPointF(r.center().x(), r.top()))
-        vp = cv.viewport().rect()
-        self.adjustSize()
-        x = int(top.x() - self.width() / 2)
-        y = int(top.y() - self.height() - 44)   # encima (sin tapar lo de debajo), por encima del asa de giro
-        if y < vp.top() + 6:   # sin sitio encima: debajo
-            y = int(bottom.y() + 22)
-        x = max(6, min(x, vp.right() - self.width() - 6))
-        y = max(6, min(y, vp.bottom() - self.height() - 6))
-        self.move(x, y)
-        self.show()
-        self.raise_()
+        types = {e["type"] for e in sel}
+        one = sel[0]
+        if types == {"text"}:
+            fc = QFontComboBox()
+            fc.setCurrentFont(G.text_font(one))
+            fc.setFixedWidth(150)
+            fc.currentFontChanged.connect(lambda f: self._apply("font", f.family()))
+            self.h.addWidget(fc)
+            self._b("−", lambda: o.text_size(1 / 1.1), "Letra más pequeña (Ctrl+<)")
+            sz = QDoubleSpinBox()
+            sz.setRange(1, 2000)
+            sz.setDecimals(1)
+            sz.setFixedWidth(70)
+            sz.setValue(o._font_pt(one["size"]))
+            sz.setSuffix(" pt" if o._mm() else "")
+            sz.valueChanged.connect(lambda v: [o.set_prop(e, "size", o._font_px(v)) for e in sel])
+            self.h.addWidget(sz)
+            self._b("+", lambda: o.text_size(1.1), "Letra más grande (Ctrl+>)")
+            cb = ColorButton(one.get("color", "#000000"), False, o.design_colors)
+            cb.setToolTip("Color del texto")
+            cb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed); cb.setFixedWidth(92)
+            cb.changed.connect(lambda c: self._apply("color", c))
+            self.h.addWidget(cb)
+            for key, txt, prop, tip in (("b", "N", "bold", "Negrita (Ctrl+B)"), ("i", "K", "italic", "Cursiva (Ctrl+I)"),
+                                        ("u", "S", None, "Subrayado (Ctrl+U)")):
+                on = all(e.get(prop) for e in sel) if prop else \
+                    all(all(r.get("u") for r in G.text_runs(e)) for e in sel)
+                self._b(txt, lambda key=key: o.text_style(key), tip, on)
+            al = {"left": "⯇ Izq.", "center": "≡ Centro", "right": "⯈ Der.", "justify": "☰ Just."}
+            nxt = {"left": "center", "center": "right", "right": "justify", "justify": "left"}
+            cur = one.get("align", "center")
+            self._b(al.get(cur, "≡ Centro"), lambda: self._apply("align", nxt.get(cur, "left")),
+                    "Alineación (clic: la siguiente)")
+            ls = {"": "Lista", "bullet": "• Viñetas", "number": "1. Números"}
+            lnext = {"": "bullet", "bullet": "number", "number": ""}
+            lc = one.get("list") or ""
+            self._b(ls[lc], lambda: self._apply("list", lnext[lc], True), "Lista (clic: cambia)")
+            self._b("AA", lambda: o.text_style("upper"), "Mayúsculas (Ctrl+Mayús+K)", one.get("upper"))
+            self._sep()
+            self._b("Efectos", o.show_text_effects, "Sombra, neón, contorno, 3D…")
+        elif types == {"image"} and len(sel) == 1:
+            if one.get("path"):
+                self._b("Recortar", lambda: o.start_crop(one), "También con doble clic en la foto")
+                self._b("Editar foto", lambda: o.scroll_props_to("Editar foto"), "Brillo, contraste, color, viñeta")
+                fl = self._menu_btn("Voltear ▾")
+                fl.addAction("En horizontal").triggered.connect(lambda: o.set_prop(one, "flip_x", not one.get("flip_x")))
+                fl.addAction("En vertical").triggered.connect(lambda: o.set_prop(one, "flip_y", not one.get("flip_y")))
+                self._sep()
+                self._b("Quitar fondo", o.remove_bg)
+                self._b("Vectorizar", o.vectorize)
+                self._b("Ampliar IA", o.upscale_image)
+                if one.get("cuts"):
+                    self._b("Quitar recortes", o.uncut)
+            else:
+                self._b("Elegir foto…", lambda: o.change_photo(one), "O arrastra una foto encima del hueco")
+        elif types == {"shape"} and len(sel) == 1:
+            if one.get("shape") != "line":
+                cb = ColorButton(one.get("fill", "#000000"), True, o.design_colors)
+                cb.setToolTip("Relleno")
+                cb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed); cb.setFixedWidth(92)
+                cb.changed.connect(lambda c: (one.pop("grad", None), self._apply("fill", c)))
+                self.h.addWidget(cb)
+            sc = ColorButton(one.get("stroke", "#000000"), False, o.design_colors)
+            sc.setToolTip("Contorno")
+            sc.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed); sc.setFixedWidth(92)
+            sc.changed.connect(lambda c: self._apply("stroke", c))
+            self.h.addWidget(sc)
+            self._b("Cromo, fuego…", o.fx_effect)
+        elif types == {"vector"} and len(sel) == 1:
+            if len(one.get("paths", [])) >= 1:
+                cb = ColorButton(one["paths"][-1].get("fill", "#000000"), True, o.design_colors)
+                cb.setToolTip("Color")
+                cb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed); cb.setFixedWidth(92)
+                cb.changed.connect(lambda c: (o._set_path(one, len(one["paths"]) - 1, "fill", c), o.build_props()))
+                self.h.addWidget(cb)
+            self._b("Editar nodos", lambda: o.set_tool("direct"))
+            self._b("Cromo, fuego…", o.fx_effect)
+        elif len(sel) > 1:
+            if any(e["type"] == "image" for e in sel):
+                self._b("Recortar con la forma", lambda: o.pathfinder("intersect"))
+                self._b("Restar de la foto", lambda: o.pathfinder("subtract"))
+            else:
+                pf = self._menu_btn("Combinar ▾", "Buscatrazos")
+                for k, t in G.PATHFINDER.items():
+                    pf.addAction(t).triggered.connect(lambda _=False, k=k: o.pathfinder(k))
+            if len(sel) == 2:
+                self._b("Intercambiar", o.swap)
+            self._b("Agrupar", o.group, "Ctrl+G")
+        self.h.addStretch(1)
+        # comunes: transparencia, posición, duplicar, bloquear, más
+        tr = self._menu_btn("◐", "Transparencia")
+        sl = QSlider(Qt.Horizontal)
+        sl.setRange(0, 100)
+        sl.setFixedWidth(180)
+        sl.setValue(int(one.get("opacity", 1.0) * 100))
+        sl.valueChanged.connect(lambda v: [o.set_prop(e, "opacity", v / 100) for e in sel])
+        wa = QWidgetAction(tr)
+        box = QWidget()
+        bl = QHBoxLayout(box)
+        bl.setContentsMargins(10, 6, 10, 6)
+        bl.addWidget(sl)
+        wa.setDefaultWidget(box)
+        tr.addAction(wa)
+        am = self._menu_btn("Animar ▾", "Animación de entrada (vídeo MP4, GIF y vista previa ▶)")
+        cur_anim = one.get("anim", "")
+        for k, t2 in G.ANIMS.items():
+            a = am.addAction(("✓ " if k == cur_anim else "   ") + t2)
+            a.triggered.connect(lambda _=False, k=k: self._apply("anim", k))
+        am.addSeparator()
+        am.addAction("Vista previa ▶").triggered.connect(o.preview_animation)
+        ps = self._menu_btn("Posición ▾", "Orden y alineación (Ctrl+[ ])")
+        for t2, f2 in (("Traer al frente", lambda: o.order("front")), ("Traer adelante", lambda: o.order("up")),
+                       ("Enviar atrás", lambda: o.order("down")), ("Enviar al fondo", lambda: o.order("back"))):
+            ps.addAction(t2).triggered.connect(f2)
+        ps.addSeparator()
+        for k, t2 in (("left", "Alinear a la izquierda"), ("hcenter", "Centrar en horizontal"),
+                      ("right", "Alinear a la derecha"), ("top", "Alinear arriba"),
+                      ("vcenter", "Centrar en vertical"), ("bottom", "Alinear abajo")):
+            ps.addAction(t2).triggered.connect(lambda _=False, k=k: o.align(k))
+        if len(sel) > 2:
+            ps.addSeparator()
+            ps.addAction("Repartir en horizontal").triggered.connect(lambda: o.distribute("h"))
+            ps.addAction("Repartir en vertical").triggered.connect(lambda: o.distribute("v"))
+        self._b("⧉", o.duplicate, "Duplicar (Ctrl+D)")
+        self._b("🔓" if all(e.get("locked") for e in sel) else "🔒", o.toggle_lock, "Bloquear / desbloquear")
+        more = self._menu_btn("···", "Más")
+        for t2, f2 in (("Copiar", o.copy), ("Pegar", o.paste), ("Agrupar", o.group), ("Desagrupar", o.ungroup),
+                       ("Información de la capa", o.show_layer_info), ("Eliminar", o.delete)):
+            more.addAction(t2).triggered.connect(f2)
 
 
 class PhotoList(QListWidget):
-    """Fotos de la carpeta: se arrastran al lienzo (o a un hueco de plantilla)."""
+    """Fotos de la carpeta: se arrastran al lienzo (o a un hueco de plantilla). Con `on_drop`, acepta archivos
+    soltados desde el Explorador (Subidos)."""
+    on_drop = None
 
     def mimeData(self, items):
         m = QMimeData()
         m.setUrls([QUrl.fromLocalFile(i.data(Qt.UserRole)) for i in items])
         return m
+
+    def _external(self, e):
+        return self.on_drop is not None and e.mimeData().hasUrls() and e.source() is not self
+
+    def dragEnterEvent(self, e):
+        if self._external(e):
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if self._external(e):
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e):
+        if self._external(e):
+            self.on_drop([u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()])
+            e.acceptProposedAction()
+        else:
+            super().dropEvent(e)
 
 
 # ------------------------------------------------------------------ diálogos
@@ -1637,6 +2023,7 @@ EXPORT_FORMATS = {
     "tif": ("TIFF — imprenta, sin pérdida (CMYK opcional)", ".tif"),
     "gif": ("GIF — animado con las páginas", ".gif"),
     "pdfimg": ("PDF de imagen (una imagen por página)", ".pdf"),
+    "mp4": ("Vídeo MP4 — con las animaciones", ".mp4"),
     "bmp": ("BMP", ".bmp"),
 }
 
@@ -1652,6 +2039,8 @@ class ExportDialog(QDialog):
         "gif": "Con varias páginas sale animado; 256 colores, mejor para gráficos que para fotos.",
         "webp": "Con varias páginas puede salir animado (como un GIF pero con todos los colores).",
         "pdfimg": "Cada página como una imagen dentro del PDF (para quien no quiere vectorial).",
+        "mp4": "Vídeo con las animaciones de entrada de cada página (Animar ▾ en la barra de arriba); cada página dura "
+               "lo que diga su «Duración». Para redes, stories o una pantalla.",
     }
 
     def __init__(self, parent, d: dict, cache=None):
@@ -1773,7 +2162,7 @@ class ExportDialog(QDialog):
         for w_ in (self.bleed, self.marks, self.outline):
             w_.setEnabled(k == "pdf")
         self.cmyk.setEnabled(k in ("pdf", "tif", "pdfimg"))
-        self.animate.setEnabled(k in EF.ANIMATED and multi)
+        self.animate.setEnabled(k in EF.ANIMATED and (multi or G.animated(self.d)))
         self.duration.setEnabled(k in EF.ANIMATED and multi and self.animate.isChecked())
         self.scale.setEnabled(k not in ("pdf", "svg", "vec"))
         self.quality.setEnabled(k in ("jpg", "webp", "avif"))
@@ -1855,6 +2244,8 @@ class GraphicsView(QWidget):
         mid = QVBoxLayout()
         mid.setContentsMargins(0, 0, 0, 0)
         mid.setSpacing(0)
+        self.taskbar = TaskBar(self)
+        mid.addWidget(self.taskbar)
         mid.addWidget(self.canvas, 1)
         mid.addWidget(self._build_pagebar())
         h.addLayout(mid, 1)
@@ -1867,10 +2258,12 @@ class GraphicsView(QWidget):
         self.editor = editor
         self.set_advanced(self.settings.value("advanced", False, type=bool))
         self.show_library(1)
-        self.taskbar = TaskBar(self)
         self.canvas.sc.selectionChanged.connect(self.on_selection)
         self.thumbs_ready.connect(self._on_thumb)
         self._shortcuts()
+        self.layers_timer = QTimer(self)
+        self.layers_timer.setSingleShot(True)
+        self.layers_timer.timeout.connect(self.refresh_layers)
         self.pages_timer = QTimer(self)
         self.pages_timer.setSingleShot(True)
         self.pages_timer.timeout.connect(self.refresh_pages)
@@ -1986,7 +2379,33 @@ class GraphicsView(QWidget):
         ph = QWidget()
         phv = QVBoxLayout(ph)
         phv.setContentsMargins(4, 8, 4, 4)
-        self.photo_info = QLabel("Abre una carpeta para ver sus fotos.")
+        up = _btn("  Subir archivos", "primary", "Fotos, logos (PNG, SVG) o RAW: se guardan en «Subidos» para "
+                  "usarlos en cualquier diseño. También puedes soltarlos aquí", self.upload_files)
+        up.setIcon(I.icon("cloud", 16, "#FFFFFF"))
+        phv.addWidget(up)
+        t = QLabel("TUS SUBIDAS")
+        t.setObjectName("cardTitle")
+        phv.addWidget(t)
+        self.uploads = PhotoList()
+        self.uploads.setViewMode(QListWidget.IconMode)
+        self.uploads.setIconSize(QSize(96, 96))
+        self.uploads.setGridSize(QSize(104, 108))
+        self.uploads.setResizeMode(QListWidget.Adjust)
+        self.uploads.setMovement(QListWidget.Static)
+        self.uploads.setDragEnabled(True)
+        self.uploads.setAcceptDrops(True)
+        self.uploads.on_drop = self.upload_files
+        self.uploads.setSelectionMode(QListWidget.ExtendedSelection)
+        self.uploads.itemDoubleClicked.connect(lambda it: self.place_photo(it.data(Qt.UserRole)))
+        self.uploads.setToolTip("Arrastra al lienzo · doble clic: añadir · suelta aquí archivos para subirlos · "
+                                "clic derecho: quitar")
+        self.uploads.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.uploads.customContextMenuRequested.connect(self._uploads_menu)
+        phv.addWidget(self.uploads, 1)
+        t = QLabel("FOTOS DE LA SESIÓN")
+        t.setObjectName("cardTitle")
+        phv.addWidget(t)
+        self.photo_info = QLabel("Abre una carpeta en Events para ver aquí sus fotos.")
         self.photo_info.setObjectName("meta")
         self.photo_info.setWordWrap(True)
         phv.addWidget(self.photo_info)
@@ -2000,9 +2419,9 @@ class GraphicsView(QWidget):
         self.photos.setSelectionMode(QListWidget.ExtendedSelection)
         self.photos.itemDoubleClicked.connect(lambda it: self.place_photo(it.data(Qt.UserRole)))
         self.photos.setToolTip("Arrastra al lienzo o a un hueco de plantilla · doble clic: añadir")
-        phv.addWidget(self.photos, 1)
-        phv.addWidget(_btn("Añadir imagen o logo de otro sitio…", "ghost", "", self.add_file))
+        phv.addWidget(self.photos, 2)
         tabs.addTab(ph, "Fotos")
+        QTimer.singleShot(300, self.refresh_uploads)
 
         # Elementos
         el = QWidget()
@@ -2189,7 +2608,10 @@ class GraphicsView(QWidget):
         self.top_size = QLabel("")
         h.addWidget(self.top_size)
         h.addStretch(1)
-        ex = _btn("  Exportar", "gExport", "PDF de imprenta, PNG, JPG o SVG (Ctrl+E)", self.export)
+        pv = _btn("▶", "gTopBtn", "Vista previa de la animación (todas las páginas)", self.preview_animation)
+        h.addWidget(pv)
+        h.addSpacing(6)
+        ex = _btn("  Exportar", "gExport", "PDF de imprenta, PNG, JPG, SVG o vídeo MP4 (Ctrl+E)", self.export)
         ex.setIcon(I.icon("export", 16, "#13204d"))
         h.addWidget(ex)
         return w
@@ -2728,9 +3150,10 @@ class GraphicsView(QWidget):
         self.layers.setSelectionMode(QListWidget.ExtendedSelection)
         self.layers.setDragDropMode(QListWidget.InternalMove)
         self.layers.itemSelectionChanged.connect(self._layers_to_scene)
-        self.layers.itemChanged.connect(self._layer_checked)
+        self.layers.itemDoubleClicked.connect(self._layer_rename)
         self.layers.model().rowsMoved.connect(self._layers_moved)
-        self.layers.setToolTip("Casilla: visible · arrastra para cambiar el orden")
+        self.layers.setToolTip("Ojo: ver u ocultar · candado: bloquear · doble clic: cambiar el nombre · "
+                               "arrastra para cambiar el orden")
         self.right_tabs.addTab(self.layers, "Capas")
         v.addWidget(self.right_tabs)
         return w
@@ -2997,6 +3420,7 @@ class GraphicsView(QWidget):
         if self.canvas.editing is not None:   # se recrean los elementos: terminar de escribir sin más
             self.canvas.editing._closing = True
             self.canvas.editing = None
+        self.canvas.cropping = None
         if not self.canvas.switching:
             self.canvas.page_cache.clear()   # puede haber cambiado cualquier página (deshacer, estilos, páginas…)
         self.canvas.set_page()
@@ -3036,6 +3460,8 @@ class GraphicsView(QWidget):
         ed = self.canvas.editing
         if ed is not None and not any(i.el is ed.el for i in sel_items):
             ed.finish()
+        if self.canvas.cropping is not None and not any(i.el is self.canvas.cropping for i in sel_items):
+            self.end_crop()
         self._sync_layer_sel()
         self.build_props()
         sel = self.selected()
@@ -3109,7 +3535,7 @@ class GraphicsView(QWidget):
         self.redo_st.clear()
         self.saved_lbl.setText("Sin guardar…")
         self.save_timer.start(1500)
-        self.refresh_layers()
+        self.layers_timer.start(250)   # Capas, sin rehacerla a cada tecla
         self._update_undo()
         self.pages_timer.start(600)
         if hasattr(self, "styles"):
@@ -3451,6 +3877,9 @@ class GraphicsView(QWidget):
             bw.setChecked(bool(el.get("bw")))
             bw.toggled.connect(lambda on: self.set_prop(el, "bw", on))
             self.props.addWidget(bw)
+            if el.get("path"):
+                self._title("Editar foto")
+                self._adjust_props(el)
             self._fx_image_props(el)
         elif t == "vector":
             paths = el.get("paths", [])
@@ -3640,6 +4069,16 @@ class GraphicsView(QWidget):
             self.commit(coalesce="bg")
         cb.changed.connect(setbg)
         self._row("Fondo", cb)
+        pg = self.d["pages"][self.d.get("page", 0)]
+        dur = self._spin(G.page_duration(pg), 0.5, 60, 1, " s", 0.5)
+        dur.setToolTip("Lo que dura esta página en el vídeo MP4 o el GIF animado")
+
+        def setdur(v):
+            self.d["pages"][self.d.get("page", 0)]["dur"] = float(v)
+            self.commit(coalesce="dur")
+        dur.valueChanged.connect(setdur)
+        self._row("Duración", dur)
+        self.props.addWidget(_btn("▶  Vista previa de la animación", "", "", self.preview_animation))
         rs = QComboBox()
         rs.addItem("Cambiar tamaño…", "")
         for g, n, ww, hh, u in G.PRESETS:
@@ -3658,18 +4097,9 @@ class GraphicsView(QWidget):
     def resize_design(self, preset):
         """Cambia el tamaño escalando el contenido para que quepa (como «Cambiar tamaño» de Canva)."""
         nd = G.design_from_preset(preset)
-        s = min(nd["w"] / self.d["w"], nd["h"] / self.d["h"])
-        ox, oy = (nd["w"] - self.d["w"] * s) / 2, (nd["h"] - self.d["h"] * s) / 2
         G.sync_page(self.d)
-        for e in [e for pg in self.d["pages"] for e in pg["elements"]]:
-            e["x"], e["y"] = e["x"] * s + ox, e["y"] * s + oy
-            e["w"], e["h"] = e["w"] * s, e["h"] * s
-            for k in ("size", "stroke_w", "radius"):
-                if k in e:
-                    e[k] *= s
-            if e["type"] == "text":
-                e["h"] = G.text_height(e)
-        self.d.update(w=nd["w"], h=nd["h"], unit=nd["unit"], dpi=nd["dpi"])
+        G.reflow(self.d, nd["w"], nd["h"])
+        self.d.update(unit=nd["unit"], dpi=nd["dpi"])
         self.size_lbl.setText(G.size_label(self.d))
         self.top_size.setText("· " + G.size_label(self.d))
         self.canvas.set_page()
@@ -3677,27 +4107,113 @@ class GraphicsView(QWidget):
         self.commit()
         QTimer.singleShot(0, self.canvas.fit)
 
+    def scroll_props_to(self, title: str):
+        """Muestra en Propiedades la sección `title` (p. ej. «Editar foto»)."""
+        self.right_tabs.setCurrentIndex(0)
+        for w_ in self.props_host.findChildren(QLabel):
+            if w_.text() == title:
+                QTimer.singleShot(0, lambda w_=w_: self.props_area.ensureWidgetVisible(w_, 0, 10))
+                return
+
     def focus_text(self):
         if self.text_edit:
             self.text_edit.setFocus()
             self.text_edit.selectAll()
 
     # ---------------------------------------------------------- capas
+    def _layer_thumb(self, el) -> QPixmap:
+        """Miniatura del elemento para Capas (en caché mientras no cambie, salvo de sitio)."""
+        cache = self.__dict__.setdefault("_lthumbs", {})
+        sig = json.dumps({k: v for k, v in el.items() if k not in ("x", "y", "locked", "hidden", "name")},
+                         sort_keys=True, default=str)
+        hit = cache.get(el["id"])
+        if hit and hit[0] == sig:
+            return hit[1]
+        S = 36
+        pm = QPixmap(S, S)
+        pm.fill(QColor("#2a2f3d"))
+        p = QPainter(pm)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
+        k = (S - 4) / max(el["w"], el["h"], 1e-6)
+        p.translate((S - el["w"] * k) / 2, (S - el["h"] * k) / 2)
+        p.scale(k, k)
+        G.paint_element(p, dict(el, hidden=False, rot=0.0, opacity=1.0), self.canvas.cache, editing=True,
+                        img_px=k, max_img=128, wait=False)
+        p.end()
+        if len(cache) > 400:
+            cache.clear()
+        cache[el["id"]] = (sig, pm)
+        return pm
+
     def refresh_layers(self):
         self._building = True
         self.layers.blockSignals(True)
         self.layers.clear()
+        folded = self.__dict__.setdefault("_folded", set())
+        seen_groups = set()
         for el in reversed(self.d["elements"]):
-            it = QListWidgetItem(("🔒 " if el.get("locked") else "") + ("▣ " if el.get("group") else "") +
-                                 G.layer_name(el))
+            g = el.get("group")
+            head = bool(g) and g not in seen_groups
+            if g:
+                seen_groups.add(g)
+            it = QListWidgetItem()
             it.setData(Qt.UserRole, el["id"])
-            it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled)
-            it.setCheckState(Qt.Unchecked if el.get("hidden") else Qt.Checked)
-            it.setToolTip(G.layer_info(el, self.d) + "\n\nCasilla: visible · arrastra para cambiar el orden")
+            it.setFlags(it.flags() | Qt.ItemIsDragEnabled)
+            it.setToolTip(G.layer_info(el, self.d) + "\n\nDoble clic en el nombre: cambiarlo · arrastra para cambiar "
+                                                      "el orden")
             self.layers.addItem(it)
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(4 + (14 if g and not head else 0), 2, 4, 2)
+            h.setSpacing(6)
+            if head:
+                fb = QToolButton()
+                fb.setText("▸" if g in folded else "▾")
+                fb.setToolTip("Plegar o desplegar el grupo")
+                fb.setAutoRaise(True)
+                fb.clicked.connect(lambda _=False, g=g: (folded.symmetric_difference_update({g}),
+                                                        self.refresh_layers()))
+                h.addWidget(fb)
+            th = QLabel()
+            th.setPixmap(self._layer_thumb(el))
+            h.addWidget(th)
+            name = QLabel(("▣ " if head else "") + (el.get("name") or G.layer_name(el)))
+            name.setStyleSheet("background: transparent;" + ("color: #7d8395;" if el.get("hidden") else ""))
+            h.addWidget(name, 1)
+            for key, on_txt, off_txt, tip in (("hidden", "◌", "👁", "Ver / ocultar"),
+                                              ("locked", "🔒", "🔓", "Bloquear / desbloquear")):
+                b = QToolButton()
+                b.setAutoRaise(True)
+                b.setText(on_txt if el.get(key) else off_txt)
+                b.setToolTip(tip)
+                b.clicked.connect(lambda _=False, el=el, key=key: self._layer_toggle(el, key))
+                h.addWidget(b)
+            it.setSizeHint(QSize(0, 42))
+            self.layers.setItemWidget(it, row)
+            if g and not head and g in folded:
+                it.setHidden(True)
         self.layers.blockSignals(False)
         self._building = False
         self._sync_layer_sel()
+
+    def _layer_toggle(self, el, key):
+        el[key] = not el.get(key)
+        it = self.items.get(el["id"])
+        if it is not None:
+            it.sync()
+        self.commit()
+        self.refresh_layers()
+        self.build_props()
+
+    def _layer_rename(self, it):
+        el = G.find(self.d, it.data(Qt.UserRole))
+        if el is None:
+            return
+        name, ok = QInputDialog.getText(self, "Nombre de la capa", "Nombre:", text=el.get("name") or G.layer_name(el))
+        if ok:
+            el["name"] = name.strip()
+            self.commit()
+            self.refresh_layers()
 
     def _sync_layer_sel(self):
         ids = {i.el["id"] for i in self.canvas.sc.selectedItems()}
@@ -3715,12 +4231,6 @@ class GraphicsView(QWidget):
         self._building = False
         self.on_selection()
 
-    def _layer_checked(self, it):
-        el = G.find(self.d, it.data(Qt.UserRole))
-        if el is not None:
-            el["hidden"] = it.checkState() != Qt.Checked
-            self.items[el["id"]].sync()
-            self.commit()
 
     def _layers_moved(self, *_):
         ids = [self.layers.item(r).data(Qt.UserRole) for r in range(self.layers.count())]
@@ -3739,10 +4249,46 @@ class GraphicsView(QWidget):
     def add_text(self, role, at: QPointF | None = None):
         txt = {"title": "Añade un título", "subtitle": "Añade un subtítulo", "body": "Añade un poco de texto"}[role]
         el = G.text_el(self.d, txt, role, color="#FFFFFF" if self._dark_bg() else "#05070F")
+        bf = (self.brand.get("title_font") if role == "title" else self.brand.get("body_font")) \
+            if getattr(self, "brand", None) else ""
+        if bf:   # los textos nuevos, con las fuentes de la marca
+            el["font"] = bf
+            G.fit_text(el)
         if at is not None:
             el["x"], el["y"] = at.x() - el["w"] / 2, at.y() - el["h"] / 2
         self._add(el)
         self.edit_text(el, select_all=True)   # como en Canva: el texto nuevo, listo para escribir encima
+
+    # ---------------------------------------------------------- recortar la foto en el lienzo
+    def start_crop(self, el):
+        if self.canvas.cropping is el or el["type"] != "image" or not el.get("path"):
+            return
+        self.end_crop()
+        it = self.items.get(el["id"])
+        if it is None:
+            return
+        if not it.isSelected():
+            self.canvas.sc.clearSelection()
+            it.setSelected(True)
+        self.canvas.cropping = el
+        it.setFlag(QGraphicsItem.ItemIsMovable, False)
+        it.prepareGeometryChange()
+        it.update()
+        self.canvas.setFocus()
+        self.saved_lbl.setText("Recortar: arrastra la foto dentro del marco · rueda: zoom · Intro o clic fuera: listo")
+
+    def end_crop(self):
+        el = self.canvas.cropping
+        if el is None:
+            return
+        self.canvas.cropping = None
+        it = self.items.get(el["id"])
+        if it is not None:
+            it.setFlag(QGraphicsItem.ItemIsMovable, not el.get("locked"))
+            it.prepareGeometryChange()
+            it.update()
+        self.commit()
+        self.build_props()
 
     # ---------------------------------------------------------- escribir en el lienzo
     def edit_text(self, el, at: QPointF | None = None, select_all: bool = False):
@@ -4014,6 +4560,113 @@ class GraphicsView(QWidget):
         p.end()
         return img
 
+    UPLOAD_EXT = (".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp", ".svg", ".gif", ".heic", ".avif")
+
+    def upload_files(self, paths=None):
+        """Copia fotos y logos a «Subidos» (los RAW se quedan donde están: se apunta su ruta)."""
+        import shutil
+        if not paths:
+            exts = " ".join("*" + x for x in self.UPLOAD_EXT + tuple(sorted(E.RAW_EXT)))
+            paths, _ = QFileDialog.getOpenFileNames(self, "Subir archivos", self.folder, f"Imágenes ({exts})")
+        if not paths:
+            return
+        d = self.uploads_dir()
+        links = self._upload_links()
+        for p in paths:
+            ext = os.path.splitext(p)[1].lower()
+            if ext in E.RAW_EXT:
+                if p not in links:
+                    links.append(p)
+                continue
+            if ext not in self.UPLOAD_EXT or os.path.normcase(os.path.dirname(p)) == os.path.normcase(d):
+                continue
+            dst = os.path.join(d, os.path.basename(p))
+            i = 2
+            while os.path.exists(dst):
+                root, x = os.path.splitext(os.path.basename(p))
+                dst = os.path.join(d, f"{root} ({i}){x}")
+                i += 1
+            try:
+                shutil.copy2(p, dst)
+            except OSError as ex:
+                QMessageBox.warning(self, "Subir", f"No se pudo copiar {os.path.basename(p)}: {ex}")
+        self._save_upload_links(links)
+        self.refresh_uploads()
+        self.show_library(2)
+
+    def _upload_links(self) -> list:
+        try:
+            with open(os.path.join(self.uploads_dir(), "enlaces.json"), encoding="utf-8") as f:
+                return [p for p in json.load(f) if os.path.exists(p)]
+        except (OSError, ValueError):
+            return []
+
+    def _save_upload_links(self, links):
+        with open(os.path.join(self.uploads_dir(), "enlaces.json"), "w", encoding="utf-8") as f:
+            json.dump(links, f, ensure_ascii=False, indent=1)
+
+    def refresh_uploads(self):
+        if not hasattr(self, "uploads"):
+            return
+        d = self.uploads_dir()
+        files = [os.path.join(d, n) for n in os.listdir(d) if os.path.splitext(n)[1].lower() in self.UPLOAD_EXT
+                 and not n.endswith("-svg.png")]
+        files.sort(key=lambda p: -os.path.getmtime(p))
+        files += self._upload_links()
+        self.uploads.clear()
+        ph = QPixmap(96, 96)
+        ph.fill(QColor("#222"))
+        self._upload_todo = []
+        for p in files:
+            it = QListWidgetItem(QIcon(ph), "")
+            it.setData(Qt.UserRole, p)
+            it.setToolTip(os.path.basename(p))
+            self.uploads.addItem(it)
+            self._upload_todo.append(it)
+        QTimer.singleShot(0, self._next_upload_thumb)
+
+    def _next_upload_thumb(self):
+        if self._closing or not getattr(self, "_upload_todo", None):
+            return
+        it = self._upload_todo.pop(0)
+        try:
+            p = it.data(Qt.UserRole)
+            if p.lower().endswith(".svg"):
+                icon = QIcon(p)
+            else:
+                from studio import quick_thumb
+                pm = QPixmap()
+                pm.loadFromData(quick_thumb(p, 192) or b"")
+                icon = QIcon(pm)
+            it.setIcon(icon)
+        except RuntimeError:
+            return
+        except Exception:
+            pass
+        QTimer.singleShot(0, self._next_upload_thumb)
+
+    def _uploads_menu(self, pos):
+        it = self.uploads.itemAt(pos)
+        if it is None:
+            return
+        m = QMenu(self)
+        m.addAction("Añadir al diseño").triggered.connect(lambda: self.place_photo(it.data(Qt.UserRole)))
+        m.addAction("Quitar de Subidos").triggered.connect(lambda: self._remove_upload(it.data(Qt.UserRole)))
+        m.exec(self.uploads.viewport().mapToGlobal(pos))
+
+    def _remove_upload(self, path):
+        """Quita una subida (a la Papelera si es una copia de Subidos; un RAW enlazado solo deja de listarse)."""
+        links = self._upload_links()
+        if path in links:
+            links.remove(path)
+            self._save_upload_links(links)
+        else:
+            try:
+                E.send_to_trash([path])
+            except Exception:
+                QMessageBox.information(self, "Subidos", "No se pudo mandar a la Papelera.")
+        self.refresh_uploads()
+
     def uploads_dir(self) -> str:
         d = os.path.join(self.ddir, "subidos")
         os.makedirs(d, exist_ok=True)
@@ -4040,6 +4693,7 @@ class GraphicsView(QWidget):
                 path = os.path.join(self.uploads_dir(), time.strftime("pegada-%Y%m%d-%H%M%S.png"))
                 img.save(path)
                 self.place_photo(path)
+                self.refresh_uploads()
                 return
         elif md is not None and md.hasText() and md.text().strip() and not self.clip:
             el = G.text_el(self.d, md.text().strip()[:2000], "body",
@@ -4216,6 +4870,35 @@ class GraphicsView(QWidget):
         return None
 
     # ---------------------------------------------------------- efectos «de plugin» (fx_engine)
+    def _adjust_props(self, el):
+        """Recortar, voltear y ajustes rápidos (brillo, contraste, saturación, calidez, viñeta) de una foto."""
+        r = QHBoxLayout()
+        for txt, fn, tip in (("Recortar", lambda: self.start_crop(el), "También con doble clic en la foto"),
+                             ("⇋ Voltear", lambda: self.set_prop(el, "flip_x", not el.get("flip_x")),
+                              "Voltear en horizontal"),
+                             ("⇵", lambda: self.set_prop(el, "flip_y", not el.get("flip_y")),
+                              "Voltear en vertical")):
+            b = _btn(txt, "", tip, fn)
+            r.addWidget(b)
+        self.props.addLayout(r)
+        adj = dict(el.get("adj") or {})
+        sliders = {}
+
+        def upd(*_):
+            vals = {k: sl.value() for k, sl in sliders.items() if sl.value()}
+            self.set_prop(el, "adj", vals or None)
+        for k, lab in G.ADJUST.items():
+            sl = QSlider(Qt.Horizontal)
+            sl.setRange(0 if k == "vignette" else -100, 100)
+            sl.setValue(int(adj.get(k, 0)))
+            sl.sliderReleased.connect(upd)
+            sl.valueChanged.connect(lambda _v, sl=sl: None if sl.isSliderDown() else upd())
+            sl.setToolTip("Doble clic en la etiqueta: a 0")
+            sliders[k] = sl
+            self._row(lab, sl)
+        rs = _btn("Quitar ajustes", "small", "", lambda: (self.set_prop(el, "adj", None), self.build_props()))
+        self.props.addWidget(rs)
+
     def _fx_image_props(self, el):
         """Filtro artístico (acuarela, óleo, cómic…) y borde artístico (rasgado, grunge…) de una foto."""
         art = el.get("art") or {}
@@ -4523,7 +5206,19 @@ class GraphicsView(QWidget):
                              dlg.cmyk.isChecked())
             elif k == "pdfimg":
                 G.export_image_pdf(src, path, self.canvas.cache, scale, dlg.cmyk.isChecked())
-            elif k in EF.ANIMATED and len(views) > 1 and dlg.animate.isChecked():
+            elif k == "mp4":
+                from PySide6.QtWidgets import QProgressDialog
+                prog = QProgressDialog("Haciendo el vídeo…", "", 0, 100, self)
+                prog.setCancelButton(None)
+                prog.setWindowModality(Qt.WindowModal)
+                prog.show()
+
+                def step(i, n):
+                    prog.setValue(int(i * 100 / max(1, n)))
+                    QApplication.processEvents()
+                G.export_video(src, path, self.canvas.cache, scale, 30, step)
+                prog.close()
+            elif k in EF.ANIMATED and (len(views) > 1 or G.animated(src)) and dlg.animate.isChecked():
                 G.export_animation(src, path, self.canvas.cache, scale, round(dlg.duration.value() * 1000),
                                    dlg.quality.value())
             else:
@@ -4616,6 +5311,43 @@ class GraphicsView(QWidget):
         self.commit()
         self.refresh_pages()
 
+    def preview_animation(self):
+        """Reproduce el diseño como el vídeo (páginas seguidas, con sus animaciones), en bucle."""
+        d = copy.deepcopy(self.d)
+        G.sync_page(d)
+        views = G.page_views(d)
+        durs = [G.page_duration(pg) for pg in d["pages"]]
+        total = sum(durs)
+        s = min(1.0, 560 / max(d["w"], d["h"]))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Vista previa")
+        v = QVBoxLayout(dlg)
+        lab = QLabel()
+        lab.setAlignment(Qt.AlignCenter)
+        lab.setMinimumSize(round(d["w"] * s), round(d["h"] * s))
+        v.addWidget(lab)
+        info = QLabel("")
+        info.setObjectName("meta")
+        v.addWidget(info)
+        t0 = time.time()
+
+        def tick():
+            t = (time.time() - t0) % max(0.1, total)
+            acc = 0.0
+            for i, (vw, du) in enumerate(zip(views, durs)):
+                if t < acc + du or i == len(views) - 1:
+                    img = G.render_frame(vw, self.canvas.cache, s, t - acc, wait=False)
+                    lab.setPixmap(QPixmap.fromImage(img))
+                    info.setText(f"Página {i + 1} de {len(views)} · {t:4.1f} s de {total:.1f} s")
+                    return
+                acc += du
+        timer = QTimer(dlg)
+        timer.timeout.connect(tick)
+        timer.start(40)
+        tick()
+        dlg.exec()
+        timer.stop()
+
     def show_page_grid(self):
         import graphics_pages as GP
         GP.PageGridDialog(self).exec()
@@ -4684,6 +5416,21 @@ class GraphicsView(QWidget):
             v.addLayout(r)
         v.addWidget(_btn("Aplicar las fuentes a este diseño", "", "Títulos (textos grandes) y texto (el resto), en "
                                                                   "todas las páginas", self.apply_brand))
+        t = QLabel("PALETAS")
+        t.setObjectName("cardTitle")
+        v.addWidget(t)
+        self.brand_pals = QListWidget()
+        self.brand_pals.setIconSize(QSize(120, 22))
+        self.brand_pals.setFixedHeight(110)
+        self.brand_pals.setToolTip("Clic: aplicar la paleta (y las fuentes de la marca) a todo el diseño · "
+                                   "Ctrl+Z lo deshace")
+        self.brand_pals.itemClicked.connect(lambda it: self.apply_palette(it.data(Qt.UserRole)))
+        v.addWidget(self.brand_pals)
+        r = QHBoxLayout()
+        r.addWidget(_btn("Guardar la de este diseño", "small", "Los colores más usados del diseño como paleta",
+                         self._brand_add_palette))
+        r.addWidget(_btn("Quitar", "small", "", self._brand_del_palette))
+        v.addLayout(r)
         t = QLabel("LOGOS")
         t.setObjectName("cardTitle")
         v.addWidget(t)
@@ -4706,6 +5453,19 @@ class GraphicsView(QWidget):
         return w
 
     def _brand_refresh(self):
+        if hasattr(self, "brand_pals"):
+            self.brand_pals.clear()
+            for i, pal in enumerate(self.brand.get("palettes", [])):
+                pm = QPixmap(120, 22)
+                pm.fill(Qt.transparent)
+                p = QPainter(pm)
+                cols = pal.get("colors", [])[:6]
+                for k, c in enumerate(cols):
+                    p.fillRect(QRectF(k * 120 / max(1, len(cols)), 0, 120 / max(1, len(cols)), 22), G.qcolor(c))
+                p.end()
+                it = QListWidgetItem(QIcon(pm), pal.get("name", f"Paleta {i + 1}"))
+                it.setData(Qt.UserRole, i)
+                self.brand_pals.addItem(it)
         self.brand_cols.clear()
         for c in self.brand["colors"]:
             it = QListWidgetItem(_swatch_icon(c, 30), "")
@@ -4729,6 +5489,43 @@ class GraphicsView(QWidget):
     def _brand_set(self, key, val):
         self.brand[key] = val
         self._brand_save()
+
+    def _brand_add_palette(self):
+        import graphics_magic as M
+        cols = M.design_palette(self.d, 5)
+        if not cols:
+            return
+        name, ok = QInputDialog.getText(self, "Paleta de la marca", "Nombre:",
+                                        text=f"Paleta {len(self.brand.get('palettes', [])) + 1}")
+        if not ok:
+            return
+        self.brand.setdefault("palettes", []).append({"name": name.strip() or "Paleta", "colors": cols})
+        for c in cols:   # sus colores también en los selectores
+            if c not in self.brand["colors"]:
+                self.brand["colors"].append(c)
+        self._brand_save()
+
+    def _brand_del_palette(self):
+        it = self.brand_pals.currentItem()
+        if it is not None:
+            del self.brand["palettes"][it.data(Qt.UserRole)]
+            self._brand_save()
+
+    def apply_palette(self, i):
+        """La paleta `i` de la marca (y sus fuentes, si las hay) en todo el diseño."""
+        import graphics_magic as M
+        pals = self.brand.get("palettes", [])
+        if i is None or i >= len(pals):
+            return
+        pal = pals[i]
+        G.sync_page(self.d)
+        M.restyle(self.d, M.style_from_palette(pal.get("name", ""), pal.get("colors", []),
+                                               self.brand.get("title_font", ""), self.brand.get("body_font", "")))
+        self.canvas.resetCachedContent()
+        self.rebuild()
+        self.commit()
+        self.refresh_pages()
+        self.saved_lbl.setText(f"Paleta «{pal.get('name', '')}» aplicada · Ctrl+Z para deshacer")
 
     def _brand_add_color(self):
         c = QColorDialog.getColor(QColor(T.ACCENT), self, "Color de la marca")
