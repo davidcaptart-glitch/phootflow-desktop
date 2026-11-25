@@ -19,3 +19,7 @@ comparativa*.jpg
 # administración de licencias: la clave secreta de Supabase nunca va al repo
 admin.env
 *.env
+
+# Material personal fuera del repositorio (herramienta de licencias compilada y vídeos de promoción)
+/PhootFlow Licencias/
+/Videos publicitarios/
