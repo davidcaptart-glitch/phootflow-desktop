@@ -15,8 +15,8 @@ import numpy as np
 from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QMenu,
-                               QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListView, QListWidget,
-                               QListWidgetItem, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+                               QFileDialog, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListView, QListWidget,
+                               QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
                                QSlider, QSpinBox, QStyle, QStyledItemDelegate, QTabWidget, QToolButton, QVBoxLayout,
                                QWidget)
 
@@ -518,13 +518,25 @@ class StudioView(QWidget):
         b_save = _btn("＋", "small", "Guardar los ajustes actuales como preset")
         b_save.setFixedWidth(30)
         b_save.clicked.connect(self.save_preset)
+        b_more = _btn("⋯", "small", "Importar presets de Lightroom o LUT")
+        b_more.setFixedWidth(30)
+        m = QMenu(b_more)
+        m.addAction("Importar presets (Lightroom .xmp, .lrtemplate, PhootFlow .json)…", self.import_presets)
+        m.addAction("Importar LUT (.cube)…", self.import_luts)
+        m.addSeparator()
+        m.addAction("Abrir la carpeta de mis presets", lambda: self._open_dir(SE.user_presets_dir(self.cfg_dir)))
+        b_more.clicked.connect(lambda: m.exec(b_more.mapToGlobal(b_more.rect().bottomLeft())))
         row.addWidget(self.preset_search, 1)
         row.addWidget(b_save)
+        row.addWidget(b_more)
         pre.lay.addLayout(row)
         self.preset_list = QListWidget()
         self.preset_list.setObjectName("list")
         self.preset_list.setMouseTracking(True)
-        self.preset_list.setToolTip("Pasa el ratón para ver cómo queda; clic para aplicarlo")
+        self.preset_list.setToolTip("Pasa el ratón para ver cómo queda; clic para aplicarlo.\n"
+                                    "Clic derecho en uno tuyo: renombrar, exportar o borrar.")
+        self.preset_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.preset_list.customContextMenuRequested.connect(self._preset_menu)
         self.preset_list.itemEntered.connect(self._preview_preset)
         self.preset_list.itemClicked.connect(lambda it: self.apply_preset_data(it.data(ROLE)))
         self.preset_list.leaveEvent = lambda e: self.request(draft=False)
@@ -768,6 +780,9 @@ class StudioView(QWidget):
                     self.lut_cb.activated.connect(lambda _: self._set("lut", self.lut_cb.currentData() or "", True))
                     row.addWidget(QLabel("LUT"))
                     row.addWidget(self.lut_cb, 1)
+                    b_lut = _btn("Importar…", "small", "Añade tus LUT (.cube); quedan para Studio y Events")
+                    b_lut.clicked.connect(self.import_luts)
+                    row.addWidget(b_lut)
                     sec.lay.addLayout(row)
                     lut_k = SliderRow("lut_strength", "Intensidad", 0, 100, 1, 100)
                     lut_k.changed.connect(self._set)
@@ -2526,6 +2541,8 @@ class StudioView(QWidget):
                 for name, st in items.items():
                     it = QListWidgetItem("   " + name)
                     it.setData(ROLE, st)
+                    if title == "MIS PRESETS":
+                        it.setData(ROLE + 1, name)  # los tuyos: se pueden renombrar, exportar y borrar
                     self.preset_list.addItem(it)
         if not hasattr(self, "preset_cb"):
             return
@@ -2554,6 +2571,83 @@ class StudioView(QWidget):
             SE.save_preset(self.cfg_dir, name.strip(), self.cur.settings)
             self.reload_presets()
             self.status.setText(f"Preset «{name.strip()}» guardado.")
+
+    def _open_dir(self, d: str):
+        os.makedirs(d, exist_ok=True)
+        os.startfile(d)
+
+    def _preset_menu(self, pos):
+        it = self.preset_list.itemAt(pos)
+        name = it.data(ROLE + 1) if it else None
+        if not name:
+            return
+        m = QMenu(self)
+        a_ren = m.addAction("Renombrar…")
+        a_exp = m.addAction("Exportar…")
+        m.addSeparator()
+        a_del = m.addAction("Borrar")
+        a = m.exec(self.preset_list.mapToGlobal(pos))
+        if a is a_ren:
+            new, ok = QInputDialog.getText(self, "Renombrar preset", "Nombre nuevo:", text=name)
+            if ok and new.strip():
+                final = SE.rename_preset(self.cfg_dir, name, new)
+                self.reload_presets()
+                self.status.setText(f"Preset renombrado a «{final}».")
+        elif a is a_exp:
+            dest, _ = QFileDialog.getSaveFileName(self, "Exportar preset", name + ".json", "Preset de PhootFlow (*.json)")
+            if dest:
+                SE.export_preset(self.cfg_dir, name, dest)
+                self.status.setText(f"Preset exportado a {dest}.")
+        elif a is a_del:
+            if QMessageBox.question(self, "Borrar preset", f"¿Borrar el preset «{name}»?\n"
+                                    "Las fotos a las que ya lo aplicaste no cambian.") == QMessageBox.Yes:
+                SE.delete_preset(self.cfg_dir, name)
+                self.reload_presets()
+                self.status.setText(f"Preset «{name}» borrado.")
+
+    def import_presets(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Importar presets", "", "Presets (*.xmp *.lrtemplate *.json);;Todos los archivos (*)")
+        if not files:
+            return
+        names, bad, ignored = [], [], 0
+        for p in files:
+            try:
+                n, ig = SE.import_preset_file(self.cfg_dir, p)
+                names.append(n)
+                ignored += ig
+            except Exception as e:
+                bad.append(f"{os.path.basename(p)}: {e}")
+        self.preset_search.setCurrentIndex(0)
+        self.reload_presets()
+        msg = f"{len(names)} preset(s) importado(s) a «Mis presets»."
+        if ignored:
+            msg += (f"\n\n{ignored} ajuste(s) no tienen equivalente en Studio y no se aplican "
+                    "(temperatura en kelvin, curvas de puntos, máscaras, perfiles…).")
+        if bad:
+            msg += "\n\nNo se pudieron importar:\n" + "\n".join(bad[:10])
+        QMessageBox.information(self, "Importar presets", msg)
+
+    def import_luts(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Importar LUT", "", "LUT (*.cube)")
+        if not files:
+            return
+        done, bad = [], []
+        for p in files:
+            try:
+                done += L.import_luts(self.cfg_dir, L.COMMON, [p])
+            except Exception as e:
+                bad.append(f"{os.path.basename(p)}: {e}")
+        self.reload_luts()
+        if done and self.cur:  # el primero, aplicado a la foto
+            i = self.lut_cb.findData(done[0])
+            if i >= 0:
+                self.lut_cb.setCurrentIndex(i)
+                self._set("lut", done[0], True)
+        msg = f"{len(done)} LUT importado(s); están en el desplegable LUT de Studio y en Events."
+        if bad:
+            msg += "\n\nNo se pudieron importar:\n" + "\n".join(bad[:10])
+        QMessageBox.information(self, "Importar LUT", msg)
 
     def reload_luts(self):
         self.lut_cb.clear()

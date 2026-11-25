@@ -13,6 +13,7 @@ import copy
 import json
 import math
 import os
+import re
 
 import cv2
 import numpy as np
@@ -669,13 +670,137 @@ def list_presets(cfg_dir: str) -> dict[str, dict]:
 PRESET_KEYS_EXCLUDED = {"crop", "crop_ratio", "angle", "rating", "flag", "exposure"}
 
 
-def save_preset(cfg_dir: str, name: str, s: dict) -> str:
-    d = user_presets_dir(cfg_dir)
-    os.makedirs(d, exist_ok=True)
-    p = os.path.join(d, "".join(c if c.isalnum() or c in " -_" else "_" for c in name) + ".json")
+def _preset_file(cfg_dir: str, name: str) -> str:
+    safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in name).strip() or "Preset"
+    return os.path.join(user_presets_dir(cfg_dir), safe + ".json")
+
+
+def save_preset(cfg_dir: str, name: str, s: dict, full: bool = True) -> str:
+    """Guarda un preset propio. `full`: los ajustes completos de una foto (sin recorte, giro, exposición…);
+    si no, solo las claves que trae `s` (p. ej. un preset de Lightroom importado)."""
+    os.makedirs(user_presets_dir(cfg_dir), exist_ok=True)
+    p = _preset_file(cfg_dir, name)
+    data = {k: v for k, v in s.items() if k not in PRESET_KEYS_EXCLUDED} if full else dict(s)
     with open(p, "w", encoding="utf-8") as f:
-        json.dump({k: v for k, v in s.items() if k not in PRESET_KEYS_EXCLUDED}, f, ensure_ascii=False, indent=1)
+        json.dump(data, f, ensure_ascii=False, indent=1)
     return p
+
+
+def preset_name_free(cfg_dir: str, name: str) -> str:
+    """`name`, o «name (2)», «name (3)»… si ya existe."""
+    out, n = name, 2
+    while os.path.exists(_preset_file(cfg_dir, out)):
+        out, n = f"{name} ({n})", n + 1
+    return out
+
+
+def delete_preset(cfg_dir: str, name: str) -> None:
+    p = _preset_file(cfg_dir, name)
+    if os.path.isfile(p):
+        os.remove(p)
+
+
+def rename_preset(cfg_dir: str, old: str, new: str) -> str:
+    """Cambia el nombre (no pisa otro que ya exista). Devuelve el nombre final."""
+    src = _preset_file(cfg_dir, old)
+    new = new.strip()
+    if not new or new == old or not os.path.isfile(src):
+        return old
+    new = preset_name_free(cfg_dir, new)
+    os.replace(src, _preset_file(cfg_dir, new))
+    return new
+
+
+def export_preset(cfg_dir: str, name: str, dest: str) -> None:
+    import shutil
+    shutil.copyfile(_preset_file(cfg_dir, name), dest)
+
+
+# --- presets de Lightroom / Camera Raw (.xmp y .lrtemplate antiguos) -> ajustes de Studio
+_LR_SIMPLE = {  # clave de Lightroom -> clave de Studio (misma escala)
+    "Exposure2012": "exposure", "Contrast2012": "contrast", "Highlights2012": "highlights",
+    "Shadows2012": "shadows", "Whites2012": "whites", "Blacks2012": "blacks", "Texture": "texture",
+    "Clarity2012": "clarity", "Dehaze": "dehaze", "Vibrance": "vibrance", "Saturation": "saturation",
+    "ParametricShadows": "curve_shadows", "ParametricDarks": "curve_darks", "ParametricLights": "curve_lights",
+    "ParametricHighlights": "curve_highlights", "Sharpness": "sharpen", "SharpenRadius": "sharpen_radius",
+    "LuminanceSmoothing": "nr_luma", "ColorNoiseReduction": "nr_color", "PostCropVignetteAmount": "vignette",
+    "GrainAmount": "grain", "IncrementalTemperature": "temp", "IncrementalTint": "tint",
+    "ColorGradeShadowHue": "grade_sh_hue", "ColorGradeShadowSat": "grade_sh_sat",
+    "ColorGradeMidtoneHue": "grade_mid_hue", "ColorGradeMidtoneSat": "grade_mid_sat",
+    "ColorGradeHighlightHue": "grade_hi_hue", "ColorGradeHighlightSat": "grade_hi_sat",
+    "ColorGradeBlending": "grade_blend", "ColorGradeBalance": "grade_balance",
+    # gradación antigua (Dividir tonos), por si el preset no trae la nueva
+    "SplitToningShadowHue": "grade_sh_hue", "SplitToningShadowSaturation": "grade_sh_sat",
+    "SplitToningHighlightHue": "grade_hi_hue", "SplitToningHighlightSaturation": "grade_hi_sat",
+    "SplitToningBalance": "grade_balance",
+}
+_LR_HSL = {"HueAdjustment": "h", "SaturationAdjustment": "s", "LuminanceAdjustment": "l"}
+_LR_BANDS = {"Red": "red", "Orange": "orange", "Yellow": "yellow", "Green": "green", "Aqua": "aqua",
+             "Blue": "blue", "Purple": "purple", "Magenta": "magenta"}
+_RANGES = {c[0]: (c[2], c[3]) for _, ctrls in PANELS for c in ctrls}
+
+
+def lightroom_to_settings(text: str) -> tuple[dict, str, int]:
+    """Lee un preset de Lightroom (.xmp o .lrtemplate). Devuelve (ajustes de Studio, nombre, ajustes que
+    no tienen equivalente y se ignoran). Solo trae lo que el preset fija, como en Lightroom."""
+    vals: dict[str, str] = {}
+    for k, v in re.findall(r'crs:(\w+)="([^"]*)"', text):  # atributos
+        vals.setdefault(k, v)
+    for k, v in re.findall(r"<crs:(\w+)>([^<]*)</crs:\1>", text):  # elementos
+        vals.setdefault(k, v.strip())
+    if not vals and "settings" in text:  # .lrtemplate (Lua): Exposure2012 = 0.5,
+        for k, v in re.findall(r"\b([A-Z]\w+)\s*=\s*(-?[\d.]+|true|false)\b", text):
+            vals.setdefault(k, v)
+    name = ""
+    m = re.search(r"<crs:Name>.*?<rdf:li[^>]*>([^<]+)</rdf:li>", text, re.S) or \
+        re.search(r'crs:Name="([^"]+)"', text) or re.search(r'\btitle\s*=\s*"([^"]+)"', text)
+    if m:
+        name = m.group(1).strip()
+    out: dict = {}
+    ignored = 0
+    for k, v in vals.items():
+        key = _LR_SIMPLE.get(k)
+        if key is None:
+            for pre, ch in _LR_HSL.items():
+                if k.startswith(pre) and k[len(pre):] in _LR_BANDS:
+                    key = f"hsl_{_LR_BANDS[k[len(pre):]]}_{ch}"
+        if key is None:
+            if k == "ConvertToGrayscale":
+                out["bw"] = v.lower() == "true"
+            elif re.fullmatch(r"-?\+?[\d.]+", v) and v not in ("0", "0.0", "+0", "+0.0"):
+                ignored += 1  # temperatura absoluta, curvas de puntos, máscaras…: sin equivalente
+            continue
+        if key.startswith("grade_") and key in out and k.startswith("SplitToning"):
+            continue  # manda la gradación de color nueva
+        try:
+            x = float(v.replace("+", ""))
+        except ValueError:
+            continue
+        lo, hi = _RANGES.get(key, (-100, 100))
+        out[key] = round(min(max(x, lo), hi), 3)
+    return out, name, ignored
+
+
+def import_preset_file(cfg_dir: str, path: str) -> tuple[str, int]:
+    """Importa un preset (.json propio, .xmp de Lightroom/Camera Raw o .lrtemplate) a «Mis presets».
+    Devuelve (nombre, ajustes ignorados). ValueError si no se reconoce."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    base = os.path.splitext(os.path.basename(path))[0]
+    if path.lower().endswith(".json"):
+        data = json.loads(text)
+        if not isinstance(data, dict) or not (set(data) & set(DEFAULTS)):
+            raise ValueError(f"{os.path.basename(path)}: no es un preset de PhootFlow")
+        data = {k: v for k, v in data.items() if k in DEFAULTS}
+        name, ignored = base, 0
+    else:
+        data, name, ignored = lightroom_to_settings(text)
+        if not data:
+            raise ValueError(f"{os.path.basename(path)}: no tiene ajustes que PhootFlow entienda")
+        name = name or base
+    name = preset_name_free(cfg_dir, name)
+    save_preset(cfg_dir, name, data, full=False)
+    return name, ignored
 
 
 def export(photo_path: str, s: dict, out_path: str, quality: int = 95, long_side: int | None = None,

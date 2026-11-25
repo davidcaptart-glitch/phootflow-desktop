@@ -102,7 +102,10 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   verifica SHA-256, copia encima, pip si cambió `requirements.txt`, reinicia) y `dev` (clon git: solo avisa).
 - `studio.py` / `studio_engine.py` — entorno **Studio** (tipo Lightroom): `StudioView` (biblioteca, lienzo con
   antes/después, histograma, paneles de sliders, historial, presets, exportar) y el revelado no destructivo
-  `render(lin, ajustes)`. Ajustes por foto en `<carpeta>/.phootflow/studio/<foto>.json`. Las retocadas para
+  `render(lin, ajustes)`. Ajustes por foto en `<carpeta>/.phootflow/studio/<foto>.json`. Presets propios en
+  `%APPDATA%\PhootFlow\presets_studio\*.json` (＋ guarda; clic derecho: renombrar, exportar, borrar; «⋯»: importar
+  presets de Lightroom .xmp/.lrtemplate con `SE.lightroom_to_settings` — solo las claves que trae, sin equivalente
+  se cuentan como ignoradas — y LUT .cube a `luts\_comunes`, que también ve Events; «Importar…» junto al LUT). Las retocadas para
   Events (`_events_override`) se exportan con `export_events`: recorte de Studio en Entrega, los
   demás formatos en Formatos, como el resto; `fit_ratio` mantiene la proporción aunque cambie el giro. Proxy de 2048 px y
   borrador de 1024 px mientras se arrastra. `Shell` (app.py) aloja Events (`Main`) y Studio con el interruptor.
