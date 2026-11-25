@@ -2336,18 +2336,21 @@ def original_files(ph: Photo) -> list[str]:
 
 
 def archive_originals(photos: list[Photo], out_dir: str, progress=None, src_dir: str = "") -> str:
-    """Guarda los originales conservados (RAW, JPG gemelo y XMP) en un ZIP sin pérdida y lo verifica.
-    No toca los originales. Lo que ya estaba en un ZIP anterior y ya no está en disco pasa al nuevo."""
+    """Guarda los originales de las fotos aprobadas (RAW, JPG gemelo y XMP) en un ZIP sin pérdida y lo verifica.
+    No toca los originales. Las descartadas no entran. De un ZIP anterior pasa al nuevo lo que ya no está en disco
+    (p. ej. RAW quitados tras el ZIP), salvo lo de las fotos que ahora están descartadas."""
     os.makedirs(out_dir, exist_ok=True)
     path = originals_zip(out_dir, src_dir)
     old_path = _existing_zip(out_dir, src_dir)
     files = [p for ph in photos if ph.keep for p in original_files(ph)]
     names = {os.path.basename(p) for p in files}
+    discarded = {os.path.basename(p) for ph in photos if not ph.keep
+                 for p in [ph.path] + ph.extras + [os.path.splitext(ph.path)[0] + ".xmp"]}
     carry = []
     if old_path:
         try:
             with zipfile.ZipFile(old_path) as old:
-                carry = [i for i in old.infolist() if i.filename not in names]
+                carry = [i for i in old.infolist() if i.filename not in names and i.filename not in discarded]
         except zipfile.BadZipFile:
             carry = []
     manifest = _read_manifest(out_dir)

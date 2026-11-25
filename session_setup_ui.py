@@ -420,7 +420,12 @@ class SessionSetupDialog(QDialog):
         v.addWidget(UI.flow([
             self._toggle("review", "review", "Revisar antes de exportar",
                          "Abre la revisión para aprobar, recortar o retocar antes de exportar."),
-            self._toggle("zip", "archive", "ZIP de originales", "Los originales en un ZIP sin pérdida, junto a «Editadas»."),
+            self._toggle("zip", "archive", "ZIP de originales",
+                         "Solo las aprobadas: sus originales en un ZIP sin pérdida, junto a «Editadas»."),
+            self._toggle("move", "move", "Apartar las descartadas",
+                         "Al terminar, sus originales se mueven a «Descartadas» (no se borra nada)."),
+            self._toggle("del_disc", "trash", "Borrar las descartadas",
+                         "Al terminar de exportar, borra para siempre sus originales. Se pregunta antes, cada vez."),
             self._toggle("xmp", "sliders", "XMP para Lightroom", "Exposición, giro, recorte y descartes; nunca pisa uno existente."),
             self._toggle("exif", "info", "Conservar EXIF", "Cámara, objetivo y fecha en las editadas."),
         ], 8))

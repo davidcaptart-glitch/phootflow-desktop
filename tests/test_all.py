@@ -418,6 +418,24 @@ class ReviewFlow(unittest.TestCase):
         w, h = Image.open(os.path.join(out, "Entrega", "Color", "a.jpg")).size
         self.assertAlmostEqual(w / h, 0.8, delta=0.01)  # el giro no deforma la proporción elegida
 
+    def test_zip_only_approved_even_from_a_previous_zip(self):
+        """El ZIP solo lleva las aprobadas: una foto que estaba en un ZIP anterior y ahora se descarta no pasa al
+        nuevo; una aprobada cuyo RAW ya no está en disco (quitado tras el ZIP) sí se conserva."""
+        import zipfile
+        d = tempfile.mkdtemp()
+        out = os.path.join(d, "Editadas")
+        ps = []
+        for n in ("a", "b", "c"):
+            with open(os.path.join(d, n + ".ARW"), "wb") as f:
+                f.write(os.urandom(3000))
+            ps.append(E.Photo(path=os.path.join(d, n + ".ARW"), name=n, keep=True))
+        E.archive_originals(ps, out, src_dir=d)
+        ps[1].keep = False              # b: ahora descartada
+        os.remove(ps[2].path)           # c: aprobada, su RAW ya solo está en el ZIP
+        z = E.archive_originals(ps, out, src_dir=d)
+        with zipfile.ZipFile(z) as f:
+            self.assertEqual(sorted(f.namelist()), ["a.ARW", "c.ARW"])
+
     def test_trash_only_originals_that_match_the_zip(self):
         """Quitar los RAW tras el ZIP: solo los conservados sin error y que el ZIP guarda idénticos."""
         d = tempfile.mkdtemp()

@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 241 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 242 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -65,7 +65,8 @@ python -m unittest discover -s tests   # 241 pruebas, sin fotos reales ni red
   PhootFlow en esa sesión (`SF.register()` asocia la extensión en HKCU al arrancar; `main()` lee el argumento y
   `Shell.open_session_file`). Se escribe tras analizar y exportar y oculta las carpetas `.phootflow`.
   `Originales.zip` va junto a «Editadas» (`E.originals_zip`; el de dentro de Editadas de versiones anteriores se
-  traslada), con RAW, JPG gemelo y XMP; `originales.json` guarda la fecha de cada uno para que `restore_originals`
+  traslada), con RAW, JPG gemelo y XMP; solo de las aprobadas: de un ZIP anterior no pasan las que ahora están descartadas;
+  `originales.json` guarda la fecha de cada uno para que `restore_originals`
   los devuelva tal cual y el análisis valga («Recuperar sesión desde el ZIP», o se ofrece al abrir).
 - `session_presets.py` — «Ajustes guardados» de Events (sin Qt): perfiles con nombre de LUT, revelado, B/N,
   formatos, cómo exportar, nube y calidad (`KEYS`; las claves que faltan no se tocan). 5 predefinidos en `BUILTIN`;
@@ -81,7 +82,8 @@ python -m unittest discover -s tests   # 241 pruebas, sin fotos reales ni red
   la IA, boda, comunión/bautizo, fiesta, discoteca, deporte, retrato, exterior y los estilos aprendidos;
   `SS.propose` propone el resto sin tocar nube, calidad, hilos, perfil de cámara ni LUT), recorte inteligente y
   formatos, retratos, «Mejorar con IA», desenfoque de fondo, color de la cámara, look, LUT, B/N, descartes, grano y
-  qué exportar. Trabaja sobre `Main.snapshot`/`apply_snapshot` (`Main.apply_setup`; con la sesión ya analizada
+  qué exportar (ZIP solo de las aprobadas, apartar las descartadas `move` o borrarlas `del_disc`, con la
+  confirmación de siempre al exportar). Trabaja sobre `Main.snapshot`/`apply_snapshot` (`Main.apply_setup`; con la sesión ya analizada
   rehace al momento el recorte y la IA de las no revisadas). Claves nuevas `crop` y `enhance` (`Settings.smart_crop`
   y `auto_enhance`, chips en ⚙ › Al exportar): tras el análisis, `SS.apply_rules` deja la entrega en «Original» si
   no hay recorte automático y marca `ph.enhance` en las conservadas con `ph.fix`. Carpetas, hilos y carpeta de la
