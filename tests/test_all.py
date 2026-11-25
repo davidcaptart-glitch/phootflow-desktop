@@ -245,7 +245,7 @@ class Luts(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.L.import_luts(self.d, "Boda", [os.path.join(self.d, "malo.cube")])
         self.L.import_luts(self.d, "Boda", [warm])
-        self.assertEqual([n for n, _ in self.L.available(self.d, "Boda")], ["warm"])
+        self.assertEqual([n for n, p in self.L.available(self.d, "Boda") if not self.L.is_builtin(p)], ["warm"])
 
     def test_lut_review_flags_only_the_photos_it_ruins(self):
         import io as _io

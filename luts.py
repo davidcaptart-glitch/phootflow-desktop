@@ -2,19 +2,75 @@
 
 Se guardan en %APPDATA%/PhootFlow/luts/<tipo>/ (y luts/_comunes/ para todos los tipos). Admite .cube 3D
 (LUT_3D_SIZE) y 1D (LUT_1D_SIZE) con DOMAIN_MIN/DOMAIN_MAX, sobre imágenes sRGB 0..1.
+
+Además PhootFlow trae una biblioteca propia (assets/luts/biblioteca.npz + .json, la crea
+tools/crear_biblioteca_luts.py; fuentes y licencias en assets/luts/LICENCIAS.md). Sus LUT no son archivos:
+se nombran con una ruta simbólica «@phootflow/<colección>/<nombre>» que vale igual en desarrollo y en el .exe
+(la carpeta de PyInstaller cambia en cada arranque) y que `load`/`apply` entienden como cualquier ruta.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
+import sys
 import threading
 
 import numpy as np
 
 COMMON = "_comunes"
+BUILTIN = "@phootflow/"
 _CACHE: dict[str, dict] = {}
 _LOCK = threading.Lock()
+_LIB: dict | None = None
+
+
+def _library() -> dict:
+    """{'size', 'luts': [{id, group, name, col, array}], 'npz': ruta} de la biblioteca incluida ({} si falta)."""
+    global _LIB
+    if _LIB is None:
+        base = os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets", "luts")
+        try:
+            with open(os.path.join(base, "biblioteca.json"), encoding="utf-8") as f:
+                lib = json.load(f)
+            lib["npz"] = os.path.join(base, "biblioteca.npz")
+            lib["by_id"] = {m["id"]: m for m in lib["luts"]}
+        except (OSError, ValueError, KeyError):
+            lib = {}
+        _LIB = lib
+    return _LIB
+
+
+def is_builtin(path: str) -> bool:
+    return bool(path) and path.startswith(BUILTIN)
+
+
+def builtin() -> list[tuple[str, str]]:
+    """[(nombre visible, ruta simbólica)] de los LUT que trae PhootFlow, en el orden de la biblioteca."""
+    return [(f"{m['group']} · {m['name']}", BUILTIN + m["id"]) for m in _library().get("luts", [])]
+
+
+def pack_table(tab: np.ndarray) -> np.ndarray:
+    """Tabla 3D [b, g, r, 3] en 0..1 -> int16 compacto: 12 bits y diferencias a lo largo de r y g (se
+    comprime ~3 veces mejor en el .npz). Inversa: `unpack_table`."""
+    q = np.round(np.clip(tab, 0, 1) * 4095).astype(np.int16)
+    return np.diff(np.diff(q, axis=2, prepend=0), axis=1, prepend=0).astype(np.int16)
+
+
+def unpack_table(a: np.ndarray) -> np.ndarray:
+    return (np.cumsum(np.cumsum(a.astype(np.int32), axis=1), axis=2) / 4095.0).astype(np.float32)
+
+
+def _load_builtin(path: str) -> dict:
+    lib = _library()
+    m = lib.get("by_id", {}).get(path[len(BUILTIN):])
+    if m is None:
+        raise ValueError(f"{path}: este LUT ya no está en la biblioteca de PhootFlow")
+    with np.load(lib["npz"]) as z:
+        table = unpack_table(z[m["array"]])
+    return {"size": table.shape[0], "table": table, "dmin": np.zeros(3, np.float32),
+            "dmax": np.ones(3, np.float32), "is3d": True}
 
 
 def folder_name(kind: str) -> str:
@@ -26,15 +82,19 @@ def luts_dir(cfg_dir: str, kind: str = COMMON) -> str:
 
 
 def available(cfg_dir: str, kind: str) -> list[tuple[str, str]]:
-    """[(nombre visible, ruta)] de los LUT del tipo `kind` y de los comunes."""
+    """[(nombre visible, ruta)] de los LUT del tipo `kind` y de los comunes; al final, los que trae PhootFlow
+    (también «comunes»: con el prefijo «Común: » si `kind` no es el común, como los demás comunes)."""
     out = []
     for k, prefix in ((kind, ""), (COMMON, "Común: ")):
+        if kind == COMMON:
+            prefix = ""
         d = luts_dir(cfg_dir, k)
         if k and os.path.isdir(d):
             for f in sorted(os.listdir(d)):
                 if f.lower().endswith(".cube"):
                     out.append((prefix + os.path.splitext(f)[0], os.path.join(d, f)))
-        if kind == COMMON:
+        if k == COMMON or kind == COMMON:
+            out += [(prefix + label, path) for label, path in builtin()]
             break
     return out
 
@@ -57,6 +117,11 @@ def load(path: str) -> dict:
     with _LOCK:
         if path in _CACHE:
             return _CACHE[path]
+    if is_builtin(path):
+        lut = _load_builtin(path)
+        with _LOCK:
+            _CACHE[path] = lut
+        return lut
     size, is3d, dmin, dmax, rows = 0, True, np.zeros(3, np.float32), np.ones(3, np.float32), []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:

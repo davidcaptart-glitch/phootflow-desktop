@@ -153,7 +153,10 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   recorte en Studio (sincronizado con Geometría) y en la revisión (`ph.angle`, o el ángulo de Studio).
 - `propagate.py` — propagar la edición de Studio/Edits de una foto a otras de Events (`Propagator`: grupos de ajustes y capas de Edits).
   La revisión de Events se guarda sola en `<salida>/.phootflow/revision.json` (`save_review`/`load_review`) y sigue por la primera sin revisar.
-- `luts.py` — LUT .cube por tipo de sesión; `eyes.py` (MediaPipe) y `scene_ai.py` (CLIP, onnxruntime): IA local.
+- `luts.py` — LUT .cube por tipo de sesión y biblioteca incluida (`assets/luts/biblioteca.npz`, 73 LUT de
+  t3mujinpack MIT, Street Monochrome y slay CC BY, rodaje-filtros CC0; rutas simbólicas `@phootflow/…` que
+  `load` entiende; salen como comunes en Studio y Events; se regenera con `tools/crear_biblioteca_luts.py`;
+  licencias en `assets/luts/LICENCIAS.md`, fuentes en `docs/fuentes_luts.md`); `eyes.py` (MediaPipe) y `scene_ai.py` (CLIP, onnxruntime): IA local.
 - `drive.py` — OAuth de escritorio con PKCE y Drive v3 por REST.
 - `license.py` — licencias: `ensure()` en `main()` (pide clave, valida en la Edge Function `licencias` de
   Supabase, token Ed25519 verificado en Python puro, 7 días sin conexión, huella del equipo), `watch()` cada 6 h,
