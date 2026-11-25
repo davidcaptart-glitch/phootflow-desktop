@@ -997,6 +997,14 @@ class Main(QMainWindow):
         for k, label, tip in [("max", "Máxima", "Máxima resolución"), ("2048", "2048 px", "2048 px de lado largo"),
                               ("1080", "1080 px", "1080 px de ancho (redes)")]:
             self.size_cb[k] = UI.as_chip(QCheckBox(label), tip=tip)
+        import bokeh as BK
+        self.bokeh_cb = QComboBox()  # regla de sesión: desenfocar el fondo de las fotos con sujeto claro
+        self.bokeh_cb.addItem("No", "")
+        for lv in BK.LEVELS:
+            self.bokeh_cb.addItem(f"{lv} (≈{BK.LEVEL_FSTOP[lv]})", lv)
+        self.bokeh_cb.setToolTip("Al exportar, desenfoca el fondo (bokeh con discos en las luces) de las fotos con un\n"
+                                 "sujeto claro: retratos y parejas, no grupos grandes ni paisajes. El sujeto queda\n"
+                                 "nítido. En la revisión se quita o se cambia foto a foto.")
         self.c_bw = UI.as_chip(QCheckBox("Versión B/N"), "bw",
                                "Además del color, una versión B/N de catálogo en «Entrega/Blanco y negro»: mezcla pensada para la piel,\n"
                                "contraste local, negros densos sin empastar, blancos limpios y grano fino.")
@@ -1167,6 +1175,7 @@ class Main(QMainWindow):
         self.sheet.add(c)
         c, cv = card("Al exportar")
         cv.addWidget(UI.flow([self.c_review, self.c_move, self.c_exif, self.c_xmp, self.c_zip, self.c_trash, self.c_del_disc]))
+        cv.addWidget(labeled("Desenfocar fondo", self.bokeh_cb))
         self.sheet.add(c)
         c, cv = card("Nube")
         cv.addWidget(self.cloud)
@@ -1452,6 +1461,7 @@ class Main(QMainWindow):
         self.workers.setValue(int(g("workers", min(3, max(1, (os.cpu_count() or 2) // 4)))))
         self.cloud.setCurrentIndex(int(g("cloud", 0)))
         self.cloud_folder.setText(g("cloud_folder", ""))
+        self.bokeh_cb.setCurrentIndex(max(0, self.bokeh_cb.findData(g("bokeh", "") or "")))
 
     def save(self):
         st = self.settings()
@@ -1464,7 +1474,8 @@ class Main(QMainWindow):
                      ("style", self.style_cb.currentText()),
                      ("zip", st.archive_originals), ("trash_orig", self.c_trash.isChecked()), ("del_disc", self.c_del_disc.isChecked()), ("review", self.c_review.isChecked()), ("up_orig", self.c_up_orig.isChecked()),
                      ("quality", st.quality), ("workers", st.workers),
-                     ("cloud", self.cloud.currentIndex()), ("cloud_folder", self.cloud_folder.text())]:
+                     ("cloud", self.cloud.currentIndex()), ("cloud_folder", self.cloud_folder.text()),
+                     ("bokeh", st.bokeh)]:
             self.s.setValue(k, v)
 
     # ---------------------------------------------------- perfil de cámara (DCP)
@@ -1508,6 +1519,7 @@ class Main(QMainWindow):
             delete_discards=self.c_del_disc.isChecked(), keep_exif=self.c_exif.isChecked(),
             write_xmp=self.c_xmp.isChecked(), workers=self.workers.value(), bw=self.c_bw.isChecked(),
             bw_style=self.bw_style_cb.currentText(), look=self.look_cb.currentText(),
+            bokeh=self.bokeh_cb.currentData() or "",
             cache_dir=os.path.join(work_dir(self.out_dir()), "previas"), resume=True)
 
     # ---------------------------------------------------- ajustes guardados
@@ -1528,7 +1540,7 @@ class Main(QMainWindow):
             "cloud": self.cloud.currentIndex(), "cloud_folder": self.cloud_folder.text(),
             "up_orig": self.c_up_orig.isChecked(),
             "lut": self.lut_cb.currentData() or "", "lutk": self.lut_k.value(),
-            "cam_prof": self.camera_profile()}
+            "cam_prof": self.camera_profile(), "bokeh": self.bokeh_cb.currentData() or ""}
 
     def apply_snapshot(self, d: dict):
         """Pone en la ventana los ajustes de `d`; las claves que no trae se quedan como están."""
@@ -1560,6 +1572,8 @@ class Main(QMainWindow):
                     pass
         if d.get("cam_prof"):
             self.set_camera_profile(str(d["cam_prof"]))
+        if "bokeh" in d:
+            self.bokeh_cb.setCurrentIndex(max(0, self.bokeh_cb.findData(d["bokeh"] or "")))
         if "cloud" in d:
             self.cloud.setCurrentIndex(max(0, min(len(CLOUDS) - 1, int(d["cloud"] or 0))))
         if "cloud_folder" in d:

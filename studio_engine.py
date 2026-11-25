@@ -71,6 +71,14 @@ SPLASH_CTRLS = [("splash_range", "Amplitud del color", 5, 90, 1, 20), ("splash_s
                 ("splash_amount", "Resto en B/N", 0, 100, 1, 100)]
 DEFAULTS.update({"splash": False, "splash_hues": [], "splash_mode": "color", "splash_mask": 0, "splash_skin": True})
 DEFAULTS.update({c[0]: c[5] for c in SPLASH_CTRLS})
+# Desenfocar fondo (bokeh.py) y Velocidad (barrido): sujeto nítido, fondo desenfocado o con movimiento
+BLUR_SUBJECTS = {"auto": "Automático (persona u objeto)", "person": "Persona (IA)", "object": "Objeto (saliencia)",
+                 "mask": "Una máscara de Studio"}
+BOKEH_CTRLS = [("bokeh", "Desenfocar fondo", 0, 100, 1, 0), ("bokeh_hl", "Discos en las luces", 0, 100, 1, 50)]
+SPEED_CTRLS = [("speed", "Velocidad (barrido)", 0, 100, 1, 0), ("speed_angle", "Dirección (°)", 0, 359, 1, 0),
+               ("speed_trail", "Estela", 0, 100, 1, 50)]
+DEFAULTS.update({c[0]: c[5] for c in BOKEH_CTRLS + SPEED_CTRLS})
+DEFAULTS.update({"blur_subject": "auto", "blur_mask": 0, "speed_auto": True})
 DEFAULTS.update({"masks": [], "bw_style": "Editorial", "bw": False, "crop": [0.0, 0.0, 1.0, 1.0], "crop_ratio": "Original", "lut": "", "lut_strength": 100,
                  "rating": 0, "flag": 0, "profile": "Neutro"})
 
@@ -476,6 +484,25 @@ def splash_stage(y: np.ndarray, s: dict, seed: int = 0, key: str = "", view: boo
     return out.astype(np.float32)
 
 
+def blur_stage(y: np.ndarray, s: dict, key: str = "") -> np.ndarray:
+    """Desenfocar fondo y/o Velocidad con el sujeto elegido (automático, persona, objeto o una máscara)."""
+    import bokeh as BK
+    subject, alpha = s.get("blur_subject") or "auto", None
+    if subject == "mask":
+        import masks as M
+        ms = s.get("masks") or []
+        i = int(s.get("blur_mask") or 0)
+        if not 0 <= i < len(ms):
+            return y
+        alpha = M.build(ms[i], y, key)
+    if s.get("bokeh"):
+        y = BK.bokeh(y, float(s["bokeh"]), subject, key, alpha, float(s.get("bokeh_hl", 50)))
+    if s.get("speed"):
+        ang = None if s.get("speed_auto", True) else float(s.get("speed_angle", 0))
+        y = BK.speed(y, float(s["speed"]), ang, float(s.get("speed_trail", 50)), subject, key, alpha)
+    return y
+
+
 def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True, key: str = "",
            show_mask: int | None = None) -> np.ndarray:
     """Revelado completo. `lin`: sRGB lineal float32 (de engine.load_linear). Devuelve sRGB 0..1.
@@ -488,6 +515,8 @@ def render(lin: np.ndarray, s: dict, seed: int = 0, crop: bool = True, key: str 
     y = detail_stage(y, s)
     if s.get("masks"):
         y = M.apply_all(y, s["masks"], key)
+    if s.get("bokeh") or s.get("speed"):
+        y = blur_stage(y, s, key)
     if s.get("lut"):
         try:
             y = L.apply(y, s["lut"], s.get("lut_strength", 100) / 100.0)

@@ -745,7 +745,7 @@ class StudioView(QWidget):
         panels = dict(SE.PANELS)
         layout = [("sun", "Luz", ["Básico", "Presencia", "Curva tonal"]),
                   ("palette", "Color", ["_color", "_splash", "_hsl", "Gradación de color"]),
-                  ("detail", "Detalle", ["Detalle", "Efectos"]),
+                  ("detail", "Detalle", ["Detalle", "Efectos", "_blur"]),
                   ("mask", "Máscaras", ["_masks"]),
                   ("crop", "Recorte y geometría", ["_crop", "Geometría"])]
         self._tab_btns = []
@@ -758,6 +758,8 @@ class StudioView(QWidget):
                     bv.addWidget(self._build_crop())
                 elif t == "_splash":
                     bv.addWidget(self._build_splash())
+                elif t == "_blur":
+                    bv.addWidget(self._build_blur())
                 elif t == "_color":
                     sec = Section("Perfil, LUT y B/N")
                     row = QHBoxLayout()
@@ -2100,6 +2102,71 @@ class StudioView(QWidget):
         sec.lay.addWidget(self.splash_skin)
         return sec
 
+    def _build_blur(self):
+        """Desenfocar fondo (bokeh con discos en las luces) y Velocidad (barrido con estela): el sujeto nítido."""
+        sec = Section("Desenfocar fondo y velocidad", open_=False)
+        intro = QLabel("El sujeto queda nítido: el fondo se desenfoca como con un objetivo luminoso (más cuanto más "
+                       "lejos y más arriba) o se barre como al seguir un coche con la cámara.")
+        intro.setWordWrap(True)
+        intro.setObjectName("meta")
+        sec.lay.addWidget(intro)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Sujeto"))
+        self.blur_subject = QComboBox()
+        for k, v in SE.BLUR_SUBJECTS.items():
+            self.blur_subject.addItem(v, k)
+        self.blur_subject.activated.connect(
+            lambda _: (self._set("blur_subject", self.blur_subject.currentData(), True), self._sync_blur_ui()))
+        row.addWidget(self.blur_subject, 1)
+        sec.lay.addLayout(row)
+        row = QHBoxLayout()
+        self.blur_mask = QComboBox()
+        self.blur_mask.setToolTip("La máscara de la pestaña Máscaras que marca el sujeto nítido")
+        self.blur_mask.activated.connect(lambda i: self._set("blur_mask", int(i), True))
+        row.addWidget(self.blur_mask, 1)
+        sec.lay.addLayout(row)
+        self._blur_mask_row = self.blur_mask
+        for c in SE.BOKEH_CTRLS:
+            r = SliderRow(*c)
+            r.changed.connect(self._set)
+            self.rows[c[0]] = r
+            sec.lay.addWidget(r)
+        for c in SE.SPEED_CTRLS[:1]:
+            r = SliderRow(*c)
+            r.changed.connect(self._set)
+            self.rows[c[0]] = r
+            sec.lay.addWidget(r)
+        self.speed_auto = QCheckBox("Dirección automática (por la forma y la posición del sujeto)")
+        self.speed_auto.toggled.connect(lambda on: (self._set("speed_auto", bool(on), True), self._sync_blur_ui()))
+        sec.lay.addWidget(self.speed_auto)
+        for c in SE.SPEED_CTRLS[1:]:
+            r = SliderRow(*c)
+            r.changed.connect(self._set)
+            self.rows[c[0]] = r
+            sec.lay.addWidget(r)
+        return sec
+
+    def _sync_blur_ui(self):
+        if not hasattr(self, "blur_subject"):
+            return
+        s = self.cur.settings if self.cur else {}
+        subj = s.get("blur_subject") or "auto"
+        self.blur_subject.setCurrentIndex(max(0, self.blur_subject.findData(subj)))
+        self.blur_mask.blockSignals(True)
+        self.blur_mask.clear()
+        ms = s.get("masks") or []
+        for i, m in enumerate(ms):
+            self.blur_mask.addItem(f"{i + 1}. {m.get('name', 'Máscara')}")
+        if not ms:
+            self.blur_mask.addItem("(ninguna: crea una en Máscaras)")
+        self.blur_mask.setCurrentIndex(min(int(s.get("blur_mask") or 0), max(0, len(ms) - 1)))
+        self.blur_mask.blockSignals(False)
+        self.blur_mask.setVisible(subj == "mask")
+        self.speed_auto.blockSignals(True)
+        self.speed_auto.setChecked(bool(s.get("speed_auto", True)))
+        self.speed_auto.blockSignals(False)
+        self.rows["speed_angle"].setEnabled(not s.get("speed_auto", True))
+
     def set_splash(self, on: bool):
         """Botón «Color» (C): activa el color selectivo, abre su panel y arma el cuentagotas si no hay color."""
         if not self.cur:
@@ -2269,6 +2336,7 @@ class StudioView(QWidget):
         self.bw_style.setCurrentText(s.get("bw_style") or "Editorial")
         self._sync_bw_ui(bool(s.get("bw")))
         self._sync_splash_ui()
+        self._sync_blur_ui()
         if hasattr(self, "crop_angle"):
             self._sync_angle_rows(float(s.get("angle", 0) or 0))
         i = self.lut_cb.findData(s.get("lut") or None)

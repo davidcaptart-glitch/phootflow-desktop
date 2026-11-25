@@ -179,6 +179,7 @@ class Settings:
     camera_look: bool = True  # partir del aspecto del JPEG que lleva el RAW (contraste y color de la cámara)
     cull_eyes: bool = False   # descartar (no solo avisar) fotos con ojos cerrados claros
     camera_profile: str = dcp.AUTO  # perfil DCP de los RAW (AUTO = el estilo de la cámara; NONE = LibRaw)
+    bokeh: str = ""         # desenfocar fondo en las fotos con sujeto claro (bokeh.LEVELS; "" = no)
 
 
 @dataclass
@@ -232,6 +233,8 @@ class Photo:
     lut_strength: float | None = None  # intensidad del LUT en esta foto (None = la de la sesión)
     bw_style: str = ""          # estilo de B/N de esta foto ("" = el de la sesión; BW_NONE = sin B/N)
     look: str = ""              # look de color de esta foto ("" = el de la sesión)
+    bokeh: str = ""             # desenfocar fondo: "" = la regla de la sesión, BOKEH_NONE = no, o un nivel
+    speed: dict = field(default_factory=dict)    # efecto velocidad (revisión): {amount, angle (None = auto), trail}
     meta: dict = field(default_factory=dict)  # EXIF útil para copiar a los JPG
     error: str = ""
 
@@ -1686,9 +1689,42 @@ def _save(img: np.ndarray, path: str, quality: int, exif: bytes = b"") -> None:
     os.replace(tmp, path)  # un corte a mitad nunca deja un JPG a medias
 
 
+BOKEH_NONE = "No"  # en la revisión: esta foto sin desenfocar el fondo aunque la sesión lo haga
+
+
+def photo_bokeh(ph: Photo, st: Settings) -> int:
+    """Cantidad (0..100) de desenfoque de fondo de la foto: la elegida en la revisión o, si no hay, la regla de
+    la sesión, que solo vale para las de sujeto claro (retratos, parejas; no grupos grandes ni paisajes)."""
+    import bokeh as BK
+    if ph.bokeh:
+        return 0 if ph.bokeh == BOKEH_NONE else BK.LEVELS.get(ph.bokeh, 0)
+    if not st.bokeh or not BK.events_eligible(ph.objects, ph.face_boxes):
+        return 0
+    return BK.LEVELS.get(st.bokeh, 0)
+
+
+def blur_fx(img: np.ndarray, ph: Photo, st: Settings) -> np.ndarray:
+    """Desenfocar fondo y efecto velocidad de Events sobre el revelado (sin recortar)."""
+    amt = photo_bokeh(ph, st)
+    if not amt and not ph.speed:
+        return img
+    import bokeh as BK
+    key = ph.path + "#events"
+    try:
+        if amt:
+            img = BK.bokeh(img, amt, "auto", key)
+        if ph.speed:
+            sp = ph.speed
+            img = BK.speed(img, float(sp.get("amount", 50)), sp.get("angle"), float(sp.get("trail", 50)), "auto", key)
+    except Exception as e:  # sin el efecto antes que sin la foto
+        print("blur_fx:", type(e).__name__, e)
+    return img
+
+
 def export(ph: Photo, st: Settings, out_dir: str, version: str = "") -> list[str]:
     """Revela la foto y guarda el formato sugerido más los formatos elegidos, en cada tamaño."""
     img = develop(ph, st)
+    img = blur_fx(img, ph, st)
     exif = build_exif(ph, version) if st.keep_exif else b""
     H, W = img.shape[:2]
     wanted = [ph.best]
@@ -1848,7 +1884,7 @@ def save_session(photos: list[Photo], st: Settings, work_dir: str) -> None:
 
 
 CUSTOM_CROP = "Personalizado"  # recorte dibujado a mano en la revisión
-_REVIEW_FIELDS = ("keep", "reviewed", "reason", "best", "look", "bw_style", "lut_strength")
+_REVIEW_FIELDS = ("keep", "reviewed", "reason", "best", "look", "bw_style", "lut_strength", "bokeh", "speed")
 
 
 def has_saved_work(work_dir: str) -> bool:
@@ -1902,6 +1938,7 @@ def load_review(photos: list[Photo], work_dir: str) -> int:
             ph.best = r["best"]
         ph.look, ph.bw_style = r.get("look") or "", r.get("bw_style") or ""
         ph.lut_strength = r.get("lut_strength")
+        ph.bokeh, ph.speed = r.get("bokeh") or "", dict(r.get("speed") or {})
         if r.get("reviewed"):
             ph.keep, ph.reason, ph.reviewed = bool(r.get("keep")), r.get("reason") or "", True
             n += 1

@@ -173,6 +173,19 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   partículas y efectos; Ver: Retícula y guías `d["grid"]`, como GuideGuide; ficha de capa, como Ink, en Capas y
   Ctrl+Mayús+I), Edits (capas `particles` y `artistic`, Doble exposición con capas normales, exportar ×2 con IA,
   ficha de capa al pasar el ratón).
+- `bokeh.py` — desenfocar fondo y efecto velocidad (sin Qt). Sujeto: persona con `masks.segment` (IA), si no
+  GrabCut desde la saliencia de `smartcrop`, o una máscara dada; a ≤1024 px (`subject_lowres`, caché por foto) y borde
+  ajustado al pelo con filtro guiado rápido (coeficientes a ≤2048 px aplicados por franjas a resolución completa).
+  Fondo rellenado bajo el sujeto (pull-push, sin halos), profundidad aproximada (`depth_map`: lejos del sujeto y por
+  encima de sus pies = más), 4 capas de disco en luz lineal con las luces realzadas (discos de bokeh) a ≤1600 px.
+  `speed`: barrido direccional (`auto_angle` por la forma y la posición del sujeto, o a mano) y estela detrás.
+  Cantidad 0..100 (radio máx. 3 % del lado largo); `LEVELS` Suave/Medio/Fuerte/Muy fuerte (≈f/4…f/1.2). 26 MP:
+  ≈1,3 s la máscara + ≈2,2 s el efecto. Studio: sección «Desenfocar fondo y velocidad» en Detalle (`bokeh`,
+  `bokeh_hl`, `speed`, `speed_auto`/`speed_angle`, `speed_trail`, `blur_subject`/`blur_mask`; `SE.blur_stage` tras
+  las máscaras y antes del LUT). Edits: capa `speed`. Events: regla de sesión «Desenfocar fondo» (⚙ › Al exportar,
+  `Settings.bokeh`, clave `bokeh` de los ajustes guardados, por defecto «No») solo en fotos con sujeto claro
+  (`BK.events_eligible`: 1–2 personas o caras, no grupos ni paisajes); en la revisión, por foto `ph.bokeh` (de la
+  sesión, `BOKEH_NONE` o un nivel) y `ph.speed` (manual), guardados en revision.json; `E.blur_fx` al exportar.
 - `cropview.py` — marco de recorte interactivo común (Studio con R; revisión de Events con C: recorte «Personalizado»).
   Enderezar es parte del marco (`on_angle`): arrastrar fuera del marco gira, Ctrl+arrastrar o «Nivel» traza el
   horizonte (`level_angle`), vista previa instantánea girando la imagen mostrada (`paint_image`, `cover_scale`)

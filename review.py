@@ -2,6 +2,7 @@
 paso a Studio para retocar las que no convencen."""
 from __future__ import annotations
 
+import json
 import os
 
 import numpy as np
@@ -15,6 +16,7 @@ import compare as CMP
 import cropview as CV
 import icons as I
 import zoomview as Z
+import bokeh as BK
 import engine as E
 import theme as T
 
@@ -29,6 +31,9 @@ def _pm(a: np.ndarray) -> QPixmap:
 
 
 STUDIO_COLOR = "Color"
+AUTO_DIR = -1  # velocidad: dirección automática
+SPEED_DIRS = [("Velocidad: no", None), ("Velocidad: dirección automática", AUTO_DIR), ("Velocidad: hacia →", 0),
+              ("Velocidad: hacia ←", 180), ("Velocidad: hacia ↑", 90), ("Velocidad: hacia ↓", 270)]
 
 
 def crop(a: np.ndarray, box) -> np.ndarray:
@@ -190,6 +195,7 @@ class ReviewDialog(QDialog):
         self.setWindowTitle("Revisión antes de exportar")
         self.setWindowState(Qt.WindowMaximized)
         self.main = main
+        self._blur_cache: dict = {}  # vistas con desenfoque de fondo o velocidad
         self.render_fn, self.studio_render_fn, self.is_studio = render_fn, studio_render_fn, is_studio_fn
         self.photos = [p for p in main.photos if p.thumb and not p.error]
         self.action, self.studio_photo = "", None
@@ -294,6 +300,31 @@ class ReviewDialog(QDialog):
         self.prop_info = QLabel("")
         self.prop_info.setObjectName("muted")
         self.prop_info.setWordWrap(True)
+        # desenfocar fondo y velocidad de esta foto (bokeh.py; se aplican al exportar)
+        self.blur_t = QLabel("FONDO Y VELOCIDAD")
+        self.blur_t.setObjectName("cardTitle")
+        self.bokeh_cb = QComboBox()
+        self.bokeh_cb.setToolTip("Desenfocar el fondo de esta foto (el sujeto queda nítido). «De la sesión»: la "
+                                 "regla del panel ⚙, solo en fotos con sujeto claro")
+        self.bokeh_cb.addItem("Fondo: de la sesión", "")
+        self.bokeh_cb.addItem("Fondo: sin desenfocar", E.BOKEH_NONE)
+        for lv in BK.LEVELS:
+            self.bokeh_cb.addItem(f"Fondo: {lv} (≈{BK.LEVEL_FSTOP[lv]})", lv)
+        self.bokeh_cb.activated.connect(self._blur_changed)
+        self.speed_cb = QComboBox()
+        self.speed_cb.setToolTip("Efecto velocidad (barrido): el sujeto nítido y el resto con desenfoque de "
+                                 "movimiento y una estela suave detrás")
+        for label, ang in SPEED_DIRS:
+            self.speed_cb.addItem(label, ang)
+        self.speed_cb.activated.connect(self._blur_changed)
+        self.speed_amt = QComboBox()
+        for label, v in (("Suave", 30), ("Media", 55), ("Fuerte", 85)):
+            self.speed_amt.addItem(label, v)
+        self.speed_amt.setCurrentIndex(1)
+        self.speed_amt.activated.connect(self._blur_changed)
+        brow = QHBoxLayout()
+        brow.addWidget(self.speed_cb, 1)
+        brow.addWidget(self.speed_amt)
         self.bw_t = QLabel("ESTILO B/N DE ESTA FOTO")
         self.bw_t.setObjectName("cardTitle")
         self.bw_list = QListWidget()
@@ -366,6 +397,10 @@ class ReviewDialog(QDialog):
             sv.addWidget(self.prop_t)
             sv.addLayout(prow)
             sv.addWidget(self.prop_info)
+        sv.addSpacing(6)
+        sv.addWidget(self.blur_t)
+        sv.addWidget(self.bokeh_cb)
+        sv.addLayout(brow)
         sv.addSpacing(6)
         sv.addWidget(self.bw_t)
         sv.addWidget(self.bw_list)
@@ -517,7 +552,11 @@ class ReviewDialog(QDialog):
                 if len(self._before) > 20:
                     self._before.pop(next(iter(self._before)))
             before = _pm(crop(b, box))
+        if not studio and not self.crop_on and (self._bokeh_amt(ph) or ph.speed):
+            img, extra = self._blur_view(ph, img, box)
+            label += extra
         self.big.set(_pm(img), label, rejected=not ph.keep, before=before)
+        self._blur_sync(ph, studio)
         self.b_crop.setEnabled(not studio or ss is not None)
         if studio and ss is None and self.crop_on:
             self.b_crop.setChecked(False)
@@ -712,6 +751,68 @@ class ReviewDialog(QDialog):
     def _export(self):
         self.action = "export"
         self.accept()
+
+    # ---------------------------------------------------------- desenfocar fondo y velocidad
+    def _bokeh_amt(self, ph) -> int:
+        st = E.Settings(bokeh=(getattr(self.main, "bokeh_cb", None) and self.main.bokeh_cb.currentData()) or "")
+        return E.photo_bokeh(ph, st)
+
+    def _blur_view(self, ph, img, box):
+        """La vista con el desenfoque o la velocidad (en caché: se calcula una vez por foto y ajuste)."""
+        amt = self._bokeh_amt(ph)
+        k = (ph.path, tuple(round(float(v), 4) for v in box), amt, json.dumps(ph.speed, sort_keys=True), img.shape)
+        out = self._blur_cache.get(k)
+        if out is None:
+            x = img.astype(np.float32) / 255 if img.dtype == np.uint8 else img.astype(np.float32)
+            key = ph.path + "#review"
+            try:
+                if amt:
+                    x = BK.bokeh(x, amt, "auto", key)
+                if ph.speed:
+                    sp = ph.speed
+                    x = BK.speed(x, float(sp.get("amount", 55)), sp.get("angle"), float(sp.get("trail", 50)),
+                                 "auto", key)
+            except Exception:
+                return img, "  ·  (no se pudo previsualizar el desenfoque)"
+            out = (np.clip(x, 0, 1) * 255 + 0.5).astype(np.uint8) if img.dtype == np.uint8 else x
+            self._blur_cache[k] = out
+            if len(self._blur_cache) > 12:
+                self._blur_cache.pop(next(iter(self._blur_cache)))
+        bits = []
+        if amt:
+            bits.append("fondo desenfocado")
+        if ph.speed:
+            bits.append("velocidad")
+        return out, "  ·  " + " y ".join(bits)
+
+    def _blur_sync(self, ph, studio=False):
+        for w in (self.bokeh_cb, self.speed_cb, self.speed_amt):
+            w.blockSignals(True)
+            w.setEnabled(not studio)
+        self.bokeh_cb.setCurrentIndex(max(0, self.bokeh_cb.findData(ph.bokeh or "")))
+        sp = ph.speed or {}
+        i = 0
+        if sp:
+            ang = sp.get("angle")
+            i = next((j for j, (_l, a) in enumerate(SPEED_DIRS) if j and a == (AUTO_DIR if ang is None else ang)), 1)
+            self.speed_amt.setCurrentIndex(max(0, self.speed_amt.findData(int(sp.get("amount", 55)))))
+        self.speed_cb.setCurrentIndex(i)
+        for w in (self.bokeh_cb, self.speed_cb, self.speed_amt):
+            w.blockSignals(False)
+
+    def _blur_changed(self, *_):
+        ph = self.cur()
+        if not ph:
+            return
+        ph.bokeh = self.bokeh_cb.currentData() or ""
+        ang = self.speed_cb.currentData()
+        if ang is None:
+            ph.speed = {}
+        else:
+            ph.speed = {"amount": int(self.speed_amt.currentData()), "angle": None if ang == AUTO_DIR else float(ang),
+                        "trail": 50}
+        self.on_change()
+        self.show_photo()
 
     # ---------------------------------------------------------- recorte a mano
     def _ratio(self):

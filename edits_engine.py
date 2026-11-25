@@ -28,6 +28,8 @@ resolución (vista de 2048 px o exportación a tamaño completo):
                p = {kind, density, size, depth, angle, motion, opacity, colors, seed} (como Real Snow).
   "artistic"   filtro artístico (fx_engine): art = acuarela, óleo, cómic, cómic al óleo, tinta, lápiz, lápiz de
                color o pop art; amount, detail. Como cualquier capa, admite máscara y opacidad.
+  "speed"      velocidad (bokeh.speed): sujeto nítido y el resto barrido con estela; amount, auto, angle, trail,
+               detect = auto | person | object.
   "group"      grupo de capas: las capas con "parent": id del grupo se componen juntas y el grupo les aplica su
                visibilidad, opacidad, modo de fusión y máscara. En la lista, el grupo va encima de sus capas.
   Una capa de ajuste, imagen o pintura con "clip": True se recorta a la imagen o pintura de debajo (máscara de
@@ -60,7 +62,7 @@ DOC_VERSION = 1
 KINDS = {"liquify": "Licuar", "retouch": "Retoque", "skin": "Piel", "light": "Ojos y luz", "portrait": "Retrato",
          "background": "Fondo", "text": "Texto", "logo": "Logo", "image": "Imagen", "adjust": "Ajuste",
          "paint": "Pintura", "group": "Grupo", "rays": "Rayos de luz", "particles": "Partículas",
-         "artistic": "Filtro artístico"}
+         "artistic": "Filtro artístico", "speed": "Velocidad"}
 OVERLAY = ("text", "logo")
 CLIPPABLE = ("adjust", "image", "paint")  # lo que puede ir recortado a una imagen o pintura
 CLIP_BASES = ("image", "paint")  # capas con píxeles propios: base de una máscara de recorte
@@ -68,7 +70,7 @@ IMAGE_EXT = tuple(sorted(E.IMG_EXT))  # JPEG, PNG, TIFF, WebP, BMP, AVIF y HEIF 
 CUTS = {"none": "No quitar el fondo", "color": "Logo o fondo liso (por color)",
         "object": "Objeto o producto (automático)", "person": "Persona (IA)"}
 PIXEL_ORDER = ("liquify", "retouch", "skin", "light", "portrait", "background", "adjust", "artistic", "image", "paint",
-               "rays", "particles", "group")
+               "rays", "particles", "speed", "group")
 # efectos de capa (imagen y pintura). Tamaños y distancias en % del lado largo; ángulos en grados
 FX_DEFAULTS = {"shadow": {"on": False, "color": "#000000", "opacity": 60, "angle": 120, "distance": 1.0,
                           "size": 1.5},
@@ -119,7 +121,8 @@ def new_layer(kind: str, **kw) -> dict:
          "rays": dict(x=0.5, y=0.15, color="#fff1cf", amount=60, length=70, spread=70, angle=90, count=24,
                       seed=7),
          "particles": dict(p=_fx().particle_defaults("snow")),
-         "artistic": dict(art="watercolor", amount=100.0, detail=50.0)}[kind]
+         "artistic": dict(art="watercolor", amount=100.0, detail=50.0),
+         "speed": dict(amount=50.0, auto=True, angle=0.0, trail=50.0, detect="auto")}[kind]
     p.update(kw)
     lay = {"id": uuid.uuid4().hex[:8], "kind": kind, "name": KINDS[kind], "visible": True, "opacity": 100,
            "blend": "normal", **p}
@@ -1359,7 +1362,8 @@ def _layer_active(l: dict) -> bool:
             "image": bool(l.get("path")), "adjust": True, "paint": bool(l.get("strokes")),
             "group": True, "rays": l.get("amount", 0) > 0,
             "particles": float((l.get("p") or {}).get("density", 0)) > 0,
-            "artistic": bool(l.get("art")) and float(l.get("amount", 0)) > 0}.get(k, False)
+            "artistic": bool(l.get("art")) and float(l.get("amount", 0)) > 0,
+            "speed": float(l.get("amount", 0)) > 0}.get(k, False)
 
 
 # ------------------------------------------------------------------ pintura (pincel y borrador)
@@ -1788,6 +1792,10 @@ def apply_pixel_layer(img: np.ndarray, lay: dict, key: str = "", frame=None):
         out = apply_rays(img, lay, frame)
     elif k == "particles":
         out = apply_particles(img, lay, frame)
+    elif k == "speed":  # barrido: sujeto nítido, fondo con movimiento y estela (bokeh.py)
+        import bokeh as BK
+        out = BK.speed(img, float(lay.get("amount", 50)), None if lay.get("auto", True) else float(lay.get("angle", 0)),
+                       float(lay.get("trail", 50)), lay.get("detect", "auto"), key)
     elif k == "artistic":
         out = _fx().artistic(img, lay.get("art", "watercolor"), float(lay.get("amount", 100)),
                              float(lay.get("detail", 50)))

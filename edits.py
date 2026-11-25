@@ -974,6 +974,7 @@ class EditsView(QWidget):
         self._act(new, "Rayos de luz", lambda: self.add_layer("rays"))
         self._act(new, "Partículas (nieve, confeti, bokeh…)", lambda: self.add_layer("particles"))
         self._act(new, "Filtro artístico (acuarela, óleo, cómic…)", lambda: self.add_layer("artistic"))
+        self._act(new, "Velocidad (barrido)", lambda: self.add_layer("speed"))
         self._act(new, "Doble exposición…", self.double_exposure)
         adj = c.addMenu("Nueva capa de ajuste")
         for k in A.ORDER:
@@ -1315,6 +1316,7 @@ class EditsView(QWidget):
         mnew.addAction("Rayos de luz", lambda: self.add_layer("rays"))
         mnew.addAction("Partículas (nieve, confeti, bokeh…)", lambda: self.add_layer("particles"))
         mnew.addAction("Filtro artístico (acuarela, óleo, cómic…)", lambda: self.add_layer("artistic"))
+        mnew.addAction("Velocidad (barrido)", lambda: self.add_layer("speed"))
         mnew.addAction("Doble exposición…", self.double_exposure)
         mnew.addAction("Grupo (con las capas elegidas)", self.group_layers)
         mnew.addSeparator()
@@ -1654,6 +1656,26 @@ class EditsView(QWidget):
             self.art_w[key] = sr
         lay.addWidget(self._label("Convierte la foto (o lo que haya debajo) en acuarela, óleo, cómic, tinta, lápiz "
                                   "o pop art. Con una máscara, solo en una zona."))
+
+        lay = page("speed")
+        self.speed_det = QComboBox()
+        for k, label in (("auto", "Sujeto automático (persona u objeto)"), ("person", "Persona (IA)"),
+                         ("object", "Objeto o coche (saliencia)")):
+            self.speed_det.addItem(label, k)
+        self.speed_det.activated.connect(lambda i: self._set_prop("detect", self.speed_det.itemData(i), True))
+        lay.addWidget(self.speed_det)
+        self.speed_auto = QCheckBox("Dirección automática (forma y posición del sujeto)")
+        self.speed_auto.toggled.connect(lambda on: self._set_prop("auto", bool(on), True))
+        lay.addWidget(self.speed_auto)
+        self.speed_w = {}
+        for key, label, lo, hi, neutral in (("amount", "Cantidad", 0, 100, 50), ("angle", "Dirección (°)", 0, 359, 0),
+                                            ("trail", "Estela", 0, 100, 50)):
+            sr = SliderRow(key, label, lo, hi, 1, neutral)
+            sr.changed.connect(lambda k, val, f: self._set_prop(k, float(val), f, delay=not f))
+            lay.addWidget(sr)
+            self.speed_w[key] = sr
+        lay.addWidget(self._label("El sujeto queda nítido y el resto se barre en la dirección del movimiento, con "
+                                  "una estela suave detrás. Pinta su máscara (Mayús+B) para afinar."))
 
         self.fx_box = self._build_fx_box()
         self.prop_lay.addWidget(self.fx_box)
@@ -2559,7 +2581,8 @@ class EditsView(QWidget):
                    "background": "Fondo (IA)", "text": "Texto", "logo": "Logo", "image": "Imagen",
                    "rays": "Rayos de luz", "portrait": "Retrato (IA)",
                    "particles": FX.PARTICLES.get((l.get("p") or {}).get("kind"), "Partículas"),
-                   "artistic": FX.ARTISTIC.get(l.get("art"), "Filtro artístico")}.get(l["kind"], "")
+                   "artistic": FX.ARTISTIC.get(l.get("art"), "Filtro artístico"),
+                   "speed": "Velocidad (barrido)"}.get(l["kind"], "")
         if n:
             sub += " · " + _count(n, "trazo")
         if l.get("blend", "normal") != "normal":
@@ -2769,6 +2792,13 @@ class EditsView(QWidget):
             self.rays_color.setStyleSheet(f"QPushButton {{ border-left: 14px solid {lay.get('color', '#fff1cf')}; }}")
         elif kind == "particles":
             self.part_ctl.set_params(lay.get("p"))
+        elif kind == "speed":
+            self.speed_det.setCurrentIndex(max(0, self.speed_det.findData(lay.get("detect", "auto"))))
+            self.speed_auto.blockSignals(True)
+            self.speed_auto.setChecked(bool(lay.get("auto", True)))
+            self.speed_auto.blockSignals(False)
+            for key, sr in self.speed_w.items():
+                sr.set_value(lay.get(key, sr.neutral))
         elif kind == "artistic":
             self.art_cb.blockSignals(True)
             self.art_cb.setCurrentIndex(max(0, self.art_cb.findData(lay.get("art", "watercolor"))))
