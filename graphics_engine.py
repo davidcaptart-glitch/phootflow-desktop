@@ -1439,24 +1439,69 @@ def edged_image(img, src_rect, w: float, h: float, img_px: float, max_img: int, 
 
 
 class ImageCache:
-    """Fotos ya cargadas como QImage, por (ruta, lado máximo, B/N)."""
+    """Fotos ya cargadas como QImage, por (ruta, lado máximo, B/N, filtro, artístico).
 
-    def __init__(self, limit: int = 40):
+    Cada foto se decodifica (o se revela, si es RAW) UNA vez a ≥ 2048 px y se guarda como «base»; los demás
+    tamaños, el B/N y los filtros salen de ella reduciendo (milisegundos), así que el zoom y los filtros no vuelven
+    a revelar el RAW. Con `wait=False` (el lienzo) no se bloquea: devuelve lo más parecido que ya haya (o None) y
+    prepara lo pedido en un hilo; al terminar llama a `notify()` (desde ese hilo: quien la ponga, que la pase al
+    de la interfaz, p. ej. con una señal de Qt)."""
+
+    BASE_MIN = 2048
+
+    def __init__(self, limit: int = 40, base_limit: int = 10):
+        import threading
         from collections import OrderedDict
         self.d = OrderedDict()
+        self.base = OrderedDict()   # ruta → (RGB/RGBA uint8, completa: la foto no tiene más resolución)
         self.limit = limit
+        self.base_limit = base_limit
         self.sizes = {}
+        self.failed: set = set()
+        self.pending: set = set()
+        self.lock = threading.RLock()
+        self.pool = None
+        self.notify = None
 
-    def get(self, path: str, max_side: int, bw: bool = False, look: str = "", art: tuple | None = None):
-        """`art` = (tipo, cantidad, detalle) de un filtro artístico de fx_engine (acuarela, óleo, cómic…)."""
-        from PySide6.QtGui import QImage
-        key = (path, max_side, bw, look, art)
-        if key in self.d:
-            self.d.move_to_end(key)
-            return self.d[key]
-        a = load_rgb(path, max_side)
+    # ---------------------------------------------------------- decodificar
+    def _base_rgb(self, path: str, need: int):
+        with self.lock:
+            hit = self.base.get(path)
+            if hit is not None and (hit[1] or max(hit[0].shape[:2]) >= need):
+                self.base.move_to_end(path)
+                return hit[0]
+        if need <= 256 and hit is None:   # miniaturas: directo, sin guardar una base grande
+            import engine as E
+            if E.is_raw(path):   # el JPEG que lleva el RAW: no hace falta revelarlo para una miniatura
+                try:
+                    from studio import quick_thumb
+                    buf = np.frombuffer(quick_thumb(path, need * 2) or b"", np.uint8)
+                    a = cv2.imdecode(buf, cv2.IMREAD_COLOR) if buf.size else None
+                    if a is not None:
+                        return cv2.cvtColor(a, cv2.COLOR_BGR2RGB)
+                except Exception:
+                    pass
+            return load_rgb(path, need)
+        side = max(need, self.BASE_MIN)
+        a = load_rgb(path, side)
         if a is None:
             return None
+        with self.lock:
+            self.base[path] = (a, max(a.shape[:2]) < side * 0.98)
+            while len(self.base) > self.base_limit:
+                self.base.popitem(last=False)
+        return a
+
+    def _make(self, key):
+        from PySide6.QtGui import QImage
+        path, max_side, bw, look, art = key
+        a = self._base_rgb(path, max_side)
+        if a is None:
+            return None
+        if max(a.shape[:2]) > max_side * 1.05:
+            k = max_side / max(a.shape[:2])
+            a = cv2.resize(a, (max(1, round(a.shape[1] * k)), max(1, round(a.shape[0] * k))),
+                           interpolation=cv2.INTER_AREA)
         if look and look != "Natural":
             import engine as E
             rgb = E.apply_look(a[..., :3].astype(np.float32) / 255, look)
@@ -1467,17 +1512,84 @@ class ImageCache:
             f = FX.artistic(a.astype(np.float32) / 255, art[0], art[1], art[2])
             a = (np.clip(f, 0, 1) * 255 + 0.5).astype(np.uint8)
         if bw:
-            g = cv2.cvtColor(a[..., :3], cv2.COLOR_RGB2GRAY)
+            g = cv2.cvtColor(np.ascontiguousarray(a[..., :3]), cv2.COLOR_RGB2GRAY)
             g = np.stack([g] * 3, 2)
             a = np.concatenate([g, a[..., 3:]], 2) if a.shape[2] == 4 else g
         a = np.ascontiguousarray(a)
         hh, ww, ch = a.shape
         fmt = QImage.Format_RGBA8888 if ch == 4 else QImage.Format_RGB888
-        img = QImage(a.data, ww, hh, ch * ww, fmt).copy()
-        self.d[key] = img
-        while len(self.d) > self.limit:
-            self.d.popitem(last=False)
-        return img
+        return QImage(a.data, ww, hh, ch * ww, fmt).copy()
+
+    def _store(self, key, img):
+        with self.lock:
+            self.pending.discard(key)
+            if img is None:
+                self.failed.add(key[0])
+                return
+            self.d[key] = img
+            while len(self.d) > self.limit:
+                self.d.popitem(last=False)
+
+    # ---------------------------------------------------------- pedir
+    def get(self, path: str, max_side: int, bw: bool = False, look: str = "", art: tuple | None = None,
+            wait: bool = True):
+        """`art` = (tipo, cantidad, detalle) de un filtro artístico de fx_engine (acuarela, óleo, cómic…)."""
+        key = (path, max_side, bw, look, art)
+        with self.lock:
+            if key in self.d:
+                self.d.move_to_end(key)
+                return self.d[key]
+            if path in self.failed:
+                return None
+        if wait:
+            img = self._make(key)
+            self._store(key, img)
+            return img
+        self._schedule(key)
+        return self.nearest(path, bw, look, art)
+
+    def loading(self, path: str) -> bool:
+        with self.lock:
+            return any(k[0] == path for k in self.pending)
+
+    def nearest(self, path: str, bw: bool = False, look: str = "", art=None):
+        """Lo que ya haya de esa foto mientras llega lo pedido: mejor con los mismos filtros, y la mayor."""
+        with self.lock:
+            cands = [(k[1:] == (k[1], bw, look, art), k[1], img) for k, img in self.d.items() if k[0] == path]
+        if not cands:
+            return None
+        return max(cands, key=lambda c: (c[0], c[1]))[2]
+
+    def _schedule(self, key):
+        with self.lock:
+            if key in self.pending:
+                return
+            self.pending.add(key)
+            if self.pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self.pool = ThreadPoolExecutor(2, thread_name_prefix="fotos")
+
+        def job():
+            try:
+                img = self._make(key)
+            except Exception:
+                img = None
+            self._store(key, img)
+            cb = self.notify
+            if cb is not None:
+                try:
+                    cb()
+                except RuntimeError:   # la vista ya no existe
+                    pass
+        self.pool.submit(job)
+
+    def forget(self, path: str) -> None:
+        """La foto cambió en disco (p. ej. se volvió a exportar): volver a leerla."""
+        with self.lock:
+            for k in [k for k in self.d if k[0] == path]:
+                del self.d[k]
+            self.base.pop(path, None)
+            self.failed.discard(path)
 
     def full_size(self, path: str) -> tuple[int, int]:
         if path not in self.sizes:
@@ -1629,7 +1741,6 @@ def _text_layout(el, scale=1.0):
     fm = QFontMetricsF(font)
     width = max(1.0, el["w"] * scale)
     lf = el.get("line", 1.15)
-    lh = fm.height() * lf
     opt = QTextOption(_align_flag(el))
     opt.setWrapMode(QTextOption.WordWrap)
     rich = any(len(r) > 1 for r in text_runs(el))   # algún tramo con formato propio
@@ -1808,7 +1919,7 @@ def make_brush(fill, grad, rect):
 
 
 def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px: float = 1.0,
-                  max_img: int = 1600) -> None:
+                  max_img: int = 1600, wait: bool = True) -> None:
     """Dibuja un elemento en sus coordenadas locales (0, 0, w, h); quien llama pone la posición y el giro.
     `img_px` = píxeles de salida por píxel de diseño (para pedir las fotos a la resolución justa)."""
     from PySide6.QtCore import QPointF, QRectF, Qt
@@ -1881,7 +1992,8 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
             art = el.get("art") or {}
             akey = (art["kind"], float(art.get("amount", 100)), float(art.get("detail", 50))) \
                 if art.get("kind") else None
-            img = cache.get(el["path"], min(step, max_img), bool(el.get("bw")), el.get("look", ""), akey)
+            img = cache.get(el["path"], min(step, max_img), bool(el.get("bw")), el.get("look", ""), akey,
+                            wait=wait)
         if img is not None and not img.isNull():
             x, y, cw, ch = cover_box(img.width(), img.height(), w, h, el.get("zoom", 1.0), el.get("fx", 0.5),
                                      el.get("fy", 0.5))
@@ -1891,6 +2003,20 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
                 p.drawImage(QRectF(0, 0, w, h), edged_image(img, QRectF(x, y, cw, ch), w, h, img_px, max_img, edge))
             else:
                 p.drawImage(QRectF(0, 0, w, h), img, QRectF(x, y, cw, ch))
+        elif editing and el.get("path") and cache.loading(el["path"]):   # llegando (en otro hilo)
+            p.fillRect(QRectF(0, 0, w, h), QColor(60, 64, 76))
+            f = QFont("Segoe UI")
+            f.setPixelSize(max(8, int(min(w, h) * 0.06)))
+            p.setFont(f)
+            p.setPen(QColor(220, 222, 230))
+            p.drawText(QRectF(0, 0, w, h), Qt.AlignCenter, "Cargando…")
+        elif editing and not el.get("path"):
+            paint_placeholder(p, el, sum(map(ord, el.get("id", ""))))
+            f = QFont("Segoe UI")
+            f.setPixelSize(max(8, int(min(w, h) * 0.06)))
+            p.setFont(f)
+            p.setPen(QColor(255, 255, 255, 200))
+            p.drawText(QRectF(0, h * 0.62, w, h * 0.3), Qt.AlignCenter | Qt.TextWordWrap, "Arrastra aquí una foto")
         elif editing:
             p.fillRect(QRectF(0, 0, w, h), QColor(200, 200, 205))
             pen = QPen(QColor(150, 150, 160), max(w, h) / 300)
@@ -1919,6 +2045,44 @@ def paint_element(p, el: dict, cache: ImageCache, editing: bool = False, img_px:
             else:
                 p.setPen(Qt.NoPen)
             p.drawPath(path)
+    p.restore()
+
+
+PLACEHOLDER_GRADS = [("#3b1f5c", "#c0517e"), ("#1f3a5c", "#5b8fc9"), ("#5c3a1f", "#d9a35b"),
+                     ("#1f5c4a", "#6cc3a0"), ("#4a1f5c", "#9a6cf0")]
+
+
+def paint_placeholder(p, el: dict, seed: int = 0) -> None:
+    """Hueco de foto vacío: degradado con un sol y dos montañas (lienzo, miniaturas y plantillas)."""
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QColor, QLinearGradient, QPainterPath
+    w, h = el["w"], el["h"]
+    r = QRectF(0, 0, w, h)
+    path = QPainterPath()
+    if el.get("clip") and el["clip"] != "rect":
+        path = _shape_path({"shape": el["clip"], "w": w, "h": h})
+    else:
+        rad = min(float(el.get("radius", 0.0)), w / 2, h / 2)
+        path.addRoundedRect(r, rad, rad)
+    a, b = PLACEHOLDER_GRADS[seed % len(PLACEHOLDER_GRADS)]
+    g = QLinearGradient(r.topLeft(), r.bottomRight())
+    g.setColorAt(0, QColor(a))
+    g.setColorAt(1, QColor(b))
+    p.save()
+    p.setClipPath(path, Qt.IntersectClip)
+    p.fillPath(path, g)
+    p.setPen(Qt.NoPen)
+    m = min(w, h)
+    p.setBrush(QColor(255, 255, 255, 70))
+    p.drawEllipse(QRectF(w * 0.62, h * 0.18, m * 0.22, m * 0.22))
+    p.setBrush(QColor(255, 255, 255, 45))
+    for x0, x1, top in ((-0.1, 0.7, 0.42), (0.35, 1.15, 0.55)):
+        tri = QPainterPath()
+        tri.moveTo(w * x0, h)
+        tri.lineTo(w * (x0 + x1) / 2, h * top)
+        tri.lineTo(w * x1, h)
+        tri.closeSubpath()
+        p.drawPath(tri)
     p.restore()
 
 

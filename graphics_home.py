@@ -176,31 +176,7 @@ PLACEHOLDER_GRADS = [("#3b1f5c", "#c0517e"), ("#1f3a5c", "#5b8fc9"), ("#5c3a1f",
 
 def _placeholder(p, el, seed: int):
     """Hueco de foto de una plantilla, para las miniaturas: degradado con un sol y dos montañas (propio)."""
-    w, h = el["w"], el["h"]
-    r = QRectF(0, 0, w, h)
-    path = QPainterPath()
-    if el.get("clip") == "ellipse":
-        path.addEllipse(r)
-    else:
-        rad = min(float(el.get("radius", 0.0)), w / 2, h / 2)
-        path.addRoundedRect(r, rad, rad)
-    a, b = PLACEHOLDER_GRADS[seed % len(PLACEHOLDER_GRADS)]
-    p.save()
-    p.setClipPath(path)
-    p.fillPath(path, _grad(r, a, b))
-    p.setPen(Qt.NoPen)
-    m = min(w, h)
-    p.setBrush(QColor(255, 255, 255, 70))
-    p.drawEllipse(QRectF(w * 0.62, h * 0.18, m * 0.22, m * 0.22))
-    p.setBrush(QColor(255, 255, 255, 45))
-    for x0, x1, top in ((-0.1, 0.7, 0.42), (0.35, 1.15, 0.55)):
-        tri = QPainterPath()
-        tri.moveTo(w * x0, h)
-        tri.lineTo(w * (x0 + x1) / 2, h * top)
-        tri.lineTo(w * x1, h)
-        tri.closeSubpath()
-        p.drawPath(tri)
-    p.restore()
+    return G.paint_placeholder(p, el, seed)
 
 
 _CACHE = None

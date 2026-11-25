@@ -1,14 +1,17 @@
-"""Graphics: cuadro de texto con formato del panel Propiedades (texto enriquecido de graphics_engine).
+"""Graphics: edición de texto con formato (texto enriquecido de graphics_engine).
 
-`RichTextBox` muestra el texto con su fuente, color y los tramos (negrita, cursiva, subrayado, tachado, color y
-tamaño relativo) y los devuelve como `runs`. `selection_bar` = botones que dan formato a lo seleccionado (sin
-selección, a todo el texto). Los tramos guardan solo lo que cambia respecto al elemento.
+- `RichTextBox`: cuadro del panel Propiedades con la fuente, el color y los tramos del texto.
+- `InlineTextEditor`: se escribe en el propio lienzo (doble clic en un texto, o al añadir uno): un
+  QGraphicsTextItem hijo del elemento, con su fuente, tamaño, giro, alineación, interlineado y lista.
+- Los dos convierten el documento a `runs` con `doc_runs` (solo lo que cambia respecto al elemento) y dan formato a
+  lo seleccionado (sin selección, a todo) con `_Formatting`. `selection_bar` = botones N K S T, color y A+/A−.
 """
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut, QTextCharFormat, QTextCursor, QTextFormat
-from PySide6.QtWidgets import QColorDialog, QHBoxLayout, QLabel, QPushButton, QTextEdit
+from PySide6.QtGui import (QColor, QFont, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextFormat,
+                           QTextListFormat, QTextOption)
+from PySide6.QtWidgets import QColorDialog, QGraphicsTextItem, QHBoxLayout, QLabel, QPushButton, QTextEdit
 
 import graphics_engine as G
 
@@ -16,37 +19,40 @@ K_PROP = QTextFormat.UserProperty + 1   # tamaño relativo del tramo (1 = el del
 BASE_PT = 11.0
 
 
-class RichTextBox(QTextEdit):
-    edited = Signal()
+def doc_runs(doc, el: dict) -> list[dict]:
+    """Documento → tramos con lo que cambia respecto al elemento (negrita y cursiva solo si difieren)."""
+    out: list[dict] = []
+    b = doc.begin()
+    first = True
+    while b.isValid():
+        if not first:
+            out.append({"t": "\n"})
+        first = False
+        text = b.text()
+        for fr in b.textFormats():
+            f = fr.format
+            r = {"t": text[fr.start:fr.start + fr.length]}
+            bold = f.fontWeight() >= 600 if f.hasProperty(QTextFormat.FontWeight) else bool(el.get("bold"))
+            if bold != bool(el.get("bold")):
+                r["b"] = bold
+            ital = f.fontItalic() if f.hasProperty(QTextFormat.FontItalic) else bool(el.get("italic"))
+            if ital != bool(el.get("italic")):
+                r["i"] = ital
+            if f.fontUnderline():
+                r["u"] = True
+            if f.fontStrikeOut():
+                r["s"] = True
+            if f.hasProperty(QTextFormat.ForegroundBrush):
+                r["color"] = f.foreground().color().name().upper()
+            if f.hasProperty(K_PROP) and abs(float(f.property(K_PROP)) - 1.0) > 1e-3:
+                r["k"] = round(float(f.property(K_PROP)), 3)
+            out.append(r)
+        b = b.next()
+    return out
 
-    def __init__(self, el: dict):
-        super().__init__()
-        self.el = el
-        self.setAcceptRichText(False)   # lo pegado entra sin formato: el formato se da con los botones
-        self.setTabChangesFocus(True)
-        col = G.qcolor(el.get("color", "#000000"))
-        bg = "#F2F2F4" if col.lightness() < 140 else "#16181F"
-        self.setStyleSheet(f"QTextEdit {{ background: {bg}; color: {col.name()}; border: 1px solid #3A3F4B; "
-                           "border-radius: 4px; padding: 2px; }")
-        f = QFont(el.get("font", "Segoe UI"))
-        f.setPointSizeF(BASE_PT)
-        f.setBold(bool(el.get("bold")))
-        f.setItalic(bool(el.get("italic")))
-        self.document().setDefaultFont(f)
-        self.load()
-        self.textChanged.connect(self.edited.emit)
-        for k, key in (("Ctrl+B", "b"), ("Ctrl+I", "i"), ("Ctrl+U", "u")):
-            sc = QShortcut(QKeySequence(k), self, lambda key=key: self.toggle(key))
-            sc.setContext(Qt.WidgetShortcut)
 
-    def load(self):
-        self.blockSignals(True)
-        self.clear()
-        cur = QTextCursor(self.document())
-        for r in G.text_runs(self.el):
-            cur.insertText(r.get("t", ""), self._fmt(r))
-        self.moveCursor(QTextCursor.Start)
-        self.blockSignals(False)
+class _Formatting:
+    """Formato de lo seleccionado (sin selección, de todo). Quien lo use da `_doc_cursor()` y `_size(fmt, k)`."""
 
     def _fmt(self, r: dict) -> QTextCharFormat:
         fmt = QTextCharFormat()
@@ -62,44 +68,17 @@ class RichTextBox(QTextEdit):
             fmt.setForeground(G.qcolor(r["color"]))
         if r.get("k"):
             fmt.setProperty(K_PROP, float(r["k"]))
-            fmt.setFontPointSize(BASE_PT * float(r["k"]))
+            self._size(fmt, float(r["k"]))
         return fmt
 
-    def runs(self) -> list[dict]:
-        """Tramos con lo que cambia respecto al elemento (negrita y cursiva solo si difieren de las suyas)."""
-        out: list[dict] = []
-        doc = self.document()
-        b = doc.begin()
-        first = True
-        while b.isValid():
-            if not first:
-                out.append({"t": "\n"})
-            first = False
-            text = b.text()
-            for fr in b.textFormats():
-                f = fr.format
-                r = {"t": text[fr.start:fr.start + fr.length]}
-                bold = f.fontWeight() >= 600 if f.hasProperty(QTextFormat.FontWeight) else bool(self.el.get("bold"))
-                if bold != bool(self.el.get("bold")):
-                    r["b"] = bold
-                ital = f.fontItalic() if f.hasProperty(QTextFormat.FontItalic) else bool(self.el.get("italic"))
-                if ital != bool(self.el.get("italic")):
-                    r["i"] = ital
-                if f.fontUnderline():
-                    r["u"] = True
-                if f.fontStrikeOut():
-                    r["s"] = True
-                if f.hasProperty(QTextFormat.ForegroundBrush):
-                    r["color"] = f.foreground().color().name().upper()
-                if f.hasProperty(K_PROP) and abs(float(f.property(K_PROP)) - 1.0) > 1e-3:
-                    r["k"] = round(float(f.property(K_PROP)), 3)
-                out.append(r)
-            b = b.next()
-        return out
+    def _load_runs(self, doc):
+        doc.clear()
+        cur = QTextCursor(doc)
+        for r in G.text_runs(self.el):
+            cur.insertText(r.get("t", ""), self._fmt(r))
 
-    # ---------------------------------------------------------- dar formato a la selección
     def _cursor(self) -> QTextCursor:
-        c = self.textCursor()
+        c = self._doc_cursor()
         if not c.hasSelection():
             c.select(QTextCursor.Document)
         return c
@@ -135,11 +114,136 @@ class RichTextBox(QTextEdit):
         k = max(0.3, min(4.0, round(k * factor, 3)))
         fmt = QTextCharFormat()
         fmt.setProperty(K_PROP, k)
-        fmt.setFontPointSize(BASE_PT * k)
+        self._size(fmt, k)
         c.mergeCharFormat(fmt)
 
 
-def selection_bar(box: RichTextBox, colors) -> QHBoxLayout:
+class RichTextBox(_Formatting, QTextEdit):
+    edited = Signal()
+
+    def __init__(self, el: dict):
+        super().__init__()
+        self.el = el
+        self.setAcceptRichText(False)   # lo pegado entra sin formato: el formato se da con los botones
+        self.setTabChangesFocus(True)
+        col = G.qcolor(el.get("color", "#000000"))
+        bg = "#F2F2F4" if col.lightness() < 140 else "#16181F"
+        self.setStyleSheet(f"QTextEdit {{ background: {bg}; color: {col.name()}; border: 1px solid #3A3F4B; "
+                           "border-radius: 4px; padding: 2px; }")
+        f = QFont(el.get("font", "Segoe UI"))
+        f.setPointSizeF(BASE_PT)
+        f.setBold(bool(el.get("bold")))
+        f.setItalic(bool(el.get("italic")))
+        self.document().setDefaultFont(f)
+        self.load()
+        self.textChanged.connect(self.edited.emit)
+        # Ctrl+B/I/U: los atajos del editor (GraphicsView.text_style) los pasan aquí si el foco está en el cuadro
+
+    def _doc_cursor(self):
+        return self.textCursor()
+
+    def _size(self, fmt, k):
+        fmt.setFontPointSize(BASE_PT * k)
+
+    def load(self):
+        self.blockSignals(True)
+        self._load_runs(self.document())
+        self.moveCursor(QTextCursor.Start)
+        self.blockSignals(False)
+
+    def runs(self) -> list[dict]:
+        return doc_runs(self.document(), self.el)
+
+
+class InlineTextEditor(_Formatting, QGraphicsTextItem):
+    """Escribir en el lienzo: hijo del elemento (hereda posición y giro), con su tipografía. `on_change()` tras
+    cada cambio y `on_done()` al salir (Esc, clic fuera)."""
+
+    def __init__(self, parent_item, el: dict, on_change, on_done, select_all: bool = False):
+        super().__init__(parent_item)
+        self.el = el
+        self.on_change, self.on_done = on_change, on_done
+        self._closing = False
+        self.setTextInteractionFlags(Qt.TextEditorInteraction)
+        doc = self.document()
+        doc.setDocumentMargin(0)
+        self.apply_style()
+        self._load_runs(doc)
+        self._block_format()
+        self.setTextWidth(max(1.0, el["w"]))
+        self.setPos(0, 0)
+        doc.contentsChanged.connect(self._changed)
+        self.setFocus(Qt.MouseFocusReason)
+        c = self.textCursor()
+        c.movePosition(QTextCursor.End)
+        if select_all:
+            c.select(QTextCursor.Document)
+        self.setTextCursor(c)
+
+    def apply_style(self):
+        el = self.el
+        f = G.text_font(el)
+        if el.get("upper"):
+            f.setCapitalization(QFont.AllUppercase)
+        self.document().setDefaultFont(f)
+        self.setDefaultTextColor(G.qcolor(el.get("color", "#000000")))
+        opt = QTextOption(G._align_flag(el))
+        opt.setWrapMode(QTextOption.WordWrap)
+        self.document().setDefaultTextOption(opt)
+
+    def _block_format(self):
+        """Interlineado y lista de todos los párrafos (como los pinta el motor)."""
+        doc = self.document()
+        c = QTextCursor(doc)
+        c.select(QTextCursor.Document)
+        bf = QTextBlockFormat()
+        bf.setLineHeight(float(self.el.get("line", 1.15)) * 100, QTextBlockFormat.ProportionalHeight.value
+                         if hasattr(QTextBlockFormat.ProportionalHeight, "value") else 1)
+        c.mergeBlockFormat(bf)
+        kind = self.el.get("list") or ""
+        if kind:
+            lf = QTextListFormat()
+            lf.setStyle(QTextListFormat.ListDisc if kind == "bullet" else QTextListFormat.ListDecimal)
+            lf.setIndent(1)
+            doc.setIndentWidth(G.text_font(self.el).pixelSize() * 1.1)
+            c.createList(lf)
+
+    def _doc_cursor(self):
+        return self.textCursor()
+
+    def _size(self, fmt, k):
+        fmt.setProperty(QTextFormat.FontPixelSize, max(1, round(self.el.get("size", 24) * k)))
+
+    def runs(self) -> list[dict]:
+        return doc_runs(self.document(), self.el)
+
+    def plain(self) -> str:
+        return self.document().toPlainText()
+
+    def _changed(self):
+        if not self._closing:
+            self.on_change(self)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.finish()
+            return
+        super().keyPressEvent(e)
+
+    def focusOutEvent(self, e):
+        super().focusOutEvent(e)
+        # el menú contextual o un diálogo de color no cuentan como salir
+        if e.reason() not in (Qt.PopupFocusReason, Qt.ActiveWindowFocusReason):
+            self.finish()
+
+    def finish(self):
+        if self._closing:
+            return
+        self._closing = True
+        self.on_done(self)
+
+
+def selection_bar(box, colors) -> QHBoxLayout:
     """N K S T, color y A+/A− para lo seleccionado en `box` (sin selección: todo el texto)."""
     r = QHBoxLayout()
     r.setSpacing(3)
