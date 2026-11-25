@@ -106,6 +106,8 @@ def summary(v: dict) -> str:
     for k, n in (("zip", "ZIP"), ("xmp", "XMP")):
         if v.get(k):
             bits.append(n)
+    if v.get("zip") and v.get("trash_orig"):
+        bits.append("originales solo en el ZIP")
     if v.get("del_disc"):
         bits.append("borrar descartadas")
     if v.get("cloud"):

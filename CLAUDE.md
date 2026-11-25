@@ -82,7 +82,8 @@ python -m unittest discover -s tests   # 242 pruebas, sin fotos reales ni red
   la IA, boda, comunión/bautizo, fiesta, discoteca, deporte, retrato, exterior y los estilos aprendidos;
   `SS.propose` propone el resto sin tocar nube, calidad, hilos, perfil de cámara ni LUT), recorte inteligente y
   formatos, retratos, «Mejorar con IA», desenfoque de fondo, color de la cámara, look, LUT, B/N, descartes, grano y
-  qué exportar (ZIP solo de las aprobadas, apartar las descartadas `move` o borrarlas `del_disc`, con la
+  qué exportar (ZIP solo de las aprobadas, quitar los originales tras el ZIP `trash_orig` —enlazado al
+  ZIP—, apartar las descartadas `move` o borrarlas `del_disc`, con la
   confirmación de siempre al exportar). Trabaja sobre `Main.snapshot`/`apply_snapshot` (`Main.apply_setup`; con la sesión ya analizada
   rehace al momento el recorte y la IA de las no revisadas). Claves nuevas `crop` y `enhance` (`Settings.smart_crop`
   y `auto_enhance`, chips en ⚙ › Al exportar): tras el análisis, `SS.apply_rules` deja la entrega en «Original» si

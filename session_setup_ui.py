@@ -422,6 +422,9 @@ class SessionSetupDialog(QDialog):
                          "Abre la revisión para aprobar, recortar o retocar antes de exportar."),
             self._toggle("zip", "archive", "ZIP de originales",
                          "Solo las aprobadas: sus originales en un ZIP sin pérdida, junto a «Editadas»."),
+            self._toggle("trash_orig", "archive", "Quitar los originales tras el ZIP",
+                         "Sin duplicados: los que el ZIP guarda idénticos (comprobado uno a uno) salen de la carpeta. "
+                         "Al volver a abrir la sesión se recuperan del ZIP."),
             self._toggle("move", "move", "Apartar las descartadas",
                          "Al terminar, sus originales se mueven a «Descartadas» (no se borra nada)."),
             self._toggle("del_disc", "trash", "Borrar las descartadas",
@@ -453,6 +456,10 @@ class SessionSetupDialog(QDialog):
             prev = self.current.get("cam_prof")
             value = (prev if prev and prev != DCP.NONE else DCP.AUTO) if value else DCP.NONE
         self.v[key] = value
+        if key == "trash_orig" and value:  # quitar los originales solo con el ZIP hecho y comprobado
+            self.v["zip"] = True
+        elif key == "zip" and not value:
+            self.v["trash_orig"] = False
         self.refresh()
 
     def _set_list(self, key, item, on):
