@@ -206,31 +206,41 @@ def _placeholder(p, el, seed: int):
 _CACHE = None
 
 
-def template_thumb(name: str, side: int = 190) -> QImage:
-    """Miniatura de una plantilla para el inicio: los huecos de foto salen con un degradado en vez del aspa."""
+def design_thumb(d: dict, side: int = 190, cache=None, seed: int = 0, page: int | None = None) -> QImage:
+    """Miniatura de un diseño (una página) con los huecos de foto vacíos dibujados con un degradado en vez del
+    aspa: plantillas, estilos y propuestas."""
     global _CACHE
-    if _CACHE is None:
-        _CACHE = G.ImageCache()
-    d = G.design_from_preset(G.TEMPLATE_SIZE[name])
-    G.apply_template(d, name)
-    s = side / max(d["w"], d["h"])
-    img = QImage(max(1, round(d["w"] * s)), max(1, round(d["h"] * s)), QImage.Format_RGB32)
+    if cache is None:
+        if _CACHE is None:
+            _CACHE = G.ImageCache()
+        cache = _CACHE
+    v = G.page_views(d)[d.get("page", 0) if page is None else page] if d.get("pages") else d
+    s = side / max(v["w"], v["h"])
+    img = QImage(max(1, round(v["w"] * s)), max(1, round(v["h"] * s)), QImage.Format_RGB32)
     img.fill(Qt.white)
     p = QPainter(img)
     p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
     p.scale(s, s)
-    p.fillRect(QRectF(0, 0, d["w"], d["h"]), G.qcolor(d.get("bg", "#FFFFFF")))
-    seed = sum(map(ord, name))
-    for i, el in enumerate(d["elements"]):
+    p.fillRect(QRectF(0, 0, v["w"], v["h"]), G.qcolor(v.get("bg", "#FFFFFF")))
+    for i, el in enumerate(v["elements"]):
+        if el.get("hidden"):
+            continue
         p.save()
         p.setTransform(G.element_transform(el), True)
         if el["type"] == "image" and not el.get("path"):
             _placeholder(p, el, seed + i)
         else:
-            G.paint_element(p, el, _CACHE, editing=False, img_px=s, max_img=512)
+            G.paint_element(p, el, cache, editing=False, img_px=s, max_img=512)
         p.restore()
     p.end()
     return img
+
+
+def template_thumb(name: str, side: int = 190) -> QImage:
+    """Miniatura de una plantilla para el inicio: los huecos de foto salen con un degradado en vez del aspa."""
+    d = G.design_from_preset(G.TEMPLATE_SIZE[name])
+    G.apply_template(d, name)
+    return design_thumb(d, side, seed=sum(map(ord, name)), page=0)
 
 
 class Hero(QFrame):
@@ -389,6 +399,7 @@ def _section(title: str, link: str = "", cb=None):
 # ------------------------------------------------------------------ inicio
 
 QUICK = [  # (texto, icono, grupo de color, acción)
+    ("Con tus fotos", "studio_photo", "Redes sociales", ("session", None)),
     ("Plantillas", "lut", "Impresión", ("mode", "templates")),
     ("Redes", "star", "Redes sociales", ("group", "Redes sociales")),
     ("Presentación", "review", "Presentaciones", ("preset", "Presentación 16:9")),
@@ -573,6 +584,8 @@ class HomePage(QWidget):
             self.owner.open_create_dialog("custom")
         elif kind == "upload":
             self.owner.upload_new()
+        elif kind == "session":
+            self.owner.open_session_designer()
         else:
             self.owner.open_create_dialog()
 

@@ -260,7 +260,7 @@ TOOL_HINTS = {
     "rect": "<b>Arrastrar</b> para dibujar un rectángulo  |  <b>Mayús</b>: cuadrado",
     "ellipse": "<b>Arrastrar</b> para dibujar una elipse  |  <b>Mayús</b>: círculo",
     "hand": "<b>Arrastrar</b> para desplazar la vista  |  también <b>espacio + arrastrar</b> o botón central",
-    "zoom": "<b>Clic</b> para acercar  |  <b>Alt+clic</b> para alejar  |  <b>Rueda</b> en cualquier herramienta",
+    "zoom": "<b>Clic</b> para acercar  |  <b>Alt+clic</b> para alejar  |  <b>Ctrl+rueda</b> en cualquier herramienta",
 }
 # parejas de fuentes del panel Texto (solo fuentes de Windows: funcionan sin conexión)
 TEXT_PAIRS = [("Elegante", "Georgia", "Segoe UI", "Ana & Pablo\nSábado 12 de septiembre"),
@@ -792,6 +792,13 @@ class Canvas(QGraphicsView):
         self.draw = None  # (elemento, punto inicial) mientras se dibuja un rectángulo o elipse
         self._pan = None
         self._space = False
+        # las demás páginas, una debajo de otra como en Canva: la activa siempre en (0, 0) con sus elementos
+        # vivos; las otras, imágenes en caché (se rehacen al cambiar de zoom o si cambia su contenido)
+        self.page_cache: dict = {}
+        self.switching = False
+        self.page_timer = QTimer(self)
+        self.page_timer.setSingleShot(True)
+        self.page_timer.timeout.connect(self._page_in_view)
 
     @property
     def d(self):
@@ -802,7 +809,69 @@ class Canvas(QGraphicsView):
 
     def set_page(self):
         m = max(self.d["w"], self.d["h"]) * 2
-        self.sc.setSceneRect(QRectF(-m, -m, self.d["w"] + 2 * m, self.d["h"] + 2 * m))
+        n = len(self.d.get("pages") or [1])
+        top, bottom = self.page_offset(0), self.page_offset(n - 1) + self.d["h"]
+        self.sc.setSceneRect(QRectF(-m, top - m, self.d["w"] + 2 * m, bottom - top + 2 * m))
+
+    # ---------------------------------------------------------- páginas seguidas
+    def page_gap(self) -> float:
+        return max(40.0, self.d["h"] * 0.06)
+
+    def page_offset(self, j: int) -> float:
+        """Y de la página `j` en la escena (la activa está en 0)."""
+        return (j - self.d.get("page", 0)) * (self.d["h"] + self.page_gap())
+
+    def page_rect(self, j: int) -> QRectF:
+        return QRectF(0, self.page_offset(j), self.d["w"], self.d["h"])
+
+    def page_at(self, sp: QPointF):
+        for j in range(len(self.d.get("pages") or [1])):
+            if self.page_rect(j).contains(sp):
+                return j
+        return None
+
+    def _page_image(self, j: int):
+        """Imagen de una página no activa a la escala del zoom (en escalones), con caché."""
+        pg = self.d["pages"][j]
+        z = self.transform().m11()
+        s = min(2 ** round(math.log2(max(z, 1e-3))), 1600 / max(self.d["w"], self.d["h"]))
+        hit = self.page_cache.get(j)
+        if hit and hit[0] is pg["elements"] and hit[1] == pg["bg"] and hit[2] == s:
+            return hit[3]
+        w, h = max(1, round(self.d["w"] * s)), max(1, round(self.d["h"] * s))
+        img = QImage(w, h, QImage.Format_RGB32)
+        img.fill(G.qcolor(pg["bg"]))
+        p = QPainter(img)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform | QPainter.TextAntialiasing)
+        p.scale(s, s)
+        for el in pg["elements"]:   # como en la activa: los huecos vacíos se ven
+            p.save()
+            p.setTransform(G.element_transform(el), True)
+            G.paint_element(p, el, self.cache, editing=True, img_px=s, max_img=2000)
+            p.restore()
+        p.end()
+        self.page_cache[j] = (pg["elements"], pg["bg"], s, img)
+        return img
+
+    def keep_view_switch(self, j: int):
+        """Activa la página `j` sin que la vista salte (lo que se ve se queda donde estaba)."""
+        if j == self.d.get("page", 0):
+            return
+        c = self.mapToScene(self.viewport().rect().center())
+        oy = self.page_offset(j)
+        self.owner.goto_page(j, recenter=False)
+        self.switching = True
+        self.centerOn(QPointF(c.x(), c.y() - oy))
+        self.switching = False
+
+    def _page_in_view(self):
+        """Al desplazarse, la página que ocupa el centro de la vista pasa a ser la activa (como en Canva)."""
+        if self.moving or self.draw or self._pan is not None or QApplication.mouseButtons() != Qt.NoButton \
+                or len(self.d.get("pages") or []) < 2:
+            return
+        j = self.page_at(self.mapToScene(self.viewport().rect().center()))
+        if j is not None and j != self.d.get("page", 0):
+            self.keep_view_switch(j)
 
     def fit(self):
         r = self.page()
@@ -819,32 +888,45 @@ class Canvas(QGraphicsView):
     # ---------------------------------------------------------- dibujo de fondo y guías
     def drawBackground(self, p, rect):
         p.fillRect(rect, QColor(VC["canvas"]))
-        pg = self.page()
         s = self.transform().m11()
-        p.fillRect(pg.translated(4 / s, 5 / s), QColor(0, 0, 0, 110))
-        p.fillRect(pg, G.qcolor(self.d.get("bg", "#FFFFFF")))
+        cur = self.d.get("page", 0)
+        for j in range(len(self.d.get("pages") or [1])):
+            pr = self.page_rect(j)
+            if not pr.adjusted(0, 0, 8 / s, 8 / s).intersects(rect):
+                continue
+            p.fillRect(pr.translated(4 / s, 5 / s), QColor(0, 0, 0, 110))
+            if j == cur:
+                p.fillRect(pr, G.qcolor(self.d.get("bg", "#FFFFFF")))
+            else:
+                p.drawImage(pr, self._page_image(j))
 
     def drawForeground(self, p, rect):
         pg = self.page()
         s = max(1e-3, self.transform().m11())
+        n = len(self.d.get("pages", [])) or 1
+        cur = self.d.get("page", 0)
         outside = QPainterPath()
         outside.addRect(rect.united(pg.adjusted(-10, -10, 10, 10)))
         inner = QPainterPath()
-        inner.addRect(pg)
+        for j in range(n):
+            inner.addRect(self.page_rect(j))
         bgc = QColor(VC["canvas"])
         bgc.setAlpha(215)
         p.fillPath(outside.subtracted(inner), bgc)
-        # nombre de la mesa de trabajo encima, como en VectorCraft («01 - Página»)
+        # nombre de cada página encima («01 - Nombre»); la activa, resaltada
         p.save()
         p.resetTransform()
-        tl = self.mapFromScene(pg.topLeft())
-        p.setPen(QColor(VC["muted"]))
         f = p.font()
         f.setPixelSize(12)
         p.setFont(f)
-        n = len(self.d.get("pages", [])) or 1
-        p.drawText(QPointF(tl.x(), tl.y() - 8),
-                   f"{self.d.get('page', 0) + 1:02d} - {self.d.get('name', '')}" + (f"  ({n} páginas)" if n > 1 else ""))
+        for j in range(n):
+            pr = self.page_rect(j)
+            if not pr.adjusted(0, -40 / s, 0, 0).intersects(rect):
+                continue
+            tl = self.mapFromScene(pr.topLeft())
+            p.setPen(QColor("#FFFFFF" if j == cur and n > 1 else VC["muted"]))
+            p.drawText(QPointF(tl.x(), tl.y() - 8),
+                       f"{j + 1:02d} - {self.d.get('name', '')}" if j == 0 or n == 1 else f"{j + 1:02d}")
         p.restore()
         if self.d.get("unit") == "mm":
             b = G.mm_to_px(3.0, self.d.get("dpi", G.PRINT_DPI))
@@ -911,17 +993,36 @@ class Canvas(QGraphicsView):
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
         self.owner.place_taskbar()
+        if not self.switching:
+            self.page_timer.start(220)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self.owner.place_taskbar()
 
     def wheelEvent(self, e):
+        # como en Canva: la rueda desplaza (Mayús: en horizontal) y Ctrl+rueda acerca o aleja
+        if not e.modifiers() & Qt.ControlModifier:
+            if e.modifiers() & Qt.ShiftModifier:
+                sb = self.horizontalScrollBar()
+                sb.setValue(sb.value() - e.angleDelta().y())
+                return
+            return super().wheelEvent(e)
         f = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
         z = self.transform().m11() * f
         if 0.02 < z < 40:
             self.scale(f, f)
             self.owner.zoom_changed()
+
+    def contextMenuEvent(self, e):
+        sp = self.mapToScene(e.pos())
+        if any(isinstance(it, ElementItem) for it in self.sc.items(sp)):
+            return super().contextMenuEvent(e)
+        j = self.page_at(sp)
+        if j is None:
+            return
+        self.keep_view_switch(j)
+        self.owner._page_menu().exec(e.globalPos())
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Space and not e.isAutoRepeat():
@@ -947,6 +1048,11 @@ class Canvas(QGraphicsView):
             self.viewport().setCursor(Qt.ClosedHandCursor)
             return
         self.owner.taskbar.hide()
+        j = self.page_at(sp)
+        if e.button() == Qt.LeftButton and j is not None and j != self.d.get("page", 0) and \
+                self.tool in ("select", "direct", "text", "rect", "ellipse"):
+            self.keep_view_switch(j)   # un clic en otra página la activa; el siguiente ya edita
+            return
         if e.button() == Qt.LeftButton and self.tool == "pen":
             if len(self.pen_nodes) > 2 and (QPointF(*self.pen_nodes[0]["p"]) - sp).manhattanLength() < \
                     10 / self.transform().m11():
@@ -1057,15 +1163,25 @@ class Canvas(QGraphicsView):
         if e.mimeData().hasUrls() or e.mimeData().hasFormat(GE_MIME):
             e.acceptProposedAction()
 
+    def _drop_point(self, e) -> QPointF:
+        """Punto de la escena donde se suelta; si cae en otra página, la activa y lo pasa a sus coordenadas."""
+        sp = self.mapToScene(e.position().toPoint())
+        j = self.page_at(sp)
+        if j is not None and j != self.d.get("page", 0):
+            oy = self.page_offset(j)
+            self.keep_view_switch(j)
+            sp = QPointF(sp.x(), sp.y() - oy)
+        return sp
+
     def dropEvent(self, e):
         if e.mimeData().hasFormat(GE_MIME):
             import json as _json
             data = _json.loads(bytes(e.mimeData().data(GE_MIME)).decode("utf-8"))
-            self.owner.elements.drop(data, self.mapToScene(e.position().toPoint()))
+            self.owner.elements.drop(data, self._drop_point(e))
             e.acceptProposedAction()
             return
         paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
-        sp = self.mapToScene(e.position().toPoint())
+        sp = self._drop_point(e)
         for i, p in enumerate(paths):
             self.owner.place_photo(p, QPointF(sp.x() + i * 30, sp.y() + i * 30))
         e.acceptProposedAction()
@@ -1657,6 +1773,13 @@ class GraphicsView(QWidget):
         pg = QWidget()
         pv = QVBoxLayout(pg)
         pv.setContentsMargins(4, 8, 4, 4)
+        import graphics_magic_ui as GMU
+        self.styles = GMU.StylesStrip(self)
+        pv.addWidget(self.styles)
+        sess = _btn("  Diseñar con las fotos de la sesión…", "", "Carrusel, álbum o plantillas ya rellenas con las "
+                    "mejores fotos de la carpeta abierta en Events", self.open_session_designer)
+        sess.setIcon(I.icon("studio_photo", 16))
+        pv.addWidget(sess)
         t = QLabel("NUEVO DISEÑO")
         t.setObjectName("cardTitle")
         pv.addWidget(t)
@@ -1844,20 +1967,8 @@ class GraphicsView(QWidget):
             it.setHidden(group != "Todas" and G.TEMPLATE_GROUP.get(it.data(Qt.UserRole)) != group)
 
     def _template_icon(self, name, side=110):
-        d = G.design_from_preset(G.TEMPLATE_SIZE[name])
-        G.apply_template(d, name)
-        img = G.thumbnail(d, G.ImageCache(), side)
-        p = QPainter(img)
-        for el in d["elements"]:
-            if el["type"] == "image" and not el["path"]:
-                s = side / max(d["w"], d["h"])
-                p.save()
-                p.scale(s, s)
-                p.setTransform(G.element_transform(el), True)
-                G.paint_element(p, el, G.ImageCache(), editing=True)
-                p.restore()
-        p.end()
-        return QIcon(QPixmap.fromImage(img))
+        import graphics_home as GH
+        return QIcon(QPixmap.fromImage(GH.template_thumb(name, side)))
 
     def _build_tools(self):
         w = QFrame()
@@ -2139,6 +2250,23 @@ class GraphicsView(QWidget):
         else:
             self.upload_new()
 
+    def open_session_designer(self):
+        """Carrusel, álbum o plantillas rellenas con las mejores fotos de la sesión (graphics_magic)."""
+        import graphics_magic_ui as GMU
+        folder = self.folder
+        if not folder:
+            folder = QFileDialog.getExistingDirectory(self, "Carpeta de la sesión", "")
+            if not folder:
+                return
+            self.set_folder(folder)
+        dlg = GMU.SessionDialog(self, folder)
+        if dlg.exec() != QDialog.Accepted or dlg.result_design is None:
+            return
+        if dlg.folder != self.folder:
+            self.set_folder(dlg.folder)
+        self._start(dlg.result_design)
+        self.save_now()
+
     def _start(self, d: dict):
         self.load_design(d)
         self.open_editor()
@@ -2259,6 +2387,7 @@ class GraphicsView(QWidget):
         menu("Archivo", [
             ("Inicio", self.open_home),
             ("Crear un diseño…", lambda: self.open_create_dialog()),
+            ("Diseñar con las fotos de la sesión…", self.open_session_designer),
             ("Plantillas y tamaños", lambda: self.show_library(0)),
             ("Abrir de «Míos»…", lambda: self.show_library(4)),
             ("Duplicar diseño", self.duplicate_design), None,
@@ -2300,6 +2429,7 @@ class GraphicsView(QWidget):
                           ("Imán (guías inteligentes)", lambda: None),
                           ("Retícula y guías…", self.grid_dialog, "Ctrl+'"),
                           ("Vista avanzada (herramientas y ayuda a la vista)", lambda: None), None,
+                          ("Páginas en cuadrícula…", self.show_page_grid, "Ctrl+Shift+P"),
                           ("Pantalla completa", self.toggle_fullscreen, "F11")])
         self.adv_act = vw["Vista avanzada (herramientas y ayuda a la vista)"]
         self.adv_act.setCheckable(True)
@@ -2346,7 +2476,8 @@ class GraphicsView(QWidget):
                                 "Ctrl+Z / Ctrl+Y deshacer y rehacer · Ctrl+D duplicar · Ctrl+G agrupar · "
                                 "Supr eliminar\nCtrl+↑ / Ctrl+↓ (o Ctrl+] / Ctrl+[) adelante y atrás · flechas: mover (Mayús ×10)\n"
                                 "Ctrl+Mayús+O crear contornos · Ctrl+E exportar · Ctrl+0 encajar · Ctrl+1 100 %\n"
-                                "Rueda: zoom · espacio + arrastrar: desplazar")
+                                "Rueda: desplazar (Mayús: en horizontal) · Ctrl+rueda: zoom · espacio + arrastrar: mover la vista\n"
+                                "Clic en otra página: activarla · clic derecho fuera de los objetos: menú de la página")
 
     def _build_hint(self):
         w = QFrame()
@@ -2386,7 +2517,7 @@ class GraphicsView(QWidget):
         self.zoom_slider = QSlider(Qt.Horizontal)
         self.zoom_slider.setRange(5, 400)
         self.zoom_slider.setFixedWidth(170)
-        self.zoom_slider.setToolTip("Zoom (rueda del ratón sobre el lienzo; Ctrl+0 encaja la página)")
+        self.zoom_slider.setToolTip("Zoom (Ctrl+rueda sobre el lienzo; Ctrl+0 encaja la página)")
         self.zoom_slider.valueChanged.connect(
             lambda v: None if getattr(self, "_zsync", False) else self.canvas.set_zoom(v / 100))
         h.addWidget(self.zoom_slider)
@@ -2403,6 +2534,10 @@ class GraphicsView(QWidget):
         pb.toggled.connect(lambda on: (self.page_strip.setVisible(on), QTimer.singleShot(0, self.canvas.fit)))
         self.pages_btn = pb
         h.addWidget(pb)
+        gb = _btn("", "flat", "Vista de cuadrícula: todas las páginas, para ordenarlas arrastrando (Ctrl+Mayús+P)",
+                  self.show_page_grid)
+        gb.setIcon(I.icon("menu", 16))
+        h.addWidget(gb)
         h.addWidget(_btn("‹", "flat", "Página anterior", lambda: self.goto_page(self.d.get("page", 0) - 1)))
         self.pages = QComboBox()
         self.pages.setFixedWidth(150)
@@ -2503,7 +2638,7 @@ class GraphicsView(QWidget):
             self.save_now()
         self.d = G.ensure_pages(d)
         self.undo_st, self.redo_st = [], []
-        self._last = json.dumps(d, sort_keys=True)
+        self._last = self._snap()
         self.name.setText(d.get("name", ""))
         self.size_lbl.setText(G.size_label(d))
         self.top_size.setText("· " + G.size_label(d))
@@ -2512,6 +2647,8 @@ class GraphicsView(QWidget):
         QTimer.singleShot(0, self.canvas.fit)
         self._update_undo()
         self.refresh_pages()
+        if hasattr(self, "styles"):
+            self.styles.schedule()
 
     def new_design(self, preset: str):
         self.load_design(G.design_from_preset(preset))
@@ -2639,6 +2776,9 @@ class GraphicsView(QWidget):
     def rebuild(self, select=None):
         """Recrea los elementos del lienzo desde el diseño (tras deshacer, plantillas, orden…)."""
         keep = select if select is not None else [i.el["id"] for i in self.canvas.sc.selectedItems()]
+        if not self.canvas.switching:
+            self.canvas.page_cache.clear()   # puede haber cambiado cualquier página (deshacer, estilos, páginas…)
+        self.canvas.set_page()
         self._building = True
         self.canvas.hover = None
         self.canvas.sc.clear()
@@ -2720,9 +2860,14 @@ class GraphicsView(QWidget):
         self.place_taskbar()
 
     # ---------------------------------------------------------- historial
-    def commit(self, coalesce: str | None = None):
+    def _snap(self) -> str:
+        """Paso del historial: el diseño sin la página activa (cambiar de página no es un cambio que deshacer) ni
+        la copia de sus elementos (ya van en «pages»)."""
         G.sync_page(self.d)
-        js = json.dumps(self.d, sort_keys=True)
+        return json.dumps({k: v for k, v in self.d.items() if k not in ("page", "elements", "bg")}, sort_keys=True)
+
+    def commit(self, coalesce: str | None = None):
+        js = self._snap()
         if js == self._last:
             return
         now = time.time()
@@ -2737,10 +2882,21 @@ class GraphicsView(QWidget):
         self.refresh_layers()
         self._update_undo()
         self.pages_timer.start(600)
+        if hasattr(self, "styles"):
+            self.styles.schedule()
 
     def _restore(self, js):
         sel = [i.el["id"] for i in self.canvas.sc.selectedItems()]
-        self.d = G.ensure_pages(json.loads(js))
+        old = self.d.get("pages") or []
+        cur = self.d.get("page", 0)
+        nd = json.loads(js)
+        new = nd.get("pages") or []
+        # ir a la página que cambia con este paso (si no cambia ninguna, quedarse en la misma)
+        diff = [j for j in range(max(len(old), len(new)))
+                if j >= len(old) or j >= len(new) or json.dumps(old[j], sort_keys=True) !=
+                json.dumps(new[j], sort_keys=True)]
+        nd["page"] = min(diff[0] if diff else cur, max(0, len(new) - 1))
+        self.d = G.ensure_pages(nd)
         self._last = js
         self.name.setText(self.d.get("name", ""))
         self.size_lbl.setText(G.size_label(self.d))
@@ -2750,6 +2906,8 @@ class GraphicsView(QWidget):
         self.save_timer.start(1500)
         self._update_undo()
         self.refresh_pages()
+        if hasattr(self, "styles"):
+            self.styles.schedule()
 
     def undo(self):
         if self.undo_st:
@@ -2846,6 +3004,13 @@ class GraphicsView(QWidget):
         r.addWidget(w_, 1)
         self.props.addLayout(r)
 
+    @staticmethod
+    def _wrap(layout) -> QWidget:
+        w_ = QWidget()
+        layout.setContentsMargins(0, 0, 0, 0)
+        w_.setLayout(layout)
+        return w_
+
     def _spin(self, val, lo, hi, dec=1, suffix="", step=1.0):
         sb = QDoubleSpinBox()
         sb.setRange(lo, hi)
@@ -2864,7 +3029,7 @@ class GraphicsView(QWidget):
         if el["type"] == "text" and key == "size" and el.get("fit_h"):
             el["size_max"] = val  # el tamaño que elige el usuario es el nuevo máximo del autoajuste
         if el["type"] == "text" and (refit_text or key in ("text", "font", "size", "bold", "italic", "line",
-                                                           "spacing", "upper", "w", "curve")):
+                                                           "spacing", "upper", "w", "curve", "list")):
             G.fit_text(el)
             if key != "size" and getattr(self, "_size_sb", None):
                 self._size_sb.blockSignals(True)
@@ -2909,12 +3074,16 @@ class GraphicsView(QWidget):
         self._transform_section(el)
         self._title({"text": "Carácter", "image": "Imagen", "vector": "Colores", "shape": "Forma"}[t])
         if t == "text":
-            self.text_edit = QPlainTextEdit(el.get("text", ""))
-            self.text_edit.setStyleSheet(f"QPlainTextEdit {{ background: #121212; border: 1px solid {T.LINE}; "
-                                         f"border-radius: 3px; color: {T.TEXT_STRONG}; }}")
-            self.text_edit.setFixedHeight(80)
-            self.text_edit.textChanged.connect(lambda: self.set_prop(el, "text", self.text_edit.toPlainText()))
+            import graphics_richtext_ui as RT
+            self.text_edit = RT.RichTextBox(el)
+            self.text_edit.setFixedHeight(96)
+
+            def edited():
+                G.set_runs(el, self.text_edit.runs())
+                self.set_prop(el, "text", self.text_edit.toPlainText())
+            self.text_edit.edited.connect(edited)
             self.props.addWidget(self.text_edit)
+            self.props.addLayout(RT.selection_bar(self.text_edit, self.design_colors))
             fc = QFontComboBox()
             fc.setCurrentFont(G.text_font(el))
             fc.currentFontChanged.connect(lambda f: self.set_prop(el, "font", f.family()))
@@ -2940,6 +3109,16 @@ class GraphicsView(QWidget):
                 b.clicked.connect(lambda _=False, a=a: self.set_prop(el, "align", a))
                 r.addWidget(b)
             self.props.addLayout(r)
+            r = QHBoxLayout()
+            grp2 = QButtonGroup(self.props_host)
+            for k, txt in (("", "—"), ("bullet", "• Viñetas"), ("number", "1. Números")):
+                b = _btn(txt, "seg", G.LIST_KINDS[k])
+                b.setCheckable(True)
+                b.setChecked((el.get("list") or "") == k)
+                grp2.addButton(b)
+                b.clicked.connect(lambda _=False, k=k: self.set_prop(el, "list", k))
+                r.addWidget(b)
+            self._row("Lista", self._wrap(r))
             cb = ColorButton(el.get("color", "#000000"), False, self.design_colors)
             cb.changed.connect(lambda c: self.set_prop(el, "color", c))
             self._row("Color", cb)
@@ -3238,7 +3417,7 @@ class GraphicsView(QWidget):
         rs.currentIndexChanged.connect(lambda i: rs.itemData(i) and self.resize_design(rs.itemData(i)))
         self.props.addWidget(rs)
         self._title("Consejos")
-        tips = QLabel("• Plantillas, elementos, texto y tu marca: barra de la izquierda.\n• Arrastra fotos desde «Subidos» o gráficos desde «Elementos».\n• Rueda: zoom · espacio + arrastrar: "
+        tips = QLabel("• Plantillas, elementos, texto y tu marca: barra de la izquierda.\n• Arrastra fotos desde «Subidos» o gráficos desde «Elementos».\n• Rueda: desplazar · Ctrl+rueda: zoom · espacio + arrastrar: "
                       "desplazar.\n• Mayús al escalar: libera o fija la proporción.\n• Alt al mover una manecilla: "
                       "esquina.")
         tips.setObjectName("faint")
@@ -3969,11 +4148,17 @@ class GraphicsView(QWidget):
         self.page_strip.setCurrentRow(self.d.get("page", 0))
         self.page_count.setText(f"{self.d.get('page', 0) + 1} de {len(views)}")
 
-    def goto_page(self, i):
+    def goto_page(self, i, recenter: bool = True):
         if i < 0 or i == self.d.get("page", 0) or i >= len(self.d["pages"]):
             return
         G.set_page(self.d, i)
-        self.rebuild(select=[])
+        self.canvas.switching = True
+        try:
+            self.rebuild(select=[])
+            if recenter:
+                self.canvas.centerOn(self.canvas.page().center())
+        finally:
+            self.canvas.switching = False
         self.canvas.resetCachedContent()
         self.canvas.viewport().update()
         self.pages.blockSignals(True)
@@ -3981,6 +4166,10 @@ class GraphicsView(QWidget):
         self.pages.blockSignals(False)
         self.page_strip.setCurrentRow(i)
         self.page_count.setText(f"{i + 1} de {len(self.d['pages'])}")
+
+    def show_page_grid(self):
+        import graphics_pages as GP
+        GP.PageGridDialog(self).exec()
 
     def page_op(self, op):
         if op == "add":
@@ -3998,6 +4187,9 @@ class GraphicsView(QWidget):
                 return
             G.delete_page(self.d)
         self.rebuild(select=[])
+        self.canvas.switching = True
+        self.canvas.centerOn(self.canvas.page().center())
+        self.canvas.switching = False
         self.canvas.viewport().update()
         self.commit()
         self.refresh_pages()

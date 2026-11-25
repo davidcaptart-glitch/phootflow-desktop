@@ -113,6 +113,17 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   grupos, imán, texto curvo, pluma y nodos, Buscatrazos, QR, quitar fondo
   (PNG aparte en `diseños\recortes`), vectorizar (OpenCV) y PDF de imprenta (sangrado, marcas, CMYK simple).
   Un solo pintor (`paint_element`) para lienzo y exportación.
+  Páginas seguidas en el lienzo como en Canva: la activa en (0, 0) con sus elementos vivos, las demás encima y
+  debajo como imágenes en caché (`Canvas.page_rect`/`_page_image`); clic o desplazarse a otra la activa sin saltar
+  (`keep_view_switch`). Rueda = desplazar, Ctrl+rueda = zoom. Cuadrícula para ordenarlas (`graphics_pages.py`).
+  El historial no guarda la página activa (`_snap`); deshacer va a la página que cambia.
+  Texto enriquecido: `el["runs"]` (tramos con b/i/u/s/color/k; si no suman `el["text"]` se ignoran) y
+  `el["list"]` (viñetas o números con sangría francesa), en `_text_layout` con FormatRange; contornos por color
+  (`text_color_paths`). Editor en Propiedades: `graphics_richtext_ui.py`.
+  `graphics_magic.py` (+ `_ui`): «Estilos» (paleta + fuentes por papel de cada color, y espejo) en el panel Diseño,
+  y «Diseñar con las fotos de la sesión»: lee el análisis de Events (`Editadas/.phootflow`), ordena las fotos
+  (nitidez, ojos, caras; descartadas al final; gemelas por dHash detrás; usa la editada de Entrega/Color si
+  existe) y propone carrusel, álbumes y plantillas rellenas (vistas previas con las miniaturas de Events).
   Foto + formas/textos: «Recortar con la forma» (intersect) o «Restar de la foto» (`G.cut_image`, `el["cuts"]`
   en coordenadas de la foto, siguen al escalarla; `cut_src` para «Quitar recortes»). «Intercambiar» (`swap_places`):
   dos fotos cambian de foto, el resto de sitio. Asas: `ElementItem.shape` une las piezas (con addEllipse sobre

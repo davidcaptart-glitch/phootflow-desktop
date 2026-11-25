@@ -1262,6 +1262,8 @@ def text_outline(el: dict):
             raw = run.rawFont()
             for gi, pos in zip(run.glyphIndexes(), run.positions()):
                 p.addPath(QTransform.fromTranslate(pos.x(), pos.y()).map(raw.pathForGlyph(gi)))
+    for _, r in _decorations(el):
+        p.addRect(r)
     return p
 
 
@@ -1296,7 +1298,12 @@ def outline_text_el(el: dict) -> dict:
                       "stroke_w": ow})
     if ow > 0:
         paths.append({"fill": "#00000000", "d": d_, "stroke": el.get("outline", "#000000"), "stroke_w": ow})
-    paths.append({"fill": el.get("color", "#000000"), "d": d_})
+    if el.get("runs") and abs(float(el.get("curve", 0.0))) < 1:
+        for col, cp in text_color_paths(el):   # cada color de los tramos, su trazado
+            cp.setFillRule(Qt.WindingFill)
+            paths.append({"fill": col, "d": qpath_to_d(cp.simplified())})
+    else:
+        paths.append({"fill": el.get("color", "#000000"), "d": d_})
     v = base_el("vector", el["x"], el["y"], el["w"], el["h"], viewbox=[el["w"], el["h"]], rot=el.get("rot", 0.0),
                 opacity=el.get("opacity", 1.0), paths=paths)
     v["name"] = "Contornos: " + el.get("text", "").strip().split("\n")[0][:20]
@@ -1530,31 +1537,221 @@ def _align_flag(el):
                                                                                          Qt.AlignHCenter)
 
 
+# ------------------------------------------------------------------ texto enriquecido y listas
+# el["runs"] = [{"t": texto, "b"/"i"/"u"/"s": negrita/cursiva/subrayado/tachado, "color": "#RRGGBB",
+#               "k": tamaño relativo}, …] con "".join(t) == el["text"] (si no coincide, se ignoran: el resto del
+# código puede cambiar «text» sin saber nada de los tramos). el["list"] = "" | "bullet" | "number".
+RUN_KEYS = ("b", "i", "u", "s", "color", "k")
+LIST_KINDS = {"": "Sin lista", "bullet": "Viñetas", "number": "Numerada"}
+
+
+def text_runs(el: dict) -> list[dict]:
+    """Tramos del texto (uno solo, sin formato propio, si no tiene)."""
+    runs = el.get("runs") or []
+    if runs and "".join(r.get("t", "") for r in runs) == el.get("text", ""):
+        return runs
+    return [{"t": el.get("text", "")}]
+
+
+def clean_runs(runs: list[dict]) -> list[dict] | None:
+    """Une tramos seguidos con el mismo formato y quita los vacíos; None si ninguno tiene formato propio."""
+    out: list[dict] = []
+    for r in runs:
+        if not r.get("t"):
+            continue
+        fmt = {k: r[k] for k in RUN_KEYS
+               if r.get(k) is not None and r.get(k) != "" and not (k == "k" and abs(float(r[k]) - 1.0) < 1e-3)
+               and not (k in ("u", "s") and not r[k])}
+        if out and {k: out[-1].get(k) for k in RUN_KEYS if out[-1].get(k) is not None} == fmt:
+            out[-1]["t"] += r["t"]
+        else:
+            out.append(dict(fmt, t=r["t"]))
+    return out if any(len(r) > 1 for r in out) else None
+
+
+def set_runs(el: dict, runs: list[dict] | None) -> dict:
+    """Pone los tramos (y el texto que forman) en el elemento."""
+    runs = clean_runs(runs or [])
+    if runs:
+        el["runs"] = runs
+        el["text"] = "".join(r["t"] for r in runs)
+    else:
+        el.pop("runs", None)
+    return el
+
+
+def _run_format(r: dict, el: dict, scale: float):
+    from PySide6.QtGui import QFont, QTextCharFormat
+    fmt = QTextCharFormat()
+    if r.get("k") and abs(float(r["k"]) - 1.0) > 1e-3:
+        f = text_font(el, scale * float(r["k"]))
+        f.setBold(bool(r.get("b", el.get("bold"))))
+        f.setItalic(bool(r.get("i", el.get("italic"))))
+        fmt.setFont(f, QTextCharFormat.FontPropertiesAll)
+    if "b" in r:
+        fmt.setFontWeight(QFont.Bold if r["b"] else QFont.Normal)
+    if "i" in r:
+        fmt.setFontItalic(bool(r["i"]))
+    if r.get("u"):
+        fmt.setFontUnderline(True)
+    if r.get("s"):
+        fmt.setFontStrikeOut(True)
+    if r.get("color"):
+        fmt.setForeground(qcolor(r["color"]))
+    return fmt
+
+
+def _paragraphs(el: dict) -> list[list[tuple[str, dict]]]:
+    """Párrafos como listas de (texto a mostrar, tramo), con las mayúsculas ya aplicadas."""
+    paras: list[list] = [[]]
+    for r in text_runs(el):
+        t = r.get("t", "").upper() if el.get("upper") else r.get("t", "")
+        parts = t.split("\n")
+        for i, part in enumerate(parts):
+            if i:
+                paras.append([])
+            if part:
+                paras[-1].append((part, r))
+    return paras
+
+
+def list_prefix(el: dict, n: int) -> str:
+    kind = el.get("list") or ""
+    return "•\u2002" if kind == "bullet" else (f"{n}.\u2002" if kind == "number" else "")
+
+
 def _text_layout(el, scale=1.0):
-    """Maquetado del texto con interlineado; devuelve (QTextLayout por párrafo, altura total)."""
+    """Maquetado del texto con interlineado; devuelve (QTextLayout por párrafo, altura total).
+    Con tramos, cada uno con su formato (QTextLayout.FormatRange); con lista, viñeta o número y sangría francesa."""
     from PySide6.QtCore import QPointF
     from PySide6.QtGui import QFontMetricsF, QTextLayout, QTextOption
     font = text_font(el, scale)
     fm = QFontMetricsF(font)
     width = max(1.0, el["w"] * scale)
-    lh = fm.height() * el.get("line", 1.15)
+    lf = el.get("line", 1.15)
+    lh = fm.height() * lf
     opt = QTextOption(_align_flag(el))
     opt.setWrapMode(QTextOption.WordWrap)
-    lays, y = [], 0.0
-    for para in _text_value(el).split("\n"):
-        lay = QTextLayout(para, font)
+    rich = any(len(r) > 1 for r in text_runs(el))   # algún tramo con formato propio
+    sized = rich and any(r.get("k") for r in text_runs(el))
+    hanging = el.get("list") and el.get("align", "center") in ("left", "justify")
+    lays, y, n = [], 0.0, 0
+    for segs in _paragraphs(el):
+        text = "".join(t for t, _ in segs)
+        pre = list_prefix(el, n + 1) if text.strip() else ""
+        if pre:
+            n += 1
+        lay = QTextLayout(pre + text, font)
         lay.setTextOption(opt)
+        if rich:
+            ranges, pos = [], len(pre)
+            for t, r in segs:
+                if len(r) > 1:
+                    fr = QTextLayout.FormatRange()
+                    fr.start, fr.length, fr.format = pos, len(t), _run_format(r, el, scale)
+                    ranges.append(fr)
+                pos += len(t)
+            lay.setFormats(ranges)
+        indent = fm.horizontalAdvance(pre) if pre and hanging else 0.0
         lay.beginLayout()
+        first = True
         while True:
             ln = lay.createLine()
             if not ln.isValid():
                 break
-            ln.setLineWidth(width)
-            ln.setPosition(QPointF(0, y + (lh - fm.height()) / 2))
-            y += lh
+            x = 0.0 if first else indent
+            ln.setLineWidth(max(1.0, width - x))
+            nat = max(fm.height(), ln.height()) if sized else fm.height()
+            ln.setPosition(QPointF(x, y + (nat * lf - nat) / 2))
+            y += nat * lf
+            first = False
         lay.endLayout()
         lays.append(lay)
     return lays, y
+
+
+def _decorations(el: dict):
+    """Subrayados y tachados de los tramos como rectángulos (para los contornos y el PDF), con su color."""
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QFontMetricsF
+    out = []
+    if not el.get("runs"):
+        return out
+    lays, _ = _text_layout(el)
+    for lay in lays:
+        for fr in lay.formats():
+            f = fr.format
+            if not (f.fontUnderline() or f.fontStrikeOut()):
+                continue
+            fm = QFontMetricsF(f.font() if f.hasProperty(_QTF().FontPixelSize) else text_font(el))
+            col = f.foreground().color().name().upper() if f.hasProperty(_QTF().ForegroundBrush)                 else el.get("color", "#000000")
+            th = max(1.0, fm.lineWidth())
+            for i in range(lay.lineCount()):
+                ln = lay.lineAt(i)
+                a, b = max(fr.start, ln.textStart()), min(fr.start + fr.length, ln.textStart() + ln.textLength())
+                if b <= a:
+                    continue
+                x0, x1 = ln.cursorToX(a)[0], ln.cursorToX(b)[0]
+                base = ln.y() + ln.ascent()
+                for on, dy in ((f.fontUnderline(), fm.underlinePos()), (f.fontStrikeOut(), -fm.strikeOutPos())):
+                    if on:
+                        out.append((col, QRectF(min(x0, x1), base + dy - th / 2, abs(x1 - x0), th)))
+    return out
+
+
+def text_color_paths(el: dict) -> list[tuple[str, object]]:
+    """Contornos del texto agrupados por color: [(color, QPainterPath)] (el del elemento primero)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPainterPath, QTransform
+    base = el.get("color", "#000000")
+    if abs(float(el.get("curve", 0.0))) >= 1 or not el.get("runs"):
+        return [(base, text_outline(el))]
+    paths: dict[str, QPainterPath] = {}
+
+    def add(col, runs):
+        pp = paths.setdefault(col, QPainterPath())
+        pp.setFillRule(Qt.WindingFill)
+        for run in runs:
+            raw = run.rawFont()
+            for gi, pos in zip(run.glyphIndexes(), run.positions()):
+                pp.addPath(QTransform.fromTranslate(pos.x(), pos.y()).map(raw.pathForGlyph(gi)))
+
+    lays, _ = _text_layout(el)
+    for lay in lays:
+        colored = [(fr.start, fr.length, fr.format.foreground().color().name(QColor_HexArgb()))
+                   for fr in lay.formats() if fr.format.hasProperty(_QTF().ForegroundBrush)]
+        pos = 0
+        for start, length, col in sorted(colored):
+            if start > pos:
+                add(base, lay.glyphRuns(pos, start - pos))
+            add(_argb_to_hex(col), lay.glyphRuns(start, length))
+            pos = start + length
+        n = len(lay.text())
+        if pos < n:
+            add(base, lay.glyphRuns(pos, n - pos))
+    for col, r in _decorations(el):
+        pp = paths.setdefault(col if col.startswith("#") else base, QPainterPath())
+        pp.addRect(r)
+    out = [(base, paths.pop(base))] if base in paths else []
+    return out + list(paths.items())
+
+
+def _QTF():
+    from PySide6.QtGui import QTextFormat
+    return QTextFormat.Property
+
+
+def QColor_HexArgb():
+    from PySide6.QtGui import QColor
+    return QColor.HexArgb
+
+
+def _argb_to_hex(s: str) -> str:
+    """#AARRGGBB (Qt) → #RRGGBB o #RRGGBBAA."""
+    if len(s) == 9:
+        a, rgb = s[1:3], s[3:]
+        return "#" + rgb.upper() + ("" if a.upper() == "FF" else a.upper())
+    return s.upper()
 
 
 def text_height(el: dict) -> float:

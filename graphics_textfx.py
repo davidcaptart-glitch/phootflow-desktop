@@ -80,7 +80,7 @@ STYLES = [
 ]
 
 _KEYS = ("text", "font", "size", "bold", "italic", "spacing", "line", "w", "upper", "align", "curve", "color",
-         "grad", "tfx", "shadow", "outline", "outline_w")
+         "grad", "tfx", "shadow", "outline", "outline_w", "runs", "list")
 _layers_cache: OrderedDict = OrderedDict()
 _blur_cache: OrderedDict = OrderedDict()
 
