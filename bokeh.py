@@ -28,6 +28,8 @@ SUBJECTS = {"auto": "Automático", "person": "Persona (IA)", "object": "Objeto (
 R_MAX = 0.03     # radio de desenfoque máximo (fracción del lado largo) con cantidad 100
 SPEED_MAX = 0.12  # longitud del barrido máxima (fracción del lado largo)
 MASK_PX, REFINE_PX, WORK_PX, STRIP = 1024, 2048, 1600, 512
+GUIDE_SIGMA = 0.7  # suavizado de la guía del borde (a REFINE_PX): evita las motas del ruido en el pelo
+EDGE_PUSH = 1.35   # empuje del borde hacia el sujeto (1 = alfa tal cual)
 
 _CACHE: OrderedDict = OrderedDict()
 _LOCK = threading.Lock()
@@ -104,6 +106,25 @@ def _object(small):
     return _clean(cv2.GaussianBlur(a, (0, 0), 1.0))
 
 
+def fill_enclosed(a: np.ndarray, max_frac: float = 0.08) -> np.ndarray:
+    """Rellena los huecos del sujeto rodeados por él (p. ej. lo que lleva en las manos: la IA de personas deja
+    fuera el cartel o el ramo y se desenfocaría). Solo huecos pequeños (≤ max_frac del sujeto): el espacio entre
+    el brazo y el cuerpo, si es grande, sigue siendo fondo."""
+    sub = (a > 0.5).astype(np.uint8)
+    area = int(sub.sum())
+    if area < 50:
+        return a
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(1 - sub, connectivity=4)
+    h, w = a.shape
+    out = a.copy()
+    for i in range(1, n):
+        x, y, bw, bh, ar = stats[i]
+        touches = x == 0 or y == 0 or x + bw >= w or y + bh >= h
+        if not touches and ar <= max_frac * area:
+            out[lab == i] = 1.0
+    return out
+
+
 def subject_lowres(img: np.ndarray, subject: str = "auto", key: str = "", alpha: np.ndarray | None = None):
     """Alfa del sujeto a ≤MASK_PX (float32 0..1). `alpha`: máscara dada (subject="mask"), de cualquier tamaño."""
     small = _resize_long(np.clip(img, 0, 1), MASK_PX)
@@ -120,6 +141,7 @@ def subject_lowres(img: np.ndarray, subject: str = "auto", key: str = "", alpha:
         a = _person(small, key)
     if a is None:
         a = _object(small)
+    a = fill_enclosed(a)
     if key:
         with _LOCK:
             _CACHE[ck] = a
@@ -130,10 +152,12 @@ def subject_lowres(img: np.ndarray, subject: str = "auto", key: str = "", alpha:
 
 def _guided_coeffs(img, low_alpha):
     """Filtro guiado rápido: coeficientes (A, B) a ≤REFINE_PX con la luminancia como guía."""
-    g = _lum(_resize_long(np.clip(img, 0, 1), REFINE_PX))
+    # guía algo suavizada: con el ruido de ISO alto, una guía cruda llena el borde de motas
+    g = cv2.GaussianBlur(_lum(_resize_long(np.clip(img, 0, 1), REFINE_PX)), (0, 0), GUIDE_SIGMA)
     h, w = g.shape
     p = cv2.resize(low_alpha, (w, h), interpolation=cv2.INTER_LINEAR)
-    r = max(2.0, 0.004 * max(h, w))
+    # radio más corto que el de un degradado ancho: el borde sigue los mechones (≈18 px a 26 MP)
+    r = max(1.5, 0.003 * max(h, w))
     mg, mp_ = cv2.GaussianBlur(g, (0, 0), r), cv2.GaussianBlur(p, (0, 0), r)
     cov = cv2.GaussianBlur(g * p, (0, 0), r) - mg * mp_
     var = cv2.GaussianBlur(g * g, (0, 0), r) - mg * mg
@@ -151,6 +175,20 @@ def _up_strip(src, W, H, y0, y1):
                           borderMode=cv2.BORDER_REPLICATE)
 
 
+def _guide_full(src, W, H):
+    """Luminancia a resolución completa con el mismo suavizado relativo que la guía de `_guided_coeffs`."""
+    s = GUIDE_SIGMA * max(H, W) / max(REFINE_PX, 1)
+    g = _lum(src)
+    return cv2.GaussianBlur(g, (0, 0), s) if s > 0.3 else g
+
+
+def _alpha_strip(A, B, src, W, H, y0, y1):
+    """Alfa de las filas y0..y1, con el borde empujado hacia el sujeto (las puntas del pelo quedan nítidas en
+    vez de semitransparentes; lo que es claramente fondo, a≈0, no cambia)."""
+    a = _up_strip(A, W, H, y0, y1) * _guide_full(src, W, H) + _up_strip(B, W, H, y0, y1)
+    return np.clip(a * EDGE_PUSH, 0, 1)
+
+
 def subject_alpha(img, low_alpha) -> np.ndarray:
     """Alfa a resolución completa con el borde ajustado a la foto (pelo)."""
     A, B = _guided_coeffs(img, low_alpha)
@@ -158,8 +196,7 @@ def subject_alpha(img, low_alpha) -> np.ndarray:
     out = np.empty((H, W), np.float32)
     for y0 in range(0, H, STRIP):
         y1 = min(H, y0 + STRIP)
-        g = _lum(np.clip(img[y0:y1], 0, 1))
-        out[y0:y1] = np.clip(_up_strip(A, W, H, y0, y1) * g + _up_strip(B, W, H, y0, y1), 0, 1)
+        out[y0:y1] = _alpha_strip(A, B, np.clip(img[y0:y1], 0, 1), W, H, y0, y1)
     return out
 
 
@@ -180,6 +217,55 @@ def fill_hole(img: np.ndarray, hole: np.ndarray) -> np.ndarray:
         k = np.clip(den * 4, 0, 1)[..., None]
         cur = (num / np.maximum(den, 1e-6)[..., None]) * k + cur * (1 - k)
     return (img * w[..., None] + cur * (1 - w[..., None])).astype(np.float32)
+
+
+def _focus_ratio(g: np.ndarray, region: np.ndarray | None = None):
+    """Detalle fino frente a detalle medio (independiente de cuánta textura haya): alto = enfocado.
+    Devuelve (proporción, energía del detalle medio) suavizadas. `region` (0/1): solo esos píxeles cuentan en
+    las medias locales (para que el borde nítido del sujeto no haga parecer nítido el fondo de al lado)."""
+    h, w = g.shape
+    s = max(3.0, 0.012 * max(h, w))
+    d1 = np.abs(g - cv2.GaussianBlur(g, (0, 0), 1.0))
+    d2 = np.abs(g - cv2.GaussianBlur(g, (0, 0), 3.0))
+    if region is None:
+        e1, e2 = cv2.GaussianBlur(d1, (0, 0), s), cv2.GaussianBlur(d2, (0, 0), s)
+    else:
+        m = region.astype(np.float32)
+        k = np.maximum(cv2.GaussianBlur(m, (0, 0), s), 1e-3)
+        e1, e2 = cv2.GaussianBlur(d1 * m, (0, 0), s) / k, cv2.GaussianBlur(d2 * m, (0, 0), s) / k
+    return e1 / (e2 + 1e-4), e2
+
+
+def near_plane(small: np.ndarray, a: np.ndarray) -> np.ndarray:
+    """0..1: fondo que en la foto estaba tan nítido como el sujeto y junto a él (p. ej. la pared en la que se
+    apoya): está a su misma distancia, así que una cámara real apenas lo desenfocaría. Solo cuenta donde hay
+    textura (lo liso no se puede medir y desenfocado se ve igual) y cerca del sujeto en la imagen (un fondo
+    lejano nítido por un diafragma cerrado sigue desenfocándose)."""
+    h, w = a.shape
+    g = _lum(np.clip(small, 0, 1)).astype(np.float32)
+    k = max(3, int(0.01 * max(h, w))) | 1
+    core = cv2.erode((a > 0.7).astype(np.uint8), np.ones((k, k), np.uint8))
+    outside = cv2.erode((a < 0.3).astype(np.uint8), np.ones((k, k), np.uint8))
+    r_in, e_in = _focus_ratio(g, core)        # el sujeto, sin el fondo
+    r_out, e_out = _focus_ratio(g, outside)   # el fondo, sin el borde del sujeto
+    ratio = np.where(core > 0, r_in, r_out)
+    e2 = np.where(core > 0, e_in, e_out)
+    tex_s = e2[core > 0]
+    if core.sum() < 50 or float(np.percentile(tex_s, 50)) < 0.004:
+        return np.zeros((h, w), np.float32)
+    ref = float(np.percentile(ratio[(core > 0) & (e2 > 0.004)], 60)) if np.any((core > 0) & (e2 > 0.004)) else 0
+    if ref <= 0:
+        return np.zeros((h, w), np.float32)
+    near = _smoothstep(0.6, 0.92, ratio / ref) * _smoothstep(0.004, 0.012, e2)
+    sub = (a > 0.5).astype(np.uint8)
+    size = max(1.0, math.sqrt(float(sub.sum())))  # tamaño del sujeto en píxeles
+    dist = cv2.distanceTransform(1 - sub, cv2.DIST_L2, 3) / size
+    bgm = (a < 0.5).astype(np.float32)
+    near = (near * (1 - _smoothstep(0.15, 0.9, dist)) * bgm).astype(np.float32)
+    # suavizado solo con el fondo (normalizado): si entrara el sujeto (0) bajaría justo en el borde
+    s = max(4.0, 0.03 * max(h, w))
+    return (cv2.GaussianBlur(near, (0, 0), s) / np.maximum(cv2.GaussianBlur(bgm, (0, 0), s), 1e-3)
+            * bgm).astype(np.float32)
 
 
 def depth_map(a: np.ndarray) -> np.ndarray:
@@ -219,7 +305,7 @@ def _composite(img, alpha_low, bg_small):
     for y0 in range(0, H, STRIP):
         y1 = min(H, y0 + STRIP)
         src = np.clip(img[y0:y1], 0, 1)
-        a = np.clip(_up_strip(A, W, H, y0, y1) * _lum(src) + _up_strip(B, W, H, y0, y1), 0, 1)[..., None]
+        a = _alpha_strip(A, B, src, W, H, y0, y1)[..., None]
         out[y0:y1] = src * a + _up_strip(bg_small, W, H, y0, y1) * (1 - a)
     return out
 
@@ -248,7 +334,9 @@ def bokeh(img: np.ndarray, amount: float, subject: str = "auto", key: str = "", 
     x = (lin * boost[..., None]).astype(np.float32)
     radii = [rmax * f for f in (0.25, 0.5, 0.75, 1.0)]
     layers = [cv2.filter2D(x, -1, _disk(r), borderType=cv2.BORDER_REFLECT) if r >= 0.7 else x for r in radii]
-    t = np.clip((depth_map(a_s) - 0.25) / 0.25, 0, 3)
+    d = depth_map(a_s)
+    d = 0.25 + (d - 0.25) * (1 - 0.75 * near_plane(small, a_s))  # lo que estaba junto al sujeto, casi nítido
+    t = np.clip((d - 0.25) / 0.25, 0, 3)
     bg = np.zeros_like(x)
     for i in range(4):
         wgt = np.clip(1 - np.abs(t - i), 0, 1)[..., None]

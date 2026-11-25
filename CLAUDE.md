@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 240 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 241 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -238,8 +238,11 @@ python -m unittest discover -s tests   # 240 pruebas, sin fotos reales ni red
 - `bokeh.py` — desenfocar fondo y efecto velocidad (sin Qt). Sujeto: persona con `masks.segment` (IA), si no
   GrabCut desde la saliencia de `smartcrop`, o una máscara dada; a ≤1024 px (`subject_lowres`, caché por foto) y borde
   ajustado al pelo con filtro guiado rápido (coeficientes a ≤2048 px aplicados por franjas a resolución completa).
-  Fondo rellenado bajo el sujeto (pull-push, sin halos), profundidad aproximada (`depth_map`: lejos del sujeto y por
-  encima de sus pies = más), 4 capas de disco en luz lineal con las luces realzadas (discos de bokeh) a ≤1600 px.
+  Huecos del sujeto rodeados por él (lo que lleva en las manos) rellenos (`fill_enclosed`, ≤8 % de su área); borde
+  con guía suavizada (`GUIDE_SIGMA`, sin motas del ruido) y empujado hacia el sujeto (`EDGE_PUSH`: puntas del pelo
+  nítidas). Fondo rellenado bajo el sujeto (pull-push, sin halos), profundidad aproximada (`depth_map`: lejos del
+  sujeto y por encima de sus pies = más; `near_plane` la baja hasta un 75 % donde el fondo junto al sujeto estaba
+  tan nítido como él en la foto —la pared en la que se apoya—, medido con `_focus_ratio`, solo con textura), 4 capas de disco en luz lineal con las luces realzadas (discos de bokeh) a ≤1600 px.
   `speed`: barrido direccional (`auto_angle` por la forma y la posición del sujeto, o a mano) y estela detrás.
   Cantidad 0..100 (radio máx. 3 % del lado largo); `LEVELS` Suave/Medio/Fuerte/Muy fuerte (≈f/4…f/1.2). 26 MP:
   ≈1,3 s la máscara + ≈2,2 s el efecto. Studio: sección «Desenfocar fondo y velocidad» en Detalle (`bokeh`,

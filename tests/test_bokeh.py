@@ -30,6 +30,31 @@ class BokehTest(unittest.TestCase):
         ring = out[180:200, 270:285]  # fondo junto al sujeto: sin rojo arrastrado
         self.assertLess(ring[..., 0].mean() - ring[..., 1].mean(), 0.05)
 
+    def test_near_plane_wall(self):
+        """Fondo tan nítido como el sujeto y pegado a él (una pared) -> casi sin desenfoque; fondo que ya estaba
+        desenfocado en la foto -> desenfoque normal."""
+        import cv2
+        h, w = 300, 450
+        xx = np.arange(w)[None, :]
+        wall = np.repeat(np.where((xx // 6) % 2 == 0, 0.75, 0.2), h, 0).astype(np.float32)
+        # sujeto enfocado con el mismo tipo de detalle que la pared (rayas de otros tonos)
+        subj = np.repeat(np.where(((xx + 3) // 6) % 2 == 0, 0.9, 0.35), h, 0).astype(np.float32)
+        a = np.zeros((h, w), np.float32)
+        a[60:260, 180:270] = 1.0
+        for bg, near_expected in ((wall, True), (cv2.GaussianBlur(wall, (0, 0), 4), False)):
+            g = np.where(a > 0, subj, bg)
+            img = np.dstack([g] * 3).astype(np.float32)
+            n = B.near_plane(img, a)
+            beside = float(n[100:220, 280:300].mean())  # junto al sujeto
+            if near_expected:
+                self.assertGreater(beside, 0.4)
+                out = B.bokeh(img, 80, subject="mask", alpha=a)
+                far = B.bokeh(img, 80, subject="mask", alpha=a)[100:220, 420:440].std()
+                self.assertGreater(out[100:220, 280:300].std(), far)  # la pared pegada conserva más los listones
+            else:
+                self.assertLess(beside, 0.15)
+        self.assertEqual(float(B.near_plane(np.zeros((h, w, 3), np.float32), a).max()), 0.0)  # sin textura
+
     def test_disc_highlight(self):
         img = np.full((300, 300, 3), 0.05, np.float32)
         img[148:152, 148:152] = 1.0
