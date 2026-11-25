@@ -12,7 +12,7 @@ también Nikon `.NEF`). Interfaz, comentarios y mensajes en español.
 pip install -r requirements.txt
 python app.py
 python app.py --selftest               # prueba de humo (la usa el build); log en %TEMP%\phootflow_selftest.log
-python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
+python -m unittest discover -s tests   # 159 pruebas, sin fotos reales ni red
 ```
 
 - `opencv-python-headless` < 5 (la 5.x no trae los Haar cascades).
@@ -61,7 +61,20 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   `learn_style()` (parejas original↔edición, curva L por CDF + color) y `learn_from_finals()` (solo acabadas:
   distribución objetivo). Estilos en `%APPDATA%\PhootFlow\estilos\*.json`.
 - `app.py` — ventana `Main` (barra lateral + rejilla con `ThumbDelegate` + vista previa), `Worker`
-  (`analyze`/`export`/`auto`), `LearnDialog`, banner de actualización, `selftest()`.
+  (`analyze`/`export`/`auto`/`people`/`faces`), `LearnDialog`, banner de actualización, `selftest()`.
+- `people.py` (sin Qt) / `people_ui.py` — **Personas** de Events. SFace de OpenCV Zoo (Apache-2.0, 39 MB,
+  descargado con SHA-256 por `E.setup_faces`; `cv2.FaceRecognizerSF`, uno por hilo con el pool de
+  `prepare_detectors`, alineado con los puntos de YuNet). `analyze` guarda en `Photo.people` las cajas, la calidad y
+  los vectores (float16 en base64, en `analisis.json`; ≈15 ms por cara, hasta 12 por foto); las cachés antiguas se
+  completan desde la vista previa (`E.face_pass_many`, sin revelar el RAW). `People.build` agrupa por enlace medio
+  (`JOIN`/`MERGE`; el centro normalizado de caras con ruido se parece de más y unía a dos hermanos), sin caras
+  diminutas, borrosas ni dudosas; lo hecho a mano (nombre, unir, sacar o pasar caras, «No es X») va en
+  `<salida>/.phootflow/personas.json` y manda al reagrupar. Personas conocidas entre sesiones (`Known`,
+  `%APPDATA%\PhootFlow\personas\conocidas.json`, solo este equipo): de cada sesión se recuerdan hasta 12 caras de
+  cada persona con nombre confirmado; un grupo nuevo que se parece (`KNOWN` + margen) recibe el nombre como
+  «reconocida» (`auto`, con «?») hasta aceptarlo. `PeopleBar` (bajo los filtros; se combina con ellos en `visible`,
+  «Juntas» = todas a la vez) y `Worker("people")`: exporta solo sus fotos sin revelar las que ya tienen JPG de entrega
+  y, con «una carpeta por persona», copia ese JPG (color y B/N) a `Personas/<nombre>/` (`copy_to_folders`).
 - `progress_panel.py` — `ExportProgress`: ventana no modal al exportar o procesar todo (pasos con ○/◐/✓, barra
   general con «quedan ~», fotos en curso y terminadas con su miniatura, Cancelar, Abrir la carpeta, seguir en
   segundo plano; «Ver progreso» la vuelve a abrir). El `Worker` emite `plan`, `step` e `item`

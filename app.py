@@ -27,6 +27,7 @@ import session_presets as SP
 import compare as CMP
 import zoomview as Z
 import engine as E
+import people_ui as PUI
 import dcp as DCP
 import license as LIC
 import luts as L
@@ -106,6 +107,10 @@ class Worker(QThread):
                 self.done.emit(self.analyze(), "")
             elif self.mode == "export":
                 self.export()
+            elif self.mode == "people":
+                self.export_people()
+            elif self.mode == "faces":
+                self.done.emit(self.find_faces(), "")
             else:  # automático: analizar, seleccionar y exportar sin parar
                 self.plan.emit([("analyze", "Analizar y seleccionar", None)] + self._export_plan(None))
                 self.step.emit("analyze", "active", "")
@@ -142,6 +147,9 @@ class Worker(QThread):
         extra = f" ({reused} recuperadas de la vez anterior)" if reused else ""
         self.progress.emit(0, max(todo, 1), f"Analizando {todo} fotos{extra}…")
         E.analyze_many(self.photos, self.st, self.st.workers, on_done, lambda: self.cancel)
+        if not self.cancel:  # análisis de una versión sin «Personas»: las caras salen de la vista previa
+            E.face_pass_many(self.photos, self.st.workers, lambda k, n: self.progress.emit(
+                k, n, f"Buscando personas en las fotos ya analizadas ({k}/{n})…"), lambda: self.cancel)
         E.save_session(self.photos, self.st, wd)
         self._write_session_file()
         if self.cancel:
@@ -166,6 +174,75 @@ class Worker(QThread):
         saved = f" Revisión guardada: {rev} ya revisadas; pulsa «Revisar» para seguir." if rev else ""
         return detected + f"Análisis: {keep} para editar, {n - keep} descartadas" + \
             (f", {warn} con avisos." if warn else ".") + saved
+
+    def find_faces(self) -> str:
+        """Caras para reconocer personas de las fotos analizadas que aún no las tienen."""
+        n = E.face_pass_many(self.photos, self.st.workers, lambda k, n: self.progress.emit(
+            k, n, f"Buscando personas ({k}/{n})…"), lambda: self.cancel)
+        E.save_session(self.photos, self.st, work_dir(self.out))
+        return f"Personas: {n} fotos revisadas." if n else "No había fotos sin revisar."
+
+    def export_people(self):
+        """Exporta solo las fotos de unas personas (`self.photos`). Las que ya tienen su JPG de entrega no se
+        revelan otra vez; con `people_folders` (nombre → fotos) se copian a «Personas/<nombre>/»."""
+        import dataclasses
+        import people as PE
+        folders = getattr(self, "people_folders", {}) or {}
+        sizes = self.st.sizes
+        dsize = E.delivery_size(sizes)
+
+        def have(p):
+            return os.path.exists(E.delivery_path(self.out, p.name, dsize, False, sizes))
+
+        todo = [p for p in self.photos if not have(p)]
+        studio = [p for p in todo if os.path.normcase(p.path) in self.overrides]
+        todo = [p for p in todo if p not in studio]
+        import edits_engine as EE
+        try:
+            edits = EE.events_todo(todo, self.src)
+        except Exception:
+            edits = []
+        plan = [("edit", "Revelar las fotos que faltan", len(todo) + len(studio))]
+        if folders:
+            plan.append(("people", "Copiar a «Personas» (una carpeta por persona)", None))
+        self.plan.emit(plan)
+        t0 = time.time()
+        self.step.emit("edit", "active", f"{len(self.photos) - len(todo) - len(studio)} ya exportadas")
+        st = dataclasses.replace(self.st, resume=False)  # solo van las que no tienen JPG: no saltar ninguna
+
+        def on_done(k, n):
+            self.progress.emit(k, n, f"Editando {k}/{n} · quedan ~{_fmt_time((time.time() - t0) / k * (n - k))}")
+
+        files = E.export_many(todo, st, self.out, __version__, on_done, lambda: self.cancel,
+                              on_event=lambda ph_, ph: self.item.emit("edit", ph_, ph.path))
+        if studio and not self.cancel:
+            import studio_engine as SE
+            for p in studio:
+                self.item.emit("edit", "start", p.path)
+                try:
+                    files += len(SE.export_events(p, self.overrides[os.path.normcase(p.path)], self.st, self.out,
+                                                  __version__))
+                except Exception as e:
+                    p.error = f"{type(e).__name__}: {e}"
+                self.item.emit("edit", "error" if p.error else "done", p.path)
+        if edits and not self.cancel:  # el retoque de Edits sustituye a la foto en Entrega/Color
+            files += EE.export_for_events(edits, self.src, self.out, sizes, self.st.quality)
+        errs = sum(1 for p in todo + studio if p.error)
+        self.step.emit("edit", "error" if errs else "done", f"{errs} con error" if errs else "")
+        if self.cancel:
+            return self.done.emit("Exportación cancelada (lo ya exportado se conserva).", "")
+        copied = 0
+        if folders:
+            self.step.emit("people", "active", "")
+            copied = PE.copy_to_folders(self.out, folders, sizes, E.delivery_path, E.delivery_size,
+                                        lambda a, b: self.progress.emit(a, b, f"Copiando a «Personas» ({a}/{b})"))
+            self.step.emit("people", "done", f"{copied} archivos")
+        msg = f"Listo: {len(self.photos)} fotos" + (" de " + ", ".join(folders) if folders else "")
+        msg += f" ({len(todo) + len(studio)} reveladas ahora, {files} archivos JPG"
+        msg += f", {copied} copias en «Personas»)." if folders else ")."
+        if errs:
+            msg += f" {errs} fotos fallaron."
+        self.done.emit(msg, "")
 
     def _write_session_file(self):
         """Deja «<sesión>.phootflow» en la carpeta: con doble clic vuelve a abrir esta sesión."""
@@ -1276,6 +1353,11 @@ class Main(QMainWindow):
         for c in (self.chip_keep, self.chip_drop, self.chip_warn):
             bar.addWidget(c)
         v.addLayout(bar)
+        self.people_bar = PUI.PeopleBar(self)  # caras de cada persona: filtrar, nombrar y exportar sus fotos
+        self.people_bar.changed.connect(self.apply_filter)
+        self.people_bar.export_requested.connect(self.export_people)
+        self.people_bar.backfill_requested.connect(self.find_faces)
+        v.addWidget(self.people_bar)
 
         # rejilla + vista previa
         split = QSplitter(Qt.Horizontal)
@@ -1741,9 +1823,12 @@ class Main(QMainWindow):
             import masks as M
             M.configure(model_dir)
             E.setup_scene_ai(model_dir, prog)
-            bits = ["ojos cerrados" if E.EYES["ready"] else "", "tipo de evento" if E.AI["ready"] else ""]
+            E.setup_faces(model_dir, lambda a, b: b and self.models_status.emit(
+                f"Descargando el modelo de IA de personas ({a * 100 // b} %)…"))
+            bits = ["ojos cerrados" if E.EYES["ready"] else "", "tipo de evento" if E.AI["ready"] else "",
+                    "personas" if E.FACES["ready"] else ""]
             bits = [b for b in bits if b]
-            self.models_status.emit("IA lista: " + " y ".join(bits) + "." if bits else
+            self.models_status.emit("IA lista: " + ", ".join(bits) + "." if bits else
                                     "IA no disponible (sin conexión la primera vez): se usan los métodos clásicos.")
 
         threading.Thread(target=job, daemon=True).start()
@@ -1826,7 +1911,7 @@ class Main(QMainWindow):
 
     def visible(self, ph: E.Photo) -> bool:
         return {"all": True, "keep": ph.keep, "drop": not ph.keep and bool(ph.thumb or ph.error),
-                "warn": bool(ph.warn)}[self.filter]
+                "warn": bool(ph.warn)}[self.filter] and self.people_bar.match(ph)
 
     def set_filter(self, key):
         self.filter = key
@@ -1847,6 +1932,7 @@ class Main(QMainWindow):
             it.setToolTip(os.path.basename(ph.path))
             self.grid.addItem(it)
         self.refresh_counts()
+        self.people_bar.rebuild()
 
     def refresh_counts(self):
         done = [p for p in self.photos if p.thumb or p.error]
@@ -2142,6 +2228,27 @@ class Main(QMainWindow):
         w.overrides = review.pending_studio_paths(self.src.text().strip())
         self.run(w)
 
+    def export_people(self, pids: list, per_folder: bool, only_keep: bool, together: bool):
+        """Exporta solo las fotos de esas personas (y, si se pide, una carpeta por persona en «Personas»)."""
+        if self.worker:
+            return
+        photos, folders = self.people_bar.plan(pids, only_keep, together)
+        if not photos:
+            return self.status.setText("Esas personas no salen en ninguna foto aprobada.")
+        self.save()
+        import review
+        src = self.src.text().strip()
+        w = Worker("people", photos, self.settings(), src, self.out_dir(), None)
+        w.overrides = review.pending_studio_paths(src)
+        w.people_folders = folders if per_folder else {}
+        self.run(w)
+
+    def find_faces(self):
+        """Busca las caras para reconocer personas en las fotos analizadas con una versión anterior."""
+        if self.worker or not E.FACES["ready"]:
+            return
+        self.run(Worker("faces", self.photos, self.settings(), self.src.text().strip(), self.out_dir()))
+
     # ----------------------------------------------------- revisión
     def save_review(self, force: bool = False):
         """Con el autoguardado, cada decisión se guarda al momento; si está apagado, queda pendiente hasta
@@ -2272,20 +2379,22 @@ class Main(QMainWindow):
     def run(self, worker):
         st_cube = worker.st.style.get("cube") or ""
         self.save_session_settings()  # la sesión recuerda con qué ajustes se analizó y exportó
-        if worker.mode in ("analyze", "auto"):
+        if worker.mode in ("analyze", "auto", "faces"):
             E.prepare_detectors(worker.st.workers)  # en el hilo principal (ver engine.prepare_detectors)
         self.worker = worker
+        self._worker_mode = worker.mode
         # se guarda hasta que el hilo termine de verdad: destruir un QThread en marcha aborta el programa
         self._threads.add(worker)
         worker.finished.connect(lambda w=worker: self._threads.discard(w))
         worker.progress.connect(self.on_progress)
-        if worker.mode in ("export", "auto"):  # panel con los pasos, las fotos en curso y el tiempo que queda
+        if worker.mode in ("export", "auto", "people"):  # panel con los pasos, las fotos en curso y el tiempo que queda
             import progress_panel
             if self.prog_panel is not None:
                 self.prog_panel.close()
                 self.prog_panel.deleteLater()
-            pp = progress_panel.ExportProgress(self, "Procesando la sesión" if worker.mode == "auto"
-                                               else "Exportando la sesión")
+            pp = progress_panel.ExportProgress(self, {"auto": "Procesando la sesión",
+                                                      "people": "Exportando las fotos de unas personas"}.get(
+                worker.mode, "Exportando la sesión"))
             worker.plan.connect(pp.set_plan)
             worker.step.connect(pp.set_step)
             worker.item.connect(pp.on_item)
@@ -2336,6 +2445,8 @@ class Main(QMainWindow):
 
     def on_done(self, msg, link):
         self.worker = None
+        if getattr(self, "_worker_mode", "") in ("analyze", "auto", "faces"):
+            self.people_bar.rebuild()
         self._progress_end(msg, ok="cancelad" not in msg)
         QTimer.singleShot(0, self._warn_dng)
         resume, self._resume = self._resume, False
@@ -2850,6 +2961,19 @@ def selftest() -> int:
         m.fill_grid()
         m.grid.setCurrentRow(0)
         assert m.preview.pm is not None
+        # personas: el reconocedor está en el OpenCV empaquetado y el panel agrupa (vectores simulados)
+        assert hasattr(E.cv2, "FaceRecognizerSF"), "OpenCV sin FaceRecognizerSF"
+        import people as PE
+        m.src.setText(d)
+        m.out.setText(out)  # personas.json en la carpeta de prueba, nunca en la última sesión de verdad
+        v = PE._unit(np.ones((1, 128), np.float32))
+        for p_ in ps[:2]:
+            p_.people = {"v": 1, "b": [[0.1, 0.1, 0.3, 0.3, 80, 0.95, 200]], "e": PE.encode(v)}
+        m.people_bar.rebuild()
+        assert m.people_bar.people is not None and len(m.people_bar.people.groups()) == 1
+        m.people_bar._toggle(m.people_bar.people.groups()[0], True)
+        assert sum(not m.grid.item(i).isHidden() for i in range(m.grid.count())) == 2
+        m.people_bar.clear()
         # los dos entornos y el interruptor
         global _SELFTEST_SHELL
         sh = _SELFTEST_SHELL = Shell()
