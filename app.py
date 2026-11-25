@@ -982,6 +982,12 @@ class Main(QMainWindow):
         self.c_enh = UI.as_chip(QCheckBox("Mejorar con IA las que lo piden"), "wand",
                                 "Tras el análisis, marca «Mejorar con IA» en las fotos blandas, con ruido o con caras\n"
                                 "poco nítidas (lento: ≈1 min por foto al exportar). En la revisión se quita foto a foto.")
+        self.c_portrait = UI.as_chip(QCheckBox("Retocar retratos"), "eyes",
+                                     "Al exportar, las fotos con caras grandes salen con el retoque de retrato\n"
+                                     "sobre su revelado: piel suavizada, volumen (dodge and burn), ojeras, dientes\n"
+                                     "y ojos, en todos los formatos y en B/N. En la revisión se quita o se pone\n"
+                                     "foto a foto.")
+        self.c_portrait.setChecked(True)
         self.c_focus = QCheckBox("Desenfocadas")
         self.c_exp = QCheckBox("Mal expuestas")
         self.c_dup = QCheckBox("Repetidas")
@@ -1191,7 +1197,8 @@ class Main(QMainWindow):
         cv.addWidget(labeled("Fotos a la vez", self.workers))
         self.sheet.add(c)
         c, cv = card("Al exportar")
-        cv.addWidget(UI.flow([self.c_review, self.c_move, self.c_exif, self.c_xmp, self.c_zip, self.c_trash, self.c_del_disc]))
+        cv.addWidget(UI.flow([self.c_review, self.c_portrait, self.c_move, self.c_exif, self.c_xmp, self.c_zip,
+                              self.c_trash, self.c_del_disc]))
         cv.addWidget(labeled("Desenfocar fondo", self.bokeh_cb))
         cv.addWidget(UI.flow([self.c_crop, self.c_enh]))
         self.sheet.add(c)
@@ -1480,6 +1487,7 @@ class Main(QMainWindow):
         self.cloud.setCurrentIndex(int(g("cloud", 0)))
         self.cloud_folder.setText(g("cloud_folder", ""))
         self.bokeh_cb.setCurrentIndex(max(0, self.bokeh_cb.findData(g("bokeh", "") or "")))
+        self.c_portrait.setChecked(b("portrait", True))
         self.c_crop.setChecked(b("crop", True))
         self.c_enh.setChecked(b("enhance", False))
 
@@ -1496,7 +1504,7 @@ class Main(QMainWindow):
                      ("quality", st.quality), ("workers", st.workers),
                      ("cloud", self.cloud.currentIndex()), ("cloud_folder", self.cloud_folder.text()),
                      ("crop", st.smart_crop), ("enhance", st.auto_enhance),
-                     ("bokeh", st.bokeh)]:
+                     ("bokeh", st.bokeh), ("portrait", st.portrait)]:
             self.s.setValue(k, v)
 
     # ---------------------------------------------------- perfil de cámara (DCP)
@@ -1540,7 +1548,7 @@ class Main(QMainWindow):
             delete_discards=self.c_del_disc.isChecked(), keep_exif=self.c_exif.isChecked(),
             write_xmp=self.c_xmp.isChecked(), workers=self.workers.value(), bw=self.c_bw.isChecked(),
             bw_style=self.bw_style_cb.currentText(), look=self.look_cb.currentText(),
-            bokeh=self.bokeh_cb.currentData() or "",
+            bokeh=self.bokeh_cb.currentData() or "", portrait=self.c_portrait.isChecked(),
             smart_crop=self.c_crop.isChecked(), auto_enhance=self.c_enh.isChecked(),
             cache_dir=os.path.join(work_dir(self.out_dir()), "previas"), resume=True)
 
@@ -1560,7 +1568,7 @@ class Main(QMainWindow):
             "exif": self.c_exif.isChecked(), "xmp": self.c_xmp.isChecked(), "zip": self.c_zip.isChecked(),
             "trash_orig": self.c_trash.isChecked(), "del_disc": self.c_del_disc.isChecked(),
             "cloud": self.cloud.currentIndex(), "cloud_folder": self.cloud_folder.text(),
-            "up_orig": self.c_up_orig.isChecked(),
+            "up_orig": self.c_up_orig.isChecked(), "portrait": self.c_portrait.isChecked(),
             "lut": self.lut_cb.currentData() or "", "lutk": self.lut_k.value(),
             "cam_prof": self.camera_profile(), "bokeh": self.bokeh_cb.currentData() or "",
             "crop": self.c_crop.isChecked(), "enhance": self.c_enh.isChecked()}
@@ -1571,7 +1579,7 @@ class Main(QMainWindow):
                   "exp": self.c_exp, "dup": self.c_dup, "eyes": self.c_eyes, "orig": self.r_orig, "bw": self.c_bw,
                   "review": self.c_review, "move": self.c_move, "exif": self.c_exif, "xmp": self.c_xmp,
                   "zip": self.c_zip, "trash_orig": self.c_trash, "del_disc": self.c_del_disc,
-                  "up_orig": self.c_up_orig}
+                  "up_orig": self.c_up_orig, "portrait": self.c_portrait}
         checks.update(crop=self.c_crop, enhance=self.c_enh)
         combos = {"look": self.look_cb, "nr": self.nr, "sens": self.sens, "bw_style": self.bw_style_cb}
         if "style" in d and self.style_cb.findText(d["style"]) >= 0:

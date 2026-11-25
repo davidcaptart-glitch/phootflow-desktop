@@ -180,6 +180,7 @@ class Settings:
     cull_eyes: bool = False   # descartar (no solo avisar) fotos con ojos cerrados claros
     camera_profile: str = dcp.AUTO  # perfil DCP de los RAW (AUTO = el estilo de la cámara; NONE = LibRaw)
     bokeh: str = ""         # desenfocar fondo en las fotos con sujeto claro (bokeh.LEVELS; "" = no)
+    portrait: bool = False  # «Retocar retratos»: piel, volumen, ojeras, dientes y ojos en las de caras grandes
     smart_crop: bool = True     # la entrega con el recorte inteligente (False: con la proporción de la cámara)
     auto_enhance: bool = False  # «Mejorar con IA» en las que lo sugieren, sin esperar a la revisión
 
@@ -237,6 +238,7 @@ class Photo:
     look: str = ""              # look de color de esta foto ("" = el de la sesión)
     bokeh: str = ""             # desenfocar fondo: "" = la regla de la sesión, BOKEH_NONE = no, o un nivel
     speed: dict = field(default_factory=dict)    # efecto velocidad (revisión): {amount, angle (None = auto), trail}
+    retouch: str = ""           # retoque de retrato: "" = la regla de la sesión, RETOUCH_NONE = no, RETOUCH_ON = sí
     meta: dict = field(default_factory=dict)  # EXIF útil para copiar a los JPG
     error: str = ""
 
@@ -1723,9 +1725,37 @@ def blur_fx(img: np.ndarray, ph: Photo, st: Settings) -> np.ndarray:
     return img
 
 
+RETOUCH_NONE, RETOUCH_ON = "no", "si"
+PORTRAIT_MIN_FACE = 0.05  # ancho de la cara más grande (fracción del ancho) para que se note el retoque
+
+
+def photo_retouch(ph: Photo, st: Settings) -> bool:
+    """¿Lleva esta foto el retoque de retrato? Lo elegido en la revisión manda; si no, la regla de la sesión:
+    con caras y la más grande de al menos PORTRAIT_MIN_FACE del ancho (análisis antiguo sin cajas: con caras)."""
+    if ph.retouch:
+        return ph.retouch == RETOUCH_ON
+    if not st.portrait or not ph.faces:
+        return False
+    return not ph.face_boxes or max(b[2] - b[0] for b in ph.face_boxes) >= PORTRAIT_MIN_FACE
+
+
+def portrait_fx(img: np.ndarray, ph: Photo, st: Settings, key: str = "") -> np.ndarray:
+    """Retoque de retrato de Edits (piel + retrato automático) sobre el revelado de Events: el mismo aspecto que
+    el resto de la sesión, y llega a todos los formatos y al B/N."""
+    if not photo_retouch(ph, st):
+        return img
+    try:
+        import edits_engine as EE
+        return EE.auto_portrait(img, key or ph.path + "#events")
+    except Exception as e:  # sin el retoque antes que sin la foto
+        print("portrait_fx:", type(e).__name__, e)
+        return img
+
+
 def export(ph: Photo, st: Settings, out_dir: str, version: str = "") -> list[str]:
     """Revela la foto y guarda el formato sugerido más los formatos elegidos, en cada tamaño."""
     img = develop(ph, st)
+    img = portrait_fx(img, ph, st)
     img = blur_fx(img, ph, st)
     exif = build_exif(ph, version) if st.keep_exif else b""
     H, W = img.shape[:2]
@@ -1886,7 +1916,8 @@ def save_session(photos: list[Photo], st: Settings, work_dir: str) -> None:
 
 
 CUSTOM_CROP = "Personalizado"  # recorte dibujado a mano en la revisión
-_REVIEW_FIELDS = ("keep", "reviewed", "reason", "best", "look", "bw_style", "lut_strength", "bokeh", "speed")
+_REVIEW_FIELDS = ("keep", "reviewed", "reason", "best", "look", "bw_style", "lut_strength", "bokeh", "speed",
+                  "retouch")
 
 
 def has_saved_work(work_dir: str) -> bool:
@@ -1941,6 +1972,7 @@ def load_review(photos: list[Photo], work_dir: str) -> int:
         ph.look, ph.bw_style = r.get("look") or "", r.get("bw_style") or ""
         ph.lut_strength = r.get("lut_strength")
         ph.bokeh, ph.speed = r.get("bokeh") or "", dict(r.get("speed") or {})
+        ph.retouch = r.get("retouch") or ""
         if r.get("reviewed"):
             ph.keep, ph.reason, ph.reviewed = bool(r.get("keep")), r.get("reason") or "", True
             n += 1

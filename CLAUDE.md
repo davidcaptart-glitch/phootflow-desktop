@@ -123,7 +123,15 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   (`quad`, Ctrl+T), lienzos en blanco (`new_canvas`, en `edits/lienzos/`, fuera de Events), capas de pintura
   (`paint`: pincel B y borrador E, presión de tableta, caché incremental) grupos (`group` + `parent`, Ctrl+G), efectos de capa (`fx`: sombra, resplandor, desenfoque y movimiento)
   y rayos de luz (`rays`). Retrato: capa `portrait` (automática en todas las caras: dientes, ojos, iris, labios,
-  colorete, igualar tono y dodge and burn guiado `SCULPT`), Filtro › «Retoque de retrato en un clic», selecciones
+  colorete, igualar tono, dodge and burn guiado `SCULPT` y ojeras `undereye`: media luna bajo el párpado
+  inferior que toma la luz y el color del pómulo; las capas guardadas sin la clave valen 0, `PORTRAIT_OLD`), Filtro › «Retoque de retrato en un clic» y
+  «Quitar imperfecciones» (`find_blemishes`: diferencia de gaussianas en L y a* dentro de `blemish_skin`, manchas
+  redondas de 0,2–1,6 % del ancho de la cara → `blemish_ops`, trazos del corrector con `"auto": True` en la capa
+  «Imperfecciones (automático)»), franja de sugerencias al abrir una foto (`retouch_hints`: granos, ojeras,
+  dientes amarillentos; un solo hilo, `_hints_loop`). En Events, «Retocar retratos» (chip `Main.c_portrait`,
+  `Settings.portrait`, clave `portrait`; `ph.retouch` en la revisión): `E.portrait_fx` → `EE.auto_portrait` (piel +
+  retrato) sobre el revelado de Events, en todos los formatos y en el B/N; con caras de ≥ 5 % del ancho
+  (`photo_retouch`). Informe: `docs/retoques_whitewall.md`. Selecciones
   y máscaras por partes con IA (`{"type": "part"}`, `EE.PARTS`; la barba es `masks.beard_alpha`), ajustes
   `sharpen`, `vignette` y `hair` (Pelo y barba) y corrector con `freq` color/textura. Las imágenes y pinturas se componen solo en su caja; la caché retoma el paso guardado
   más alto y guarda el de debajo de la capa elegida (`Compositor.focus`); al arrastrar, borrador a 1024 px. `attach_studio_button` añade «Editar en Edits» a Studio sin tocar

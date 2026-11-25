@@ -79,10 +79,13 @@ FX_DEFAULTS = {"shadow": {"on": False, "color": "#000000", "opacity": 60, "angle
                "motion": {"on": False, "amount": 2.0, "angle": 0}}  # orden por defecto al crear capas
 # retoque de retrato automático (0..100 salvo `lips`, -100..100); los colores, "" = sin cambio
 PORTRAIT_DEFAULTS = {"teeth": 40, "eyes": 35, "whites": 30, "iris_color": "", "iris_amount": 60, "lips": 10,
-                     "lip_color": "", "lip_amount": 50, "blush": 0, "even": 25, "sculpt": 30}
+                     "lip_color": "", "lip_amount": 50, "blush": 0, "even": 25, "sculpt": 30, "undereye": 30}
+# capas de retrato guardadas antes de que existiera un regulador: valen 0 (no cambian al abrirlas)
+PORTRAIT_OLD = {"undereye": 0}
 PORTRAIT_LABELS = {"teeth": "Blanquear dientes", "eyes": "Iris: luz y nitidez", "whites": "Blanco de los ojos",
                    "iris_amount": "Color del iris", "lips": "Intensidad de labios", "lip_amount": "Color de labios",
-                   "blush": "Colorete", "even": "Igualar tono de piel", "sculpt": "Volumen (dodge and burn)"}
+                   "blush": "Colorete", "even": "Igualar tono de piel", "sculpt": "Volumen (dodge and burn)",
+                   "undereye": "Ojeras"}
 ANCHORS = {"lt": (0, 0), "mt": (0.5, 0), "rt": (1, 0), "lm": (0, 0.5), "mm": (0.5, 0.5), "rm": (1, 0.5),
            "lb": (0, 1), "mb": (0.5, 1), "rb": (1, 1)}
 FORMATS = {"jpg": "JPG", "png": "PNG (con transparencia)", "webp": "WebP (web y redes, transparencia)",
@@ -743,11 +746,19 @@ def apply_skin(img: np.ndarray, lay: dict, key: str = "") -> np.ndarray:
         return img
     texture = float(lay.get("texture", 45)) / 100.0
     k = _side(img) / 2048.0
-    smooth = np.stack([SE.guided(np.ascontiguousarray(img[..., c]), 7.0 * k, 0.0025) for c in range(3)], -1)
-    fine = img - cv2.GaussianBlur(img, (0, 0), max(0.6, 1.1 * k))
+    a = skin_mask(img, lay, key)
+    # solo en la caja de la piel, con margen para los filtros (en una foto de evento, mucho menos que la foto)
+    bb = _bbox(a, int(45 * k) + 16)
+    if bb is None:
+        return img
+    x0, y0, x1, y1 = bb
+    reg = np.ascontiguousarray(img[y0:y1, x0:x1])
+    smooth = np.stack([SE.guided(np.ascontiguousarray(reg[..., c]), 7.0 * k, 0.0025) for c in range(3)], -1)
+    fine = reg - cv2.GaussianBlur(reg, (0, 0), max(0.6, 1.1 * k))
     target = smooth + fine * texture
-    a = skin_mask(img, lay, key)[..., None] * amount
-    return np.clip(img + (target - img) * a, 0, 1)
+    out = img.copy()
+    out[y0:y1, x0:x1] = np.clip(reg + (target - reg) * (a[y0:y1, x0:x1, None] * amount), 0, 1)
+    return out
 
 
 DETECTS = {"person": "Persona (IA)", "object": "Objeto o producto (automático)",
@@ -938,10 +949,53 @@ def _hex_lab(c: str) -> np.ndarray:
     return _lab(_hex(c).reshape(1, 1, 3))[0, 0]
 
 
+# párpado inferior de cada ojo en la malla facial (de la comisura exterior a la interior)
+LOWER_LIDS = ([33, 7, 163, 144, 145, 153, 154, 155, 133], [263, 249, 390, 373, 374, 380, 381, 382, 362])
+
+
+def undereye_alpha(shape, pts, x0=0, y0=0) -> np.ndarray:
+    """Zona de las ojeras de una cara: una media luna bajo cada párpado inferior, más honda en el centro
+    (hasta ~1/3 de la distancia ojos-boca), con el borde muy suave."""
+    import masks as M
+    h, w = shape[:2]
+    ax = M.face_axes(pts)
+    a = np.zeros((h, w), np.float32)
+    off = np.array([x0, y0], np.float32)
+    for lid in LOWER_LIDS:
+        top = pts[lid] - off
+        n = len(lid)
+        depth = 0.06 + 0.26 * np.sin(np.linspace(0, np.pi, n))  # en distancias ojos-boca
+        bot = top + ax["v"][None, :] * (ax["d"] * depth)[:, None]
+        poly = np.concatenate([top, bot[::-1]]) + ax["v"] * ax["d"] * 0.04  # un poco por debajo de las pestañas
+        cv2.fillPoly(a, [np.round(poly).astype(np.int32)], 1.0, cv2.LINE_AA)
+    return cv2.GaussianBlur(a, (0, 0), max(1.0, 0.06 * ax["d"])) if a.any() else a
+
+
+def _undereye(lab: np.ndarray, shape, faces, x0, y0, eyes: np.ndarray, k: float) -> None:
+    """Ojeras: la piel bajo el ojo se acerca a la luz y el color del pómulo de esa cara (solo se aclara lo que
+    está más oscuro que él), como el dodge suave más «Solo color» del retoque a mano. Cambia `lab`."""
+    L, A_, B_ = lab[..., 0], lab[..., 1], lab[..., 2]
+    shield = np.clip(1 - cv2.dilate(eyes, np.ones((3, 3), np.uint8), iterations=2) * 1.5, 0, 1)
+    for f in faces:
+        u = undereye_alpha(shape, f, x0, y0) * shield
+        if u.max() < 0.05:
+            continue
+        cheek = np.clip(_blobs(shape, f, [(-0.24, 0.62, 0.07, 1.0), (0.24, 0.62, 0.07, 1.0)], x0, y0), 0, 1)
+        wsum = float(cheek.sum())
+        if wsum < 1:
+            continue
+        ref = [float((ch * cheek).sum() / wsum) for ch in (L, A_, B_)]
+        wgt = u * k
+        L += np.maximum(ref[0] - L, 0) * wgt * 0.75
+        A_ += (ref[1] - A_) * wgt * 0.6
+        B_ += (ref[2] - B_) * wgt * 0.6
+
+
 def apply_portrait(img: np.ndarray, lay: dict, key: str = "") -> np.ndarray:
     """Retoque de retrato en todas las caras, sin pincel: dientes, ojos, iris, labios, colorete, tono de la piel
     y volumen. Las zonas salen de la malla facial y de la segmentación de la persona (IA local)."""
-    p = dict(PORTRAIT_DEFAULTS, **{k: lay[k] for k in PORTRAIT_DEFAULTS if k in lay})
+    p = dict(PORTRAIT_DEFAULTS, **PORTRAIT_OLD)
+    p.update({k: lay[k] for k in PORTRAIT_DEFAULTS if k in lay})
     try:
         import masks as M
         faces = M.faces_scaled(np.ascontiguousarray(img, dtype=np.float32), key)
@@ -1004,6 +1058,8 @@ def apply_portrait(img: np.ndarray, lay: dict, key: str = "") -> np.ndarray:
         A_ += wgt * 14.0
         B_ += wgt * 3.0
         L -= wgt * 2.0
+    if p["undereye"] > 0:
+        _undereye(lab, crop.shape, faces, x0, y0, part("eyes"), p["undereye"] / 100.0)
     if p["teeth"] > 0:
         t = part("teeth") * np.clip((L - 35) / 20, 0, 1) * (p["teeth"] / 100.0)
         A_ -= A_ * 0.45 * t
@@ -1045,6 +1101,160 @@ def apply_portrait(img: np.ndarray, lay: dict, key: str = "") -> np.ndarray:
     out = img.copy()
     out[y0:y1, x0:x1] = _rgb(lab)
     return out
+
+
+# ------------------------------------------------------------------ imperfecciones automáticas
+
+BLEMISH_MAX = 30  # como mucho, por cara (las más marcadas)
+
+
+def find_blemishes(img: np.ndarray, faces: list, skin: np.ndarray, max_n: int = BLEMISH_MAX) -> list:
+    """Granos, puntos y rojeces pequeñas en la piel de cada cara: manchas redondeadas, más oscuras o más rojas
+    que la piel de alrededor (diferencia de gaussianas en L y a* de Lab), entre ~0,2 % y 1,6 % del ancho de la
+    cara. `skin` (0..1, tamaño de `img`) es dónde se buscan. Devuelve [(x, y, radio del pincel), ...] en píxeles."""
+    import masks as M
+    h, w = img.shape[:2]
+    out = []
+    for f in faces:
+        fw = M.face_axes(f)["fw"]
+        pad = 0.1 * fw
+        x0, y0 = max(0, int(f[:, 0].min() - pad)), max(0, int(f[:, 1].min() - pad))
+        x1, y1 = min(w, int(f[:, 0].max() + pad) + 1), min(h, int(f[:, 1].max() + pad) + 1)
+        if x1 - x0 < 16 or y1 - y0 < 16:
+            continue
+        s = skin[y0:y1, x0:x1]
+        m = s > 0.6
+        if m.sum() < 200:
+            continue
+        lab = _lab(img[y0:y1, x0:x1])
+        s_small, s_big = max(0.7, 0.004 * fw), max(3.0, 0.03 * fw)
+        L, A_ = lab[..., 0], lab[..., 1]
+        dark = cv2.GaussianBlur(L, (0, 0), s_big) - cv2.GaussianBlur(L, (0, 0), s_small)
+        red = cv2.GaussianBlur(A_, (0, 0), s_small) - cv2.GaussianBlur(A_, (0, 0), s_big)
+
+        def z(x):  # en desviaciones robustas de la propia piel (el ruido y los poros no cuentan)
+            med = float(np.median(x[m]))
+            return (x - med) / (float(np.median(np.abs(x[m] - med))) * 1.48 + 0.15)
+
+        score = np.maximum(z(dark), 0.8 * z(red))
+        cand = (score > 4.0) & m & ((dark > 2.0) | (red > 3.0))
+        n, lbl, st, cen = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
+        r_min, r_max = max(0.8, 0.002 * fw), 0.016 * fw
+        found = []
+        for i in range(1, n):
+            bx, by, bw_, bh_ = st[i, :4]
+            sub = lbl[by:by + bh_, bx:bx + bw_] == i
+            sc = score[by:by + bh_, bx:bx + bw_]
+            peak = float(sc[sub].max())
+            core = sub & (sc >= 0.5 * peak)  # el tamaño se mide a media altura (una mancha muy marcada no crece)
+            r = float(np.sqrt(core.sum() / np.pi))
+            ys, xs = np.nonzero(core)
+            cw, ch = int(np.ptp(xs)) + 1, int(np.ptp(ys)) + 1
+            if not r_min <= r <= r_max or max(cw, ch) > 3 * min(cw, ch):
+                continue  # ni ruido ni manchas grandes (lunares, sombras); nada alargado (arrugas, pelos)
+            found.append((peak, float(cen[i][0]) + x0, float(cen[i][1]) + y0, max(2.0, r * 1.9)))
+        found.sort(reverse=True)
+        out += [(x, y, r) for _, x, y, r in found[:max_n]]
+    return out
+
+
+def blemish_skin(img: np.ndarray, faces: list, key: str = "") -> np.ndarray:
+    """Dónde buscar imperfecciones: la piel de la cara (IA; sin modelo, el óvalo de la malla) sin ojos, cejas,
+    labios ni fosas nasales, con margen."""
+    import masks as M
+    h, w = img.shape[:2]
+    oval = np.zeros((h, w), np.float32)
+    feat = np.zeros((h, w), np.uint8)
+    for f in faces:
+        fw = M.face_axes(f)["fw"]
+        ov = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(ov, [np.round(f[M.FACE_OVAL]).astype(np.int32)], 1)
+        ov = cv2.erode(ov, np.ones((3, 3), np.uint8), iterations=max(1, int(0.02 * fw)))
+        oval = np.maximum(oval, ov.astype(np.float32))
+        one = np.zeros((h, w), np.uint8)
+        for part in ("eyes", "brows", "lips"):
+            for poly in M.FACE_PARTS[part][1]:
+                cv2.fillPoly(one, [np.round(f[poly]).astype(np.int32)], 1)
+        for i in (98, 327, 2):  # fosas nasales y base de la nariz
+            cv2.circle(one, tuple(int(v) for v in np.round(f[i])), max(2, int(0.06 * fw)), 1, -1)
+        one = cv2.dilate(one, np.ones((3, 3), np.uint8), iterations=max(1, int(0.035 * fw)))
+        feat = np.maximum(feat, one)
+    seg = part_mask(img, "face", key)
+    skin = oval * (seg if seg.max() > 0.3 else 1.0)
+    return skin * (1 - feat.astype(np.float32))
+
+
+def blemish_ops(img: np.ndarray, key: str = "", faces: list | None = None) -> list:
+    """Operaciones del corrector (como si se hubieran pintado) para las imperfecciones de todas las caras, con
+    su origen ya buscado. Vacío si no hay caras."""
+    if faces is None:
+        try:
+            import masks as M
+            faces = [f for f in M.faces_scaled(np.ascontiguousarray(img, dtype=np.float32), key) if len(f) >= 468]
+        except Exception:
+            return []
+    if not faces:
+        return []
+    h, w = img.shape[:2]
+    side = max(h, w)
+    ops = []
+    for x, y, r in find_blemishes(img, faces, blemish_skin(img, faces, key)):
+        op = {"tool": "heal", "r": round(r / side, 5), "pts": [[round(x / (w - 1), 5), round(y / (h - 1), 5)]],
+              "src": None, "hard": 0.35, "auto": True}
+        op["src"] = find_source(img, op)
+        ops.append(op)
+    return ops
+
+
+UNDEREYE_HINT = 6.0   # ojeras marcadas: la zona bajo el ojo, estos puntos de L (Lab) más oscura que el pómulo
+TEETH_HINT = 16.0     # dientes amarillentos: b* (Lab) mediano de los dientes por encima de esto
+
+
+def retouch_hints(img: np.ndarray, key: str = "", faces: list | None = None) -> dict:
+    """Lo que pide retoque en las caras de la foto, medido como lo corregiría el retoque automático:
+    {"faces", "blemishes", "undereye" (diferencia de L con el pómulo), "teeth" (b* de los dientes o 0),
+    "texts": [...]}. Rápido (malla facial en caché): se calcula al abrir la foto."""
+    import masks as M
+    if faces is None:
+        try:
+            faces = [f for f in M.faces_scaled(np.ascontiguousarray(img, dtype=np.float32), key) if len(f) >= 468]
+        except Exception:
+            faces = []
+    h = {"faces": len(faces), "blemishes": 0, "undereye": 0.0, "teeth": 0.0, "texts": []}
+    if not faces:
+        return h
+    h["blemishes"] = len(find_blemishes(img, faces, blemish_skin(img, faces, key)))
+    lab = _lab(img)
+    L = lab[..., 0]
+    shape = img.shape[:2]
+    for f in faces:
+        u = undereye_alpha(shape, f)
+        cheek = np.clip(_blobs(shape, f, [(-0.24, 0.62, 0.07, 1.0), (0.24, 0.62, 0.07, 1.0)]), 0, 1)
+        if u.sum() > 4 and cheek.sum() > 4:
+            h["undereye"] = max(h["undereye"], float((L * cheek).sum() / cheek.sum() - (L * u).sum() / u.sum()))
+    t = part_mask(img, "teeth", key) > 0.5
+    t &= L > 45  # lo claro de la boca (los dientes, no el hueco)
+    if t.sum() > 30:
+        h["teeth"] = float(np.median(lab[..., 2][t]))
+    if h["blemishes"]:
+        h["texts"].append(f"{h['blemishes']} granos o rojeces")
+    if h["undereye"] >= UNDEREYE_HINT:
+        h["texts"].append("ojeras marcadas")
+    if h["teeth"] >= TEETH_HINT:
+        h["texts"].append("dientes amarillentos")
+    return h
+
+
+# «Retocar retratos» de Events: las mismas capas que pone el retoque en un clic (sin pelo ni enfoque)
+AUTO_SKIN = {"amount": 45, "texture": 55}
+
+
+def auto_portrait(img: np.ndarray, key: str = "") -> np.ndarray:
+    """Piel por separación de frecuencias + retrato automático (volumen, ojeras, dientes, ojos, labios) sobre una
+    imagen ya revelada (sRGB 0..1). Sin caras, la piel sola apenas cambia nada y el retrato no hace nada."""
+    img = np.ascontiguousarray(img, dtype=np.float32)
+    img = apply_skin(img, new_layer("skin", **AUTO_SKIN), key)
+    return apply_portrait(img, new_layer("portrait"), key)
 
 
 # ------------------------------------------------------------------ licuar

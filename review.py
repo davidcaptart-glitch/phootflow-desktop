@@ -325,6 +325,15 @@ class ReviewDialog(QDialog):
         brow = QHBoxLayout()
         brow.addWidget(self.speed_cb, 1)
         brow.addWidget(self.speed_amt)
+        # retoque de retrato de esta foto (piel, volumen, ojeras, dientes y ojos; se aplica al exportar)
+        self.ret_cb = QComboBox()
+        self.ret_cb.setToolTip("Retoque de retrato: piel suavizada, volumen (dodge and burn), ojeras, dientes y ojos. "
+                               "«De la sesión»: el chip «Retocar retratos» del panel ⚙, en las fotos con caras grandes")
+        self.ret_cb.addItem("Retrato: de la sesión", "")
+        self.ret_cb.addItem("Retrato: sin retocar", E.RETOUCH_NONE)
+        self.ret_cb.addItem("Retrato: retocar", E.RETOUCH_ON)
+        self.ret_cb.activated.connect(self._ret_changed)
+        self._ret_cache: dict = {}
         self.bw_t = QLabel("ESTILO B/N DE ESTA FOTO")
         self.bw_t.setObjectName("cardTitle")
         self.bw_list = QListWidget()
@@ -401,6 +410,7 @@ class ReviewDialog(QDialog):
         sv.addWidget(self.blur_t)
         sv.addWidget(self.bokeh_cb)
         sv.addLayout(brow)
+        sv.addWidget(self.ret_cb)
         sv.addSpacing(6)
         sv.addWidget(self.bw_t)
         sv.addWidget(self.bw_list)
@@ -552,11 +562,16 @@ class ReviewDialog(QDialog):
                 if len(self._before) > 20:
                     self._before.pop(next(iter(self._before)))
             before = _pm(crop(b, box))
+        if not studio and not self.crop_on and self._retouch_on(ph):
+            img, extra = self._ret_view(ph, img, box)
+            label += extra
         if not studio and not self.crop_on and (self._bokeh_amt(ph) or ph.speed):
             img, extra = self._blur_view(ph, img, box)
             label += extra
         self.big.set(_pm(img), label, rejected=not ph.keep, before=before)
         self._blur_sync(ph, studio)
+        self.ret_cb.setEnabled(not studio)
+        self.ret_cb.setCurrentIndex(max(0, self.ret_cb.findData(ph.retouch or "")))
         self.b_crop.setEnabled(not studio or ss is not None)
         if studio and ss is None and self.crop_on:
             self.b_crop.setChecked(False)
@@ -751,6 +766,36 @@ class ReviewDialog(QDialog):
     def _export(self):
         self.action = "export"
         self.accept()
+
+    # ---------------------------------------------------------- retoque de retrato
+    def _retouch_on(self, ph) -> bool:
+        chip = getattr(self.main, "c_portrait", None)
+        return E.photo_retouch(ph, E.Settings(portrait=bool(chip is not None and chip.isChecked())))
+
+    def _ret_view(self, ph, img, box):
+        """La vista con el retoque de retrato (en caché: una vez por foto y encuadre)."""
+        k = (ph.path, tuple(round(float(v), 4) for v in box), img.shape)
+        out = self._ret_cache.get(k)
+        if out is None:
+            import edits_engine as EE
+            x = img.astype(np.float32) / 255 if img.dtype == np.uint8 else img.astype(np.float32)
+            try:
+                x = EE.auto_portrait(x, ph.path + "#review")
+            except Exception:
+                return img, "  ·  (no se pudo previsualizar el retoque)"
+            out = (np.clip(x, 0, 1) * 255 + 0.5).astype(np.uint8) if img.dtype == np.uint8 else x
+            self._ret_cache[k] = out
+            if len(self._ret_cache) > 12:
+                self._ret_cache.pop(next(iter(self._ret_cache)))
+        return out, "  ·  retrato retocado"
+
+    def _ret_changed(self, *_):
+        ph = self.cur()
+        if not ph:
+            return
+        ph.retouch = self.ret_cb.currentData() or ""
+        self.on_change()
+        self.show_photo()
 
     # ---------------------------------------------------------- desenfocar fondo y velocidad
     def _bokeh_amt(self, ph) -> int:

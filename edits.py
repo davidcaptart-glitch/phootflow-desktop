@@ -604,6 +604,7 @@ class EditsView(QWidget):
     thumbs_ready = Signal(int)
     export_progress = Signal(int, int, str)
     lama_done = Signal(str)                          # "" si el modelo de borrado ya está; si no, el error
+    hints_ready = Signal(str, object)                # ruta, sugerencias de retoque (EE.retouch_hints)
 
     def __init__(self, cfg_dir: str, events_lookup=None):
         super().__init__()
@@ -681,6 +682,7 @@ class EditsView(QWidget):
         mid.setSpacing(0)
         mid.addWidget(self._build_doc_tab())
         mid.addWidget(self._build_banner())
+        mid.addWidget(self._build_hints())
         mid.addWidget(self.canvas, 1)
         h.addLayout(mid, 1)
         h.addWidget(self._build_dock_strip())
@@ -691,6 +693,7 @@ class EditsView(QWidget):
 
         self.rendered.connect(self._on_rendered)
         self.loaded.connect(self._on_loaded)
+        self.hints_ready.connect(self._on_hints)
         self.thumbs_ready.connect(lambda i: self.film.viewport().update())
         self.export_progress.connect(self._on_export_progress)
         self.lama_done.connect(self._on_lama_done)
@@ -1010,6 +1013,7 @@ class EditsView(QWidget):
         self._act(fi, "Licuar", lambda: self.set_tool("liquify"), "Mayús+Ctrl+X")
         self._act(fi, "Suavizar piel", lambda: self.add_layer("skin"))
         self._act(fi, "Retoque de retrato en un clic", self.portrait_one_click)
+        self._act(fi, "Quitar imperfecciones (automático)", self.auto_blemishes)
         self._act(fi, "Retrato automático (ojos, dientes, labios, volumen)", lambda: self.add_layer("portrait"))
         self._act(fi, "Pelo sedoso", lambda: self.add_hair("hair"))
         self._act(fi, "Barba: definir y rellenar", lambda: self.add_hair("beard"))
@@ -1144,6 +1148,59 @@ class EditsView(QWidget):
         bw.hide()
         self.banner_wrap = bw
         return bw
+
+    def _build_hints(self):
+        """Franja de sugerencias de retoque: lo que el análisis de las caras ve que pide retoque."""
+        bw = QWidget()
+        bl = QVBoxLayout(bw)
+        bl.setContentsMargins(10, 6, 10, 0)
+        fr = QFrame()
+        fr.setObjectName("banner")
+        bh = QHBoxLayout(fr)
+        bh.setContentsMargins(12, 6, 6, 6)
+        self.hint_txt = QLabel("")
+        b_all = _btn("Retoque en un clic", "primary", "Imperfecciones, piel, retrato (volumen, ojeras, dientes, "
+                                                       "ojos), pelo y enfoque de la cara, en capas que se ajustan")
+        b_bl = _btn("Solo imperfecciones", "ghost", "Quita los granos y rojeces encontrados con el corrector")
+        b_x = _btn("✕", "ghost", "Ocultar")
+        b_all.clicked.connect(lambda: (bw.hide(), self.portrait_one_click()))
+        b_bl.clicked.connect(lambda: (bw.hide(), self.auto_blemishes()))
+        b_x.clicked.connect(bw.hide)
+        self.hint_bl = b_bl
+        bh.addWidget(self.hint_txt, 1)
+        for b in (b_bl, b_all, b_x):
+            bh.addWidget(b)
+        bl.addWidget(fr)
+        bw.hide()
+        self.hint_wrap = bw
+        return bw
+
+    def _ask_hints(self, path, base):
+        """Pide las sugerencias de esta foto a un único hilo (los modelos de MediaPipe son por hilo)."""
+        if getattr(self, "_hint_q", None) is None:
+            self._hint_q = queue.Queue()
+            threading.Thread(target=self._hints_loop, daemon=True).start()
+        self._hint_q.put((path, base))
+
+    def _hints_loop(self):
+        while True:
+            path, base = self._hint_q.get()
+            while not self._hint_q.empty():  # solo la última foto abierta
+                path, base = self._hint_q.get()
+            if not self.cur or self.cur.path != path:
+                continue
+            try:
+                h = EE.retouch_hints(base, path + "#edits")
+            except Exception:
+                h = {"texts": []}
+            self.hints_ready.emit(path, h)
+
+    def _on_hints(self, path, h):
+        if not self.cur or self.cur.path != path or not h.get("texts"):
+            return
+        self.hint_txt.setText("Sugerencias para el retrato: " + " · ".join(h["texts"]) + ".")
+        self.hint_bl.setVisible(bool(h.get("blemishes")))
+        self.hint_wrap.show()
 
     def _build_filmstrip(self):
         w = QFrame()
@@ -1484,7 +1541,7 @@ class EditsView(QWidget):
         lay.addWidget(self._label("Retoque automático en todas las caras de la foto: no hace falta pintar. "
                                   "Pon a 0 lo que no quieras."))
         self.portrait_w = {}
-        for key in ("teeth", "eyes", "whites", "sculpt", "even", "blush", "lips"):
+        for key in ("teeth", "eyes", "whites", "undereye", "sculpt", "even", "blush", "lips"):
             lo = -100 if key == "lips" else 0
             sr = SliderRow(key, EE.PORTRAIT_LABELS[key], lo, 100, 1, EE.PORTRAIT_DEFAULTS[key])
             sr.changed.connect(lambda k, val, f: self._set_prop(k, int(val), f))
@@ -1507,7 +1564,8 @@ class EditsView(QWidget):
             self.portrait_w[amt] = sr
             self.portrait_col[key] = (b, sr)
         lay.addWidget(self._label("Volumen = dodge and burn guiado: luz en frente, tabique, pómulos y barbilla; "
-                                  "sombra bajo el pómulo y a los lados de la nariz. Para más control, Ojos y luz (O)."))
+                                  "sombra bajo el pómulo y a los lados de la nariz. Ojeras: la piel bajo el ojo toma "
+                                  "la luz y el color del pómulo. Para más control, Ojos y luz (O)."))
 
         lay = page("liquify")
         lay.addWidget(self._label("Licuar (W): Empujar arrastra la zona en la dirección del trazo; Inflar y "
@@ -2810,7 +2868,7 @@ class EditsView(QWidget):
             self.group_info.setText(_count(n, "capa") + " dentro.")
         elif kind == "portrait":
             for key, sr in self.portrait_w.items():
-                sr.set_value(lay.get(key, EE.PORTRAIT_DEFAULTS[key]))
+                sr.set_value(lay.get(key, EE.PORTRAIT_OLD.get(key, EE.PORTRAIT_DEFAULTS[key])))
             for key, (b, sr) in self.portrait_col.items():
                 c = lay.get(key, "")
                 b.setStyleSheet(f"QPushButton {{ border-left: 14px solid {c}; }}" if c else "")
@@ -3206,6 +3264,37 @@ class EditsView(QWidget):
         if not self.sel:
             self.status.setText(f"No se ha encontrado {EE.PARTS[part].lower()} en esta foto.")
 
+    BLEMISH_NAME = "Imperfecciones (automático)"
+
+    def _blemish_layer(self):
+        """Busca granos, puntos y rojeces en la piel de las caras y los pone como trazos del corrector en la capa
+        «Imperfecciones (automático)» (la sustituye si ya estaba). Devuelve (capa, nº) o (None, 0)."""
+        if self.base is None or not self.cur:
+            return None, 0
+        ops = EE.blemish_ops(self.base, self.cur.path + "#edits")
+        old = next((l for l in self.doc["layers"] if l["kind"] == "retouch" and l.get("name") == self.BLEMISH_NAME),
+                   None)
+        if not ops:
+            return old, 0
+        if old is not None:
+            old["ops"] = [o for o in old["ops"] if not o.get("auto")] + ops
+            return old, len(ops)
+        return EE.add_layer(self.doc, "retouch", ops=ops, name=self.BLEMISH_NAME), len(ops)
+
+    def auto_blemishes(self):
+        if not self.doc:
+            return
+        self.status.setText("Buscando imperfecciones en la piel…")
+        self.status.repaint()
+        lay, n = self._blemish_layer()
+        if not n:
+            self.status.setText("No he encontrado granos ni rojeces en la piel de las caras.")
+            return
+        self.layer_id = lay["id"]
+        self._commit("Quitar imperfecciones")
+        self.status.setText(f"{n} imperfecciones corregidas en la capa «{self.BLEMISH_NAME}». Repasa con el "
+                            "corrector (J) lo que falte; Ctrl+Z para deshacer.")
+
     def portrait_one_click(self):
         """Retoque de retrato completo, como el flujo a mano: piel por frecuencias, retrato automático (ojos,
         dientes, labios, volumen), pelo, barba y enfoque de la cara. Todo en capas que se pueden ajustar."""
@@ -3215,6 +3304,7 @@ class EditsView(QWidget):
         self.status.repaint()
         self.deselect()
         kinds = {l["kind"] for l in self.doc["layers"]}
+        self._blemish_layer()
         if "skin" not in kinds:
             EE.add_layer(self.doc, "skin", amount=45, texture=55)
         lay = EE.add_layer(self.doc, "portrait")
@@ -3540,6 +3630,10 @@ class EditsView(QWidget):
         self.canvas.pm = None
         self._refresh_layers()  # miniatura de la capa Fondo
         self.request()
+        self.hint_wrap.hide()
+        if not any(l["kind"] in ("portrait", "skin") or l.get("name") == self.BLEMISH_NAME
+                   for l in self.doc["layers"]):  # ya retocada: no se sugiere nada
+            self._ask_hints(path, base)
 
     # ---------------------------------------------------------- render en segundo plano
     def request(self, draft=False):

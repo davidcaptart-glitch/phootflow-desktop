@@ -23,7 +23,7 @@ OWN = "Los de esta sesión"         # opción de «Abrir carpeta»: los que guar
 KEYS = ("style", "look", "nr", "evc", "straight", "uniform", "cam", "focus", "exp", "dup", "eyes", "sens",
         "ratios", "sizes", "orig", "bw", "bw_style", "quality", "workers", "review", "move", "exif", "xmp",
         "zip", "trash_orig", "del_disc", "cloud", "cloud_folder", "up_orig", "lut", "lutk", "cam_prof",
-        "bokeh")
+        "portrait", "bokeh")
 
 BUILTIN: dict[str, dict] = {
     "Boda": {
@@ -32,7 +32,7 @@ BUILTIN: dict[str, dict] = {
         "focus": True, "exp": True, "dup": True, "eyes": False, "sens": "Normal",
         "ratios": ["4:5"], "sizes": ["max", "2048"], "orig": True, "bw": True, "bw_style": "Editorial",
         "quality": 95, "review": True, "move": True, "exif": True, "xmp": True, "zip": True,
-        "trash_orig": False, "del_disc": False},
+        "trash_orig": False, "del_disc": False, "portrait": True},
     "Cumpleaños / fiesta": {
         "_desc": "Fiesta o cumpleaños: color vivo, B/N, grano fuerte para interiores, 4:5 y 1080 px para redes.",
         "style": "Cumpleaños / fiesta", "look": "Natural", "nr": "Fuerte", "straight": True, "uniform": True,
@@ -46,19 +46,19 @@ BUILTIN: dict[str, dict] = {
         "focus": True, "exp": True, "dup": True, "eyes": False, "sens": "Alta",
         "ratios": ["4:5"], "sizes": ["max", "1080"], "orig": True, "bw": False, "quality": 90,
         "review": False, "move": True, "exif": True, "xmp": False, "zip": True, "trash_orig": False,
-        "del_disc": False},
+        "del_disc": False, "portrait": False},
     "Entrega rápida (redes)": {
         "_desc": "Solo lo justo para publicar: 1080 px en 4:5 y 9:16, calidad 85, sin revisión, ZIP ni XMP.",
         "look": "Vivo", "nr": "Normal", "straight": True, "uniform": True, "focus": True, "exp": True,
         "dup": True, "sens": "Normal", "ratios": ["4:5", "9:16"], "sizes": ["1080"], "orig": False,
         "bw": False, "quality": 85, "review": False, "move": True, "exif": False, "xmp": False, "zip": False,
-        "trash_orig": False, "del_disc": False},
+        "trash_orig": False, "del_disc": False, "portrait": False},
     "Archivo completo (Lightroom)": {
         "_desc": "Para seguir en Lightroom: XMP, EXIF, máxima calidad (100), todos los tamaños y ZIP de originales.",
         "nr": "Suave", "straight": True, "uniform": True, "focus": True, "exp": True, "dup": True,
         "sens": "Baja", "ratios": [], "sizes": ["max", "2048", "1080"], "orig": True, "bw": True,
         "bw_style": "Editorial", "quality": 100, "review": True, "move": True, "exif": True, "xmp": True,
-        "zip": True, "trash_orig": False, "del_disc": False},
+        "zip": True, "trash_orig": False, "del_disc": False, "portrait": False},
 }
 
 # del panel «¿Cómo quieres editar esta sesión?» (session_setup): recorte inteligente y «Mejorar con IA»
