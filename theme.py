@@ -128,6 +128,11 @@ QToolButton#iconBtn {{ background: transparent; border: 1px solid transparent; b
 QToolButton#iconBtn:hover {{ background: {SURFACE_3}; border-color: {LINE}; }}
 QToolButton#iconBtn:checked {{ background: rgba(245, 13, 138, 0.16); border-color: rgba(245, 13, 138, 0.6); }}
 QToolButton#iconBtn:disabled {{ background: transparent; }}
+QToolButton#personChip {{ background: transparent; border: 1px solid transparent; border-radius: 8px;
+    padding: 3px 4px; color: {MUTED}; font-size: 8pt; min-width: 64px; }}
+QToolButton#personChip:hover {{ background: {SURFACE_3}; color: {TEXT_STRONG}; }}
+QToolButton#personChip:checked {{ background: rgba(245, 13, 138, 0.16); border-color: rgba(245, 13, 138, 0.6);
+    color: {TEXT_STRONG}; }}
 QPushButton#iconBtn {{ background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 5px 7px; }}
 QPushButton#iconBtn:hover {{ background: {SURFACE_3}; border-color: {LINE}; }}
 QPushButton#iconBtn:checked {{ background: rgba(245, 13, 138, 0.16); border-color: rgba(245, 13, 138, 0.6); }}

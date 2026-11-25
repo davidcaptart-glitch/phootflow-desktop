@@ -5,6 +5,9 @@
 
 - `text_embeddings.npy` — frases de texto codificadas con CLIP ViT-B/32 (OpenAI, MIT). El modelo de imagen (Xenova/clip-vit-base-patch32, MIT) se descarga al usarlo.
 - Modelo `face_landmarker.task` de MediaPipe (Google, Apache-2.0): se descarga al usarlo.
+- Modelo `face_recognition_sface_2021dec.onnx` (SFace, Yaoyao Zhong; conversión a ONNX de Chengrui Wang) de
+  [OpenCV Zoo](https://huggingface.co/opencv/face_recognition_sface), Apache-2.0, para reconocer personas en Events.
+  Se descarga al usarlo (39 MB) y se comprueba su SHA-256. Las caras conocidas se guardan solo en este equipo.
 - Paquetes: onnxruntime (Microsoft, MIT), mediapipe (Google, Apache-2.0).
 - Fórmulas de revelado de Studio (curva base, tono local, OkLab/OkLCh, mezclador HSL, gradación, curva paramétrica) y los 18 presets originales: portados de [LightCraft](https://github.com/storytold/lightcraft) (Apache-2.0).
 - Modelo `selfie_multiclass_256x256.tflite` de MediaPipe (Google, Apache-2.0) para las máscaras de personas: se descarga al usarlo.

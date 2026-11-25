@@ -242,6 +242,7 @@ class Photo:
     speed: dict = field(default_factory=dict)    # efecto velocidad (revisión): {amount, angle (None = auto), trail}
     retouch: str = ""           # retoque de retrato: "" = la regla de la sesión, RETOUCH_NONE = no, RETOUCH_ON = sí
     meta: dict = field(default_factory=dict)  # EXIF útil para copiar a los JPG
+    people: dict = field(default_factory=dict)  # caras para reconocer personas (people.describe; {} = sin mirar)
     error: str = ""
 
 
@@ -713,8 +714,101 @@ def _make_yunet():
     return False
 
 
+def _make_sface():
+    import people
+    return people.make_recognizer(FACES["path"]) if FACES["ready"] else False
+
+
 _MAKERS = {"yunet": _make_yunet, "haar": _haar("haarcascade_frontalface_default.xml"),
-           "eye": _haar("haarcascade_eye_tree_eyeglasses.xml")}
+           "eye": _haar("haarcascade_eye_tree_eyeglasses.xml"), "sface": _make_sface}
+
+# --- reconocer personas (SFace): opcional; sin el modelo, Events funciona igual sin el panel «Personas»
+FACES = {"ready": False, "path": ""}
+
+
+def setup_faces(model_dir: str, progress=None) -> bool:
+    """Descarga/verifica el modelo SFace (39 MB, la primera vez) y comprueba que carga. Llamar una vez."""
+    try:
+        import people
+        path = people.ensure_model(model_dir, progress)
+        if people.make_recognizer(path) is False:
+            raise RuntimeError("OpenCV no puede cargar el modelo de reconocimiento de caras")
+        FACES["path"], FACES["ready"] = path, True
+    except Exception as e:
+        FACES["ready"], FACES["error"] = False, f"{type(e).__name__}: {e}"
+    return FACES["ready"]
+
+
+def _sface():
+    """El reconocedor de este hilo. Los que se crearon en el pool antes de tener el modelo (False) se saltan."""
+    d = getattr(_TLS, "sface", None)
+    if d is None or (d is False and FACES["ready"]):
+        d = False
+        q = _POOL.get("sface")
+        while q is not None and d is False:
+            try:
+                d = q.get_nowait()
+            except queue.Empty:
+                break
+        if d is False and FACES["ready"]:
+            d = _make_sface()
+            _KEEP.append(d)
+        _TLS.sface = d
+    return d
+
+
+def face_ids(rgb: np.ndarray, raw: list) -> dict:
+    """Caras de la imagen de análisis para reconocer personas ({} si no hay modelo o no hay YuNet)."""
+    if not FACES["ready"]:
+        return {}
+    rec = _sface()
+    if rec is False:
+        return {}
+    import people
+    try:
+        return people.describe(rec, rgb, raw)
+    except Exception:
+        return {}
+
+
+def face_pass(ph: "Photo") -> "Photo":
+    """Caras de una foto ya analizada (caché de una versión sin personas) a partir de su vista previa, que es la
+    misma imagen de análisis: no hace falta volver a revelar el RAW."""
+    try:
+        if ph.preview_path and os.path.exists(ph.preview_path):
+            bgr = cv2.imread(ph.preview_path, cv2.IMREAD_COLOR)
+        elif ph.preview:
+            bgr = cv2.imdecode(np.frombuffer(ph.preview, np.uint8), cv2.IMREAD_COLOR)
+        else:
+            return ph
+        if bgr is None:
+            return ph
+        raw: list = []
+        _faces(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), raw)
+        d = face_ids(bgr[..., ::-1], raw)
+        if d:
+            ph.people = d
+    except Exception:
+        pass
+    return ph
+
+
+def face_pass_many(photos: list, workers: int = 2, on_done=None, cancelled=lambda: False) -> int:
+    """`face_pass` en paralelo de las fotos analizadas que aún no tienen las caras para reconocer."""
+    todo = [p for p in photos if p.thumb and not p.error and not p.people]
+    if not FACES["ready"] or not todo:
+        return 0
+
+    def one(p):
+        if not cancelled():
+            face_pass(p)
+        return p
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        for k, _ in enumerate(ex.map(one, todo), start=1):
+            if on_done and not cancelled():
+                on_done(k, len(todo))
+    return len(todo)
 
 
 def _faces(gray8: np.ndarray, raw: list | None = None) -> list[tuple[int, int, int, int]]:
@@ -1063,6 +1157,7 @@ def analyze(ph: Photo, st: Settings) -> Photo:
                 ph.objects = []
         sal = SC.saliency(np.clip(g, 0, 1))
         ph.sal = SC.encode_map(sal)
+        ph.people = face_ids(g, raw_faces)  # YuNet trabajó sobre `g8`, la misma imagen (ya girada) que `g`
         ph.warn = ""
         if EYES["ready"]:  # YuNet trabajó sobre `g8`, que es la misma imagen (ya girada) que `g`
             sc = [x for x in _eyes_scores(np.clip(g, 0, 1), raw_faces) if x is not None]
