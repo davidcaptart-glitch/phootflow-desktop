@@ -200,7 +200,10 @@ class Photo:
     best: str = "Original"
     crop_why: str = ""          # qué encuadra el recorte sugerido («pelota y 2 jugadores», «la pareja»…)
     aspect: float = 0.0         # ancho/alto del área útil analizada (0 = análisis antiguo, sin recorte inteligente)
-    face_boxes: list = field(default_factory=list)  # caras normalizadas (x0, y0, x1, y1) sobre el área útil
+    crop_rules: list = field(default_factory=list)  # reglas de composición del sugerido: [[regla, por qué], …]
+    crop_scene: str = ""        # tipo de sesión con el que se planificó el recorte
+    horizon: float = -1.0       # altura del horizonte en el área útil (0..1; -1 = no hay uno claro)
+    face_boxes: list = field(default_factory=list)  # caras normalizadas (x0, y0, x1, y1, giro) sobre el área útil
     objects: list = field(default_factory=list)     # [clase, confianza, x0, y0, x1, y1] de smartcrop.Detector
     sal: str = ""               # mapa de saliencia (smartcrop.encode_map)
     keep: bool = True
@@ -957,13 +960,32 @@ def replan_crop(ph: Photo, scene: str) -> bool:
         return False
     custom = ph.crops.get(CUSTOM_CROP)
     keep_best = ph.best if (ph.reviewed or ph.best == CUSTOM_CROP) else None
-    ph.crops, ph.scores, ph.best, ph.crop_why = SC.plan(ph.aspect, ph.face_boxes, ph.objects,
-                                                        SC.decode_map(ph.sal), scene, RATIOS)
+    _plan_photo(ph, SC.decode_map(ph.sal), scene)
     if custom:
         ph.crops[CUSTOM_CROP] = custom
     if keep_best in ph.crops:
         ph.best = keep_best
     return True
+
+
+def _plan_photo(ph: Photo, sal, scene: str) -> None:
+    """Recortes, formato sugerido, qué encuadra y con qué reglas de composición."""
+    ph.crops, ph.scores, ph.best, ph.crop_why = SC.plan(ph.aspect, ph.face_boxes, ph.objects, sal, scene,
+                                                        RATIOS, ph.horizon)
+    ph.crop_scene = scene
+    ph.crop_rules = [list(r) for r in SC.explain(ph.aspect, ph.face_boxes, ph.objects, sal, scene,
+                                                 ph.crops[ph.best], ph.horizon)]
+
+
+def crop_rules(ph: Photo, name: str = "") -> list:
+    """Reglas de composición (regla, por qué) del recorte `name` (por defecto el elegido) de la foto."""
+    name = name or ph.best
+    if name == ph.best and ph.crop_rules and name == suggested_crop(ph):
+        return [tuple(r) for r in ph.crop_rules]
+    if not ph.aspect or name not in ph.crops:
+        return []
+    return SC.explain(ph.aspect, ph.face_boxes, ph.objects, SC.decode_map(ph.sal), ph.crop_scene,
+                      ph.crops[name], ph.horizon)
 
 
 def suggested_crop(ph: Photo) -> str:
@@ -1020,8 +1042,10 @@ def analyze(ph: Photo, st: Settings) -> Photo:
         # recorte inteligente: personas y pelota (YOLOX), caras y saliencia, sobre la imagen ya girada
         hh, ww = gray.shape[:2]
         ph.aspect = round(ww / hh, 5)
-        ph.face_boxes = [[round(x / ww, 4), round(y / hh, 4), round((x + fw) / ww, 4), round((y + fh) / hh, 4)]
-                         for (x, y, fw, fh) in faces]
+        yaw = [SC.face_yaw(r) for r in raw_faces] if len(raw_faces) == len(faces) else [0.0] * len(faces)
+        ph.face_boxes = [[round(x / ww, 4), round(y / hh, 4), round((x + fw) / ww, 4), round((y + fh) / hh, 4),
+                          yw] for (x, y, fw, fh), yw in zip(faces, yaw)]
+        ph.horizon = SC.horizon(gray)
         ph.objects = []
         if DET["ready"]:
             try:
@@ -1050,8 +1074,7 @@ def analyze(ph: Photo, st: Settings) -> Photo:
                 ph.scene_ai = AI["obj"].scores(np.clip(g, 0, 1))
             except Exception:
                 ph.scene_ai = {}
-        ph.crops, ph.scores, ph.best, ph.crop_why = SC.plan(ph.aspect, ph.face_boxes, ph.objects, sal,
-                                                            photo_scene(ph), RATIOS)
+        _plan_photo(ph, sal, photo_scene(ph))
         ph.tone_q, ph.chroma, ph.ab = lab_stats(g)
         if st.camera_look:
             gc = np.clip(g, 0, 1)
@@ -2008,14 +2031,14 @@ def write_report(photos: list[Photo], out_dir: str) -> str:
         wr = csv.writer(f, delimiter=";")
         wr.writerow(["archivo", "estado", "motivo", "formato_sugerido", "exposicion_ev", "giro_grados",
                      "nitidez", "iso", "caras", "aviso", "fecha", "hora", "camara", "objetivo", "velocidad",
-                     "apertura", "focal"])
+                     "apertura", "focal", "composicion"])
         for p in photos:
             s = shot_info(p)
             wr.writerow([os.path.basename(p.path), "conservada" if p.keep else "descartada",
                          p.reason or p.error, p.best, f"{p.ev:+.2f}", f"{p.angle:+.2f}", f"{p.sharp:.4f}",
                          p.iso or "", p.faces, p.warn] + [s.get(k, "") for k in
                                                           ("fecha", "hora", "camara", "objetivo", "velocidad",
-                                                           "apertura", "focal")])
+                                                           "apertura", "focal")] + [SC.summary(crop_rules(p))])
     return path
 
 

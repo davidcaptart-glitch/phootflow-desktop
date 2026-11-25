@@ -158,6 +158,43 @@ def saliency(rgb01: np.ndarray) -> np.ndarray:
     return (m / (m.max() + 1e-6)).astype(np.float32)
 
 
+def horizon(gray: np.ndarray) -> float:
+    """Altura (0..1) de una línea horizontal larga que cruza la foto (horizonte, mar, fondo de pista), o -1."""
+    h, w = gray.shape[:2]
+    s = 320 / max(h, w)
+    g = cv2.resize(np.asarray(gray, np.float32), (max(8, round(w * s)), max(8, round(h * s))),
+                   interpolation=cv2.INTER_AREA)
+    gy = np.abs(cv2.Sobel(cv2.GaussianBlur(g, (0, 0), 1.2), cv2.CV_32F, 0, 1))
+    thr = max(float(np.percentile(gy, 92)), 0.02)
+    frac = (gy > thr).mean(axis=1)
+    frac = np.maximum(frac, np.maximum(np.roll(frac, 1), np.roll(frac, -1)))  # líneas de 2-3 px
+    n = len(frac)
+    lo, hi = int(0.06 * n), int(0.94 * n)
+    if hi <= lo:
+        return -1.0
+    k = lo + int(np.argmax(frac[lo:hi]))
+    if frac[k] < 0.55:
+        return -1.0
+    a, b = k, k  # centro de la meseta (un borde neto marca 2-3 filas)
+    while a > lo and frac[a - 1] >= 0.9 * frac[k]:
+        a -= 1
+    while b < hi - 1 and frac[b + 1] >= 0.9 * frac[k]:
+        b += 1
+    k = (a + b) // 2 if b - a < n // 10 else k
+    up, down = float(g[max(0, k - n // 6):max(1, k - 2)].mean()), float(g[k + 2:k + n // 6 + 2].mean())
+    return round(k / n, 4) if abs(up - down) > 0.04 else -1.0
+
+
+def face_yaw(row) -> float:
+    """Hacia dónde gira la cara, con los puntos de YuNet: <0 mira a la izquierda de la foto, >0 a la derecha."""
+    try:
+        rex, lex, nx = float(row[4]), float(row[6]), float(row[8])
+    except (IndexError, TypeError, ValueError):
+        return 0.0
+    eye = abs(lex - rex)
+    return 0.0 if eye < 1e-6 else round(float(np.clip((nx - (rex + lex) / 2) / eye, -1.5, 1.5)), 3)
+
+
 def encode_map(m: np.ndarray) -> str:
     """Mapa 0..1 -> «alto x ancho:base64» (uint8) para guardarlo en el JSON de la sesión."""
     q = np.clip(np.round(m * 255), 0, 255).astype(np.uint8)
@@ -328,7 +365,7 @@ def _span(lo, hi, size, limit, focus):
     if a > b:  # no cabe entero: centrado en el foco
         p = min(max(0.0, focus - size / 2), limit - size)
         return [p]
-    return list(np.linspace(a, b, 13)) if b - a > 1e-4 else [a]
+    return list(np.linspace(a, b, 11)) if b - a > 1e-4 else [a]
 
 
 def _cuts(c, people):
@@ -341,7 +378,169 @@ def _cuts(c, people):
     return n
 
 
-def _crop_for(core, A, r, rule, ii, gw, gh, focus, people=()):
+# ------------------------------------------------------------------------------------- composición
+# Reglas de los artículos de composición que se pueden medir al recortar (dZoom, Format, Club de Fotografía):
+# tercios, punto áureo, simetría/centrado, espacio en la dirección de la mirada, horizonte en un tercio,
+# rellenar el encuadre o dejar espacio negativo, simplicidad (dejar fuera lo que distrae) y número impar.
+# Las líneas guía, el ángulo de toma o el color se deciden al disparar: un recorte no los cambia.
+
+GAZE = 0.25  # |giro| a partir del cual la cara mira claramente a un lado
+
+
+class Anchor:
+    """Punto que coloca la composición (la pelota, los ojos, el sujeto o lo que destaca) y hacia dónde mira."""
+
+    def __init__(self, pt, label, look=0, frontal=False, horizon=-1.0, people=0):
+        self.pt, self.label, self.look, self.frontal = pt, label, look, frontal
+        self.horizon, self.people = horizon, people
+
+
+def _anchor(A, faces, core, ball, why, sal, hz):
+    """El punto de interés de la foto para las reglas de composición."""
+    n = 0
+    for word in why.split():
+        if word.isdigit():
+            n = int(word)
+    if why.startswith("la pareja"):
+        n = 2
+    elif why.startswith("persona principal") or why.startswith("jugador principal"):
+        n = 1
+    if core is None:  # sin nadie: el centro de lo que más destaca
+        if sal is None:
+            return Anchor((A / 2, 0.5), "lo que destaca", horizon=hz)
+        m = np.asarray(sal, np.float32)
+        t = m >= np.percentile(m, 90)
+        ys, xs = np.nonzero(t)
+        wts = m[t] + 1e-6
+        return Anchor((float(np.average(xs + 0.5, weights=wts)) / m.shape[1] * A,
+                       float(np.average(ys + 0.5, weights=wts)) / m.shape[0]), "lo que destaca", horizon=hz)
+    fs = [f for f in faces if core[0] - 1e-3 <= (f[0] + f[2]) / 2 * A <= core[2] + 1e-3
+          and core[1] - 1e-3 <= (f[1] + f[3]) / 2 <= core[3] + 1e-3]
+    big = max(((f[2] - f[0]) * (f[3] - f[1]) for f in fs), default=0.0)
+    main = [f for f in fs if (f[2] - f[0]) * (f[3] - f[1]) >= 0.5 * big]
+    yaws = [float(f[4]) for f in main if len(f) > 4]
+    look = 0
+    if yaws and all(y > GAZE for y in yaws):
+        look = 1
+    elif yaws and all(y < -GAZE for y in yaws):
+        look = -1
+    if ball is not None:
+        # en la jugada manda la pelota; la mirada, la del jugador más cercano a ella
+        bc = ((ball[0] + ball[2]) / 2, (ball[1] + ball[3]) / 2)
+        if fs and len(fs[0]) > 4:
+            near = min(fs, key=lambda f: math.hypot((f[0] + f[2]) / 2 * A - bc[0], (f[1] + f[3]) / 2 - bc[1]))
+            look = 1 if near[4] > GAZE else -1 if near[4] < -GAZE else 0
+        return Anchor(bc, "la pelota", look, people=n, horizon=hz)
+    if main:
+        ex = float(np.mean([(f[0] + f[2]) / 2 for f in main])) * A
+        ey = float(np.mean([f[1] + 0.42 * (f[3] - f[1]) for f in main]))
+        frontal = len(main) == 1 and bool(yaws) and abs(yaws[0]) < 0.12
+        return Anchor((ex, ey), "los ojos" if len(main) <= 2 else "las caras", look, frontal, hz, n)
+    return Anchor(((core[0] + core[2]) / 2, core[1] + 0.25 * (core[3] - core[1])), "el sujeto", people=n,
+                  horizon=hz)
+
+
+_POINTS = {(1, 1): "superior izquierdo", (2, 1): "superior derecho", (1, 2): "inferior izquierdo",
+           (2, 2): "inferior derecho"}
+
+
+def _gauss(d, s):
+    return math.exp(-(d * d) / (2 * s * s))
+
+
+def _placement(an, c):
+    """Cómo cae el punto de interés en el recorte `c`: (puntuación, (regla, por qué), mirada, horizonte)."""
+    cw, ch = c[2] - c[0], c[3] - c[1]
+    u, v = (an.pt[0] - c[0]) / cw, (an.pt[1] - c[1]) / ch
+    opts = []
+    for (a, b), name in _POINTS.items():
+        opts.append((_gauss(math.hypot(u - a / 3, v - b / 3), 0.07), "Regla de los tercios",
+                     f"{an.label} en el punto fuerte {name}"))
+        gu, gv = (0.382, 0.618)[a - 1], (0.382, 0.618)[b - 1]
+        opts.append((0.92 * _gauss(math.hypot(u - gu, v - gv), 0.05), "Proporción áurea",
+                     f"{an.label} en el punto áureo {name}"))
+    if an.label in ("los ojos", "las caras"):  # retrato: los ojos en la línea del tercio superior
+        opts.append((0.85 * _gauss(v - 1 / 3, 0.05) * _gauss(abs(u - 0.5), 0.25), "Regla de los tercios",
+                     f"{an.label} sobre la línea del tercio superior"))
+    if an.frontal:  # de frente: simetría, centrado con los ojos arriba
+        opts.append((1.05 * _gauss(u - 0.5, 0.04) * _gauss(v - 1 / 3, 0.06), "Simetría",
+                     "retrato de frente: centrado y con los ojos en el tercio superior"))
+    sc, rule, why = max(opts, key=lambda t: t[0])
+    gaze = None
+    if an.look:  # espacio en la dirección de la mirada: al punto le sobra sitio por delante
+        ahead = (1 - u) if an.look > 0 else u
+        side = "derecha" if an.look > 0 else "izquierda"
+        if ahead < 0.45:
+            sc *= 0.35  # mira contra el borde
+        elif ahead >= 0.55:
+            sc = min(1.1, sc + 0.1)
+            gaze = ("Espacio de mirada", f"mira a la {side} y le queda aire por ese lado")
+    hz = None
+    if an.horizon >= 0 and c[1] < an.horizon < c[3]:
+        hv = (an.horizon - c[1]) / ch
+        g = max(_gauss(hv - 1 / 3, 0.05), _gauss(hv - 2 / 3, 0.05))
+        if abs(hv - 0.5) < 0.08:
+            sc *= 0.7  # horizonte partiendo la foto por la mitad
+        sc += 0.35 * g
+        if g > 0.5:
+            hz = ("Horizonte en un tercio", "en el tercio " + ("superior" if hv < 0.5 else "inferior")
+                  + ", no por la mitad")
+    return sc, (rule, why), gaze, hz
+
+
+def explain(aspect: float, faces: list, objects: list, sal, scene: str, crop, horizon_y: float = -1.0) -> list:
+    """Reglas de composición que cumple el recorte `crop` (normalizado) y por qué: [(regla, por qué), …]."""
+    A = float(aspect)
+    core, weights, why, ball = _focus(A, faces, objects, scene)
+    c = (crop[0] * A, crop[1], crop[2] * A, crop[3])
+    out = []
+    if why:
+        out.append(("Centro de interés", f"se prioriza {why}"))
+    an = _anchor(A, faces, core, ball, why, sal, horizon_y)
+    sc, place, gaze, hz = _placement(an, c)
+    if sc >= 0.45:
+        out.append(place)
+    if gaze:
+        out.append(gaze)
+    if hz:
+        out.append(hz)
+    r = (c[2] - c[0]) / (c[3] - c[1])
+    cropped = _area(c) < 0.97 * A
+    if core is not None:
+        fill = _inter(core, c) / max(_area(c), 1e-9)
+        if fill >= 0.45:
+            out.append(("Rellenar el encuadre", f"el sujeto ocupa el {round(100 * min(1.0, fill))} % de la foto"))
+        elif fill <= 0.18:
+            out.append(("Espacio negativo", "el sujeto pequeño con aire alrededor da calma y contexto"))
+        if sal is not None and cropped:
+            ii, gw, gh = _importance(sal, A, [])
+            inner = (max(c[0], core[0]), max(c[1], core[1]), min(c[2], core[2]), min(c[3], core[3]))
+            tot = 1.0 - _kept(ii, gw, gh, A, core)          # lo que destaca fuera del sujeto…
+            left = _kept(ii, gw, gh, A, c) - _kept(ii, gw, gh, A, inner)
+            if tot > 0.05 and (tot - left) / tot >= 0.3:     # …y cuánto de eso queda fuera del recorte
+                out.append(("Simplicidad", f"deja fuera el {round(100 * (tot - left) / tot)} % de lo que distraía"))
+        if an.people == 3:
+            out.append(("Número impar", "tres personas: un grupo impar se ve más natural"))
+        ch0, cw0 = core[3] - core[1], core[2] - core[0]
+        if cropped and r < 0.95:
+            out.append(("Orientación vertical", "el sujeto es más alto que ancho" if ch0 >= cw0
+                        else "sigue la vertical de la escena"))
+        elif cropped and r > 1.05:
+            out.append(("Orientación horizontal", "la escena se extiende a lo ancho" if cw0 >= ch0
+                        else "deja ver el entorno a los lados"))
+    elif cropped:
+        out.append(("Simplicidad", "sin personas: recorta las zonas vacías y deja lo que destaca"))
+    if not cropped:
+        out.insert(1 if why else 0, ("Sin recortar", "la toma ya encuadra bien lo importante"))
+    return out
+
+
+def summary(rules: list) -> str:
+    """«Regla: por qué · …» en una línea (para la revisión y el informe)."""
+    return " · ".join(f"{r}: {w}" for r, w in rules)
+
+
+def _crop_for(core, A, r, rule, ii, gw, gh, focus, people=(), an=None):
     """Recorte de proporción r (ancho/alto) que contiene el núcleo con aire, colocado donde más importancia guarda."""
     cw0, ch0 = core[2] - core[0], core[3] - core[1]
     pad = rule["pad"] * max(cw0, ch0)
@@ -367,13 +566,16 @@ def _crop_for(core, A, r, rule, ii, gw, gh, focus, people=()):
             c = (x, y, x + cw, y + ch)
             off = abs((x + cw / 2) - focus[0]) / A + abs((y + ch / 2) - focus[1])
             v = _kept(ii, gw, gh, A, c) - 0.02 * off - 0.05 * _cuts(c, people)
+            if an is not None:  # composición: tercios, punto áureo, simetría, mirada, horizonte
+                v += 0.15 * _placement(an, c)[0]
             if v > bv:
                 best, bv = c, v
     return best
 
 
-def _slide(sal, A, r):
-    """Sin nadie en la foto: el recorte más grande de ese formato, deslizado hacia lo que destaca."""
+def _slide(sal, A, r, an=None):
+    """Sin nadie en la foto: el recorte más grande de ese formato, deslizado hacia lo que destaca (y, a igualdad,
+    con lo que destaca y el horizonte en los tercios)."""
     ii, gw, gh = _importance(sal, A, [], gw=160)
     if r > A:
         cw, ch = A, A / r
@@ -383,17 +585,20 @@ def _slide(sal, A, r):
         cw, ch = r, 1.0
         xs = np.linspace(0, A - cw, 41)
         cands = [(x, 0.0, x + cw, 1.0) for x in xs]
-    vals = [_kept(ii, gw, gh, A, c) - 1e-3 * abs(((c[0] + c[2]) / 2 - A / 2) + ((c[1] + c[3]) / 2 - 0.5)) for c in cands]
+    vals = [_kept(ii, gw, gh, A, c) - 1e-3 * abs(((c[0] + c[2]) / 2 - A / 2) + ((c[1] + c[3]) / 2 - 0.5))
+            + (0.03 * _placement(an, c)[0] if an is not None else 0.0) for c in cands]
     k = int(np.argmax(vals))
     return cands[k], float(_kept(ii, gw, gh, A, cands[k]))
 
 
 def plan(aspect: float, faces: list, objects: list, sal: np.ndarray | None, scene: str,
-         ratios: dict) -> tuple[dict, dict, str, str]:
+         ratios: dict, horizon_y: float = -1.0) -> tuple[dict, dict, str, str]:
     """Recortes por formato, su puntuación, el mejor y por qué (texto corto para la revisión).
 
     `aspect`: ancho/alto del área útil. `faces` y `objects`: cajas normalizadas (x0, y0, x1, y1) — objetos con
-    clase y confianza delante, como los da `Detector.detect`. `ratios`: nombre -> (ancho, alto).
+    clase y confianza delante, como los da `Detector.detect`; las caras pueden llevar su giro (`face_yaw`) de
+    quinto valor. `ratios`: nombre -> (ancho, alto). `horizon_y`: altura del horizonte (`horizon`) o -1.
+    Cada recorte se coloca con las reglas de composición (`_placement`); `explain` dice cuáles y por qué.
     Recortes normalizados 0..1 sobre el área útil, como `Photo.crops`."""
     A = float(aspect)
     crops = {ORIGINAL: (0.0, 0.0, 1.0, 1.0)}
@@ -404,11 +609,12 @@ def plan(aspect: float, faces: list, objects: list, sal: np.ndarray | None, scen
     if core is None:
         # nadie: como siempre, el recorte más grande de cada formato hacia lo que destaca; solo se propone
         # si quita sobre todo zona vacía (≤ 20 %) sin perder lo importante
+        an = _anchor(A, faces, None, None, "", sal, horizon_y)
         for name, (rw, rh) in ratios.items():
             r = rw / rh
             if abs(r - A) < 0.01:
                 continue
-            c, f = _slide(sal, A, r)
+            c, f = _slide(sal, A, r, an)
             crops[name] = norm(c)
             area = _area(c) / A
             scores[name] = round(f ** 4 / math.sqrt(max(area, 0.80)), 3) if f >= 0.90 else round(0.5 * f, 3)
@@ -430,19 +636,21 @@ def plan(aspect: float, faces: list, objects: list, sal: np.ndarray | None, scen
     cw0, ch0 = core[2] - core[0], core[3] - core[1]
     pad = rule["pad"] * max(cw0, ch0)
     ra = (cw0 + 2 * pad) / (ch0 + 2.5 * pad)
+    an = _anchor(A, faces, core, ball, why, sal, horizon_y)
 
     def score(c, r, name):
         cover = _inter(c, core) / max(_area(core), 1e-9)
         kept = _kept(ii, gw, gh, A, c)
         suit = min(ra, r) / max(ra, r)
         ar = _area(c) / A
-        return (cover ** 3 * (0.55 * suit + 0.30 * kept + 0.15 * (1 - ar)) + PREFERRED.get(name, 0.0)
-                - 0.04 * _cuts(c, people))
+        comp = min(1.0, _placement(an, c)[0])
+        return (cover ** 3 * (0.50 * suit + 0.27 * kept + 0.13 * (1 - ar) + 0.10 * comp)
+                + PREFERRED.get(name, 0.0) - 0.04 * _cuts(c, people))
 
     scores[ORIGINAL] = round(float(score((0.0, 0.0, A, 1.0), A, ORIGINAL)) + 0.03, 3)
     for name, (rw, rh) in ratios.items():
         r = rw / rh
-        c = _crop_for(core, A, r, rule, ii, gw, gh, focus, people)
+        c = _crop_for(core, A, r, rule, ii, gw, gh, focus, people, an)
         crops[name] = norm(c)
         scores[name] = round(float(score(c, r, name)), 3)
     best = max(scores, key=scores.get)

@@ -42,6 +42,13 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   `E.smart_crops` lo rehace sin abrir las fotos: deporte = pelota + jugadores que la disputan; boda = la pareja;
   resto = persona, grupo o saliencia. Respeta «Personalizado» y lo revisado. Revisión: ★ = sugerido
   (`E.suggested_crop`), con qué encuadra. Análisis antiguos sin `aspect` conservan sus recortes.
+  Composición (de dZoom, Format y Club de Fotografía): `_anchor` (la pelota, los ojos, el sujeto o lo que destaca) y
+  `_placement` colocan cada recorte con tercios, punto áureo, simetría (retrato de frente), aire hacia donde mira la
+  cara (`face_yaw` con los puntos de YuNet, 5.º valor de `face_boxes`) y horizonte en un tercio (`horizon`,
+  `ph.horizon`). `explain` dice qué reglas cumple y por qué (además: rellenar el encuadre, espacio negativo,
+  simplicidad, número impar, orientación, sin recortar): `ph.crop_rules` del sugerido, `E.crop_rules(ph, formato)`
+  para otro; se ve en la revisión (bloque «Composición» y ayuda de cada formato), en la ficha y en `informe.csv`
+  (columna `composicion`). Líneas guía, ángulo y color no se miden: los decide la toma, no el recorte.
 - `dcp.py` — perfiles de cámara DCP (sin Qt): `_develop_raw` revela en el RGB de la cámara (`output_color=raw`,
   balance de la toma) y `dcp.apply` aplica ForwardMatrix (interpolada por temperatura entre los dos iluminantes),
   HueSatMap, BaselineExposureOffset y LookTable en ProPhoto lineal → sRGB lineal, por franjas. La ProfileToneCurve no

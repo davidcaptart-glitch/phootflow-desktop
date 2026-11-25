@@ -373,6 +373,10 @@ class ReviewDialog(QDialog):
         sv.addLayout(crow)
         sv.addLayout(arow)
         sv.addWidget(self.crops, 1)
+        self.comp_info = QLabel()  # reglas de composición del recorte elegido y por qué
+        self.comp_info.setWordWrap(True)
+        self.comp_info.setObjectName("hint")
+        sv.addWidget(self.comp_info)
         mid.addWidget(side)
         v.addLayout(mid, 1)
 
@@ -584,9 +588,13 @@ class ReviewDialog(QDialog):
             sel = (name == ph.best) if ss is None else                 all(abs(float(a) - float(b)) < 1e-3 for a, b in zip(box, cur))
             it = QListWidgetItem(QIcon(_pm(crop(small, box))), ("● " if sel else "") + name + (" ★" if name == auto else ""))
             it.setData(ROLE, name)
-            tip = "Recorte sugerido (★)" + (f": encuadra {ph.crop_why}" if ph.crop_why else "")
-            it.setToolTip(tip if name == auto else f"Usar {name}" + (" (elegido)" if name == ph.best else ""))
+            head = "Recorte sugerido (★)" if name == auto else f"Usar {name}" + (" (elegido)" if name == ph.best else "")
+            rules = E.crop_rules(ph, name) if name != E.CUSTOM_CROP else []
+            it.setToolTip(head + "".join(f"\n• {r}: {w}" for r, w in rules))
             self.crops.addItem(it)
+        rules = [] if ss is not None or ph.best == E.CUSTOM_CROP else E.crop_rules(ph)
+        self.comp_info.setText("<b>Composición</b><br>" + "<br>".join(f"• <i>{r}</i>: {w}" for r, w in rules)
+                               if rules else "")
 
     def photo_bw(self, ph) -> str:
         return ph.bw_style or self.bw_style or "Editorial"

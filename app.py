@@ -1935,7 +1935,8 @@ class Main(QMainWindow):
         self.p_fmt.clear()
         self.p_fmt.addItems(list(ph.crops) or ["Original"])
         self.p_fmt.setCurrentText(ph.best)
-        why = f"Recorte sugerido: {ph.best}" + (f" — encuadra {ph.crop_why}" if ph.crop_why else "")
+        why = f"Recorte: {ph.best}" + (" (sugerido)" if ph.best == E.suggested_crop(ph) else "") + "".join(
+            f"\n• {r}: {w}" for r, w in E.crop_rules(ph))
         self.p_fmt.setToolTip(why)
         self.p_fmt_chips.setToolTip(why)
         self.p_fmt_chips.rebuild()  # (con las señales bloqueadas, los chips no se enteran solos)

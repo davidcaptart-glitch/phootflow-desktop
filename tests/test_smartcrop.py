@@ -116,6 +116,72 @@ class Plan(unittest.TestCase):
         self.assertEqual(best, "Original")
 
 
+class Composition(unittest.TestCase):
+    def rules(self, faces, objs, scene, crop=None, hz=-1.0, sal=FLAT):
+        crops, scores, best, why = SC.plan(A, faces, objs, sal, scene, E.RATIOS, hz)
+        c = crop or crops[best]
+        return best, c, dict(SC.explain(A, faces, objs, sal, scene, c, hz))
+
+    def test_pelota_en_un_punto_fuerte(self):
+        # plano abierto: la jugada es pequeña y el recorte tiene sitio para colocarla
+        objs = [person(0.62, 0.55, 0.66, 0.75), person(0.70, 0.54, 0.74, 0.76), ball(0.675, 0.56, 0.695, 0.59)]
+        crops, *_ = SC.plan(A, [], objs, FLAT, "Deporte", E.RATIOS)
+        c = crops["4:5"]
+        u = (0.685 - c[0]) / (c[2] - c[0])
+        v = (0.575 - c[1]) / (c[3] - c[1])
+        best_d = min(abs(u - a) + abs(v - b) for a in (1 / 3, 0.382, 0.618, 2 / 3) for b in (1 / 3, 0.382, 0.618, 2 / 3))
+        self.assertLess(best_d, 0.12, (u, v))           # la pelota cae en un punto fuerte o áureo
+        r = dict(SC.explain(A, [], objs, FLAT, "Deporte", c))
+        self.assertIn("pelota", r["Centro de interés"])
+        self.assertTrue({"Regla de los tercios", "Proporción áurea"} & set(r), r)
+
+    def test_espacio_de_mirada(self):
+        # una persona pequeña que mira a la derecha: más aire a la derecha que a la izquierda
+        face = (0.45, 0.30, 0.49, 0.36, 0.6)
+        objs = [person(0.42, 0.27, 0.52, 0.90)]
+        crops, *_ = SC.plan(A, [face], objs, FLAT, "Cumpleaños / fiesta", E.RATIOS)
+        c = crops["4:5"]
+        cx = (face[0] + face[2]) / 2
+        self.assertGreater(c[2] - cx, cx - c[0])
+        r = dict(SC.explain(A, [face], objs, FLAT, "Cumpleaños / fiesta", c))
+        self.assertIn("derecha", r.get("Espacio de mirada", ""))
+        # y al revés si mira a la izquierda
+        face_l = face[:4] + (-0.6,)
+        c = SC.plan(A, [face_l], objs, FLAT, "Cumpleaños / fiesta", E.RATIOS)[0]["4:5"]
+        self.assertGreater(cx - c[0], c[2] - cx)
+
+    def test_retrato_de_frente_simetrico(self):
+        face = (0.46, 0.25, 0.54, 0.37, 0.0)
+        _, c, r = self.rules([face], [person(0.40, 0.20, 0.60, 0.99)], "Retrato / estudio")
+        self.assertIn("Simetría", r)
+        self.assertAlmostEqual(((c[0] + c[2]) / 2), 0.5, delta=0.03)
+
+    def test_horizonte_en_un_tercio(self):
+        sal = np.zeros((32, 48), np.float32)
+        sal[10:20, 5:15] = 1.0
+        _, c, r = self.rules([], [], "Exterior / paisaje", crop=(0.0, 0.2, 1.0, 0.8), hz=0.40, sal=sal)
+        self.assertIn("Horizonte en un tercio", r)       # 0,40 cae en el tercio superior de 0,2..0,8
+        _, c, r = self.rules([], [], "Exterior / paisaje", crop=(0.0, 0.2, 1.0, 0.8), hz=0.50, sal=sal)
+        self.assertNotIn("Horizonte en un tercio", r)    # por la mitad: no
+
+    def test_detecta_el_horizonte_y_la_mirada(self):
+        g = np.zeros((300, 450), np.float32)
+        g[:200] = 0.8                                     # cielo claro, suelo oscuro: horizonte a 2/3
+        g += np.random.default_rng(1).normal(0, 0.01, g.shape).astype(np.float32)
+        self.assertAlmostEqual(SC.horizon(g), 200 / 300, delta=0.02)
+        self.assertEqual(SC.horizon(np.full((300, 450), 0.5, np.float32)), -1.0)
+        row = [0, 0, 10, 10, 10, 5, 20, 5, 19, 8]         # nariz hacia la derecha de los ojos
+        self.assertGreater(SC.face_yaw(row), 0.25)
+        self.assertLess(SC.face_yaw([0, 0, 10, 10, 10, 5, 20, 5, 11, 8]), -0.25)
+        self.assertEqual(SC.face_yaw([1, 2]), 0.0)
+
+    def test_sin_recortar_y_resumen(self):
+        _, _, r = self.rules([], [person(0.02, 0.02, 0.98, 0.99)], "Cumpleaños / fiesta")
+        self.assertIn("Sin recortar", r)
+        txt = SC.summary([("Regla de los tercios", "x"), ("Simplicidad", "y")])
+        self.assertEqual(txt, "Regla de los tercios: x · Simplicidad: y")
+
+
 class Saliency(unittest.TestCase):
     def test_lo_que_destaca(self):
         rng = np.random.default_rng(3)
