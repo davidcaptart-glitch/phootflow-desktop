@@ -492,6 +492,8 @@ class ReviewDialog(QDialog):
         img = color
         bws = self.photo_bw(ph)
         label = f"Formato: {'Studio' if studio else ph.best}" + ("" if studio else f"  ·  Look {self.photo_look(ph)}")
+        if not studio and ph.crop_why and ph.best == E.suggested_crop(ph):
+            label += f"  ·  encuadra {ph.crop_why}"
         if ss is not None and ss.get("bw"):  # B/N hecho en Studio: se ve (y se exporta) tal cual
             img = crop(self._studio_bw(ph, ss), box)
             label += f"  ·  B/N {ss.get('bw_style') or 'Editorial'}"
@@ -577,11 +579,13 @@ class ReviewDialog(QDialog):
         from PySide6.QtGui import QIcon
         small = base[::4, ::4] if max(base.shape[:2]) > 1200 else base
         cur = self._cur_box(ph, ss)
+        auto = E.suggested_crop(ph)
         for name, box in ph.crops.items():
             sel = (name == ph.best) if ss is None else                 all(abs(float(a) - float(b)) < 1e-3 for a, b in zip(box, cur))
-            it = QListWidgetItem(QIcon(_pm(crop(small, box))), ("● " if sel else "") + name)
+            it = QListWidgetItem(QIcon(_pm(crop(small, box))), ("● " if sel else "") + name + (" ★" if name == auto else ""))
             it.setData(ROLE, name)
-            it.setToolTip("Recorte sugerido" if name == ph.best else f"Usar {name}")
+            tip = "Recorte sugerido (★)" + (f": encuadra {ph.crop_why}" if ph.crop_why else "")
+            it.setToolTip(tip if name == auto else f"Usar {name}" + (" (elegido)" if name == ph.best else ""))
             self.crops.addItem(it)
 
     def photo_bw(self, ph) -> str:

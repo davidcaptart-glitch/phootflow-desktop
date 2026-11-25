@@ -26,6 +26,7 @@ from PIL import Image, ImageCms, ImageOps, TiffImagePlugin
 
 import dcp
 import luts
+import smartcrop as SC
 import styles
 
 try:
@@ -197,6 +198,11 @@ class Photo:
     crops: dict = field(default_factory=dict)  # ratio -> (x0, y0, x1, y1) normalizado sobre el área útil
     scores: dict = field(default_factory=dict)
     best: str = "Original"
+    crop_why: str = ""          # qué encuadra el recorte sugerido («pelota y 2 jugadores», «la pareja»…)
+    aspect: float = 0.0         # ancho/alto del área útil analizada (0 = análisis antiguo, sin recorte inteligente)
+    face_boxes: list = field(default_factory=list)  # caras normalizadas (x0, y0, x1, y1) sobre el área útil
+    objects: list = field(default_factory=list)     # [clase, confianza, x0, y0, x1, y1] de smartcrop.Detector
+    sal: str = ""               # mapa de saliencia (smartcrop.encode_map)
     keep: bool = True
     reason: str = ""
     reviewed: bool = False  # decidida a mano en la revisión (se guarda en revision.json)
@@ -750,6 +756,21 @@ def setup_scene_ai(model_dir: str, progress=None) -> bool:
     return AI["ready"]
 
 
+DET = {"ready": False, "obj": None}
+
+
+def setup_detector(model_dir: str, progress=None) -> bool:
+    """Descarga/verifica YOLOX-tiny (20 MB, la primera vez) para el recorte inteligente. Llamar una vez."""
+    try:
+        path = SC.ensure_model(model_dir, progress)
+        DET["obj"] = SC.Detector(path, threads=1)
+        DET["obj"].detect(np.zeros((64, 64, 3), np.float32))
+        DET["ready"] = True
+    except Exception as e:  # sin red: recorte con caras y saliencia
+        DET["ready"], DET["error"] = False, f"{type(e).__name__}: {e}"
+    return DET["ready"]
+
+
 def _eyes_scores(rgb01: np.ndarray, raw: list) -> list:
     if not EYES["ready"] or not raw:
         return []
@@ -907,130 +928,53 @@ def _dhash(gray: np.ndarray) -> int:
     return int("".join("1" if b else "0" for b in bits), 2)
 
 
-SUBJECT_CROP = "Persona"  # recorte acercado a la persona principal, con la proporción de la cámara
-SUBJECT_MIN_AREA = 0.28    # no acercar más: se pierde resolución y el ambiente del evento
-_SUBJECT_PREFERRED = (SUBJECT_CROP, "4:5", "5:4", "2:3", "3:2", "1:1")
+SUBJECT_MIN_AREA = SC.DEFAULT_RULE["min_area"]  # no acercar más: se pierde resolución y el ambiente
 
 
-def main_subject(faces: list, w: int, h: int):
-    """Caja (x0, y0, x1, y1, alto de cara) de la persona (o pareja) principal, o None si no hay una clara.
-    Principal = las caras de al menos la mitad del tamaño de la mayor, como mucho 3, y que no llenen ya la foto."""
-    if not faces:
-        return None
-    fs = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
-    big = fs[0][2] * fs[0][3]
-    main = [f for f in fs if f[2] * f[3] >= 0.5 * big]
-    if len(main) > 3:
-        return None  # grupo: mejor que salgan todos
-    fh = float(np.mean([f[3] for f in main]))
-    if fh > 0.2 * h:
-        return None  # ya está cerca: no hace falta acercar
-    x0 = min(f[0] for f in main)
-    y0 = min(f[1] for f in main)
-    x1 = max(f[0] + f[2] for f in main)
-    y1 = max(f[1] + f[3] for f in main)
-    if (x1 - x0) > 0.6 * w:
-        return None  # las caras están repartidas por toda la foto
-    return x0, y0, x1, y1, fh
-
-
-def subject_crop(subj, w: int, h: int, r: float) -> tuple:
-    """Recorte de proporción `r` (ancho/alto) sobre la persona principal: de la cabeza a medio muslo, con aire
-    alrededor, los ojos en el tercio superior y sin cortar nunca la cabeza. Normalizado 0..1."""
-    x0, y0, x1, y1, fh = subj
-    fw = 0.85 * fh  # ancho de una cara (aprox.)
-    top = y0 - 0.6 * fh
-    bottom = min(h, y1 + 4.5 * fh)
-    body_w = (x1 - x0) + 2.2 * fw
-    ch = max((bottom - top) * 1.15, body_w * 1.7 / r)
-    cw = ch * r
-    if cw * ch < SUBJECT_MIN_AREA * w * h:
-        s = math.sqrt(SUBJECT_MIN_AREA * w * h / (cw * ch))
-        cw, ch = cw * s, ch * s
-    if cw > w:
-        cw, ch = w, w / r
-    if ch > h:
-        ch, cw = h, h * r
-    eyes = y0 + 0.45 * fh
-    cy0 = min(eyes - 0.30 * ch, top - 0.03 * ch)  # ojos al tercio y aire sobre la cabeza
-    cx0 = (x0 + x1) / 2 - cw / 2
-    cx0 = min(max(0.0, cx0), w - cw)
-    cy0 = min(max(0.0, cy0), h - ch)
-    return (cx0 / w, cy0 / h, (cx0 + cw) / w, (cy0 + ch) / h)
-
-
-def plan_crops(gray: np.ndarray, faces: list) -> tuple[dict, dict, str]:
-    """Para cada formato, el recorte colocado donde está el interés. Si hay una persona (o pareja) principal,
-    el recorte se acerca a ella dejando ver el entorno; si no, es el más grande posible de ese formato."""
-    h, w = gray.shape
-    subj = main_subject(faces, w, h)
-    if subj is not None:
-        crops, scores = {"Original": (0.0, 0.0, 1.0, 1.0)}, {"Original": 1.0}
-        x0, y0, x1, y1, fh = subj
-        box = (x1 - x0 + 2.2 * fh) * (min(h, y1 + 4.5 * fh) - (y0 - 0.6 * fh))
-        for name, (rw, rh) in list(RATIOS.items()) + [(SUBJECT_CROP, (w, h))]:
-            c = subject_crop(subj, w, h, rw / rh)
-            crops[name] = c
-            area = (c[2] - c[0]) * (c[3] - c[1]) * w * h
-            fill = min(1.0, box / max(area, 1.0))
-            # el formato de la cámara es el preferido salvo que otro encuadre a la persona bastante mejor
-            bonus = 0.15 if name == SUBJECT_CROP else 0.0
-            scores[name] = round(1.0 + fill + bonus, 3) if name in _SUBJECT_PREFERRED else round(0.5 + fill, 3)
-        best = max(scores, key=scores.get)
-        return crops, scores, best
-    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0)
-    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1)
-    k = max(3, int(0.03 * max(h, w)))
-    det = cv2.GaussianBlur(np.hypot(gx, gy), (0, 0), k)
-    bri = cv2.GaussianBlur(gray, (0, 0), k)
-    interest = 0.6 * det / (det.max() + 1e-6) + 0.4 * bri / (bri.max() + 1e-6)
-    interest = np.clip(interest - np.percentile(interest, 35), 0, None) ** 1.5  # el fondo vacío no cuenta
-    fb = None
-    peak = float(interest.max()) + 1e-6
-    for (x, y, fw, fh) in faces:
-        x0, y0 = max(0, x - fw // 3), max(0, y - fh // 2)
-        x1, y1 = min(w, x + fw + fw // 3), min(h, y + fh + fh // 3)
-        interest[y0:y1, x0:x1] += 0.6 * peak
-        # torso bajo la cara: que el recorte no corte a la persona por el pecho
-        interest[y1:min(h, y1 + 3 * fh), max(0, x - fw):min(w, x + 2 * fw)] += 0.25 * peak
-        fb = (x0, y0, x1, y1) if fb is None else (min(fb[0], x0), min(fb[1], y0), max(fb[2], x1), max(fb[3], y1))
-    total = float(interest.sum()) + 1e-6
-    col = np.concatenate([[0], np.cumsum(interest.sum(axis=0))])
-    row = np.concatenate([[0], np.cumsum(interest.sum(axis=1))])
-    crops, scores = {"Original": (0.0, 0.0, 1.0, 1.0)}, {"Original": 1.0}
-    for name, (rw, rh) in RATIOS.items():
-        r = rw / rh
-        if abs(r - w / h) < 0.01:
-            continue
-        if r > w / h:  # sobra alto: se desliza en vertical
-            cw, ch = w, int(round(w / r))
-            cum, free, lo, hi = row, h - ch, (fb[1], fb[3]) if fb else None, ch
-        else:  # sobra ancho: se desliza en horizontal
-            cw, ch = int(round(h * r)), h
-            cum, free, lo, hi = col, w - cw, (fb[0], fb[2]) if fb else None, cw
-        pos = np.arange(free + 1)
-        kept = cum[pos + hi] - cum[pos]
-        kept = kept - 1e-3 * kept.max() * np.abs(pos - free / 2) / max(free, 1)  # desempate: centrado
-        faces_in = True
-        if lo is not None:
-            if lo[1] - lo[0] <= hi:
-                a, b = max(0, lo[1] - hi), min(free, lo[0])
-                pos, kept = pos[a:b + 1], kept[a:b + 1]
-            else:
-                faces_in = False
-        p = int(pos[int(np.argmax(kept))])
-        f = float(cum[p + hi] - cum[p]) / total
-        area = (cw * ch) / (w * h)
-        if r > w / h:
-            crops[name] = (0.0, p / h, 1.0, (p + ch) / h)
-        else:
-            crops[name] = (p / w, 0.0, (p + cw) / w, 1.0)
-        # quitar zona vacía suma (hasta un 20 %: más sería apretar demasiado); perder contenido resta mucho más
-        scores[name] = round(f ** 4 / math.sqrt(max(area, 0.80)), 3) if (f >= 0.90 and faces_in) else round(0.5 * f, 3)
-    best = max(scores, key=scores.get)
-    if scores[best] < 1.03:
-        best = "Original"
+def plan_crops(gray: np.ndarray, faces: list, objects: list | None = None, scene: str = "",
+               sal: np.ndarray | None = None) -> tuple[dict, dict, str]:
+    """Para cada formato, el recorte colocado donde está lo destacado (`smartcrop.plan`): la persona o pareja
+    principal, el grupo, la pelota y los jugadores que la disputan… con aire alrededor; sin nadie, el más grande
+    de ese formato hacia lo que destaca. `faces` en píxeles (x, y, w, h) de `gray`."""
+    h, w = gray.shape[:2]
+    fb = [(x / w, y / h, (x + fw) / w, (y + fh) / h) for (x, y, fw, fh) in faces]
+    if sal is None:
+        sal = SC.saliency(np.repeat(gray[..., None], 3, axis=2))
+    crops, scores, best, _ = SC.plan(w / h, fb, objects or [], sal, scene, RATIOS)
     return crops, scores, best
+
+
+def photo_scene(ph: Photo) -> str:
+    """Tipo de evento más probable de esta foto según la IA ("" si no se sabe)."""
+    return max(ph.scene_ai, key=ph.scene_ai.get) if ph.scene_ai else ""
+
+
+def replan_crop(ph: Photo, scene: str) -> bool:
+    """Rehace los recortes sugeridos con lo guardado en el análisis (sin abrir la foto) para el tipo de sesión
+    `scene`. Conserva el recorte a mano («Personalizado») y lo elegido en la revisión. False si la foto viene de
+    un análisis antiguo sin datos para el recorte inteligente."""
+    if not ph.aspect or ph.error:
+        return False
+    custom = ph.crops.get(CUSTOM_CROP)
+    keep_best = ph.best if (ph.reviewed or ph.best == CUSTOM_CROP) else None
+    ph.crops, ph.scores, ph.best, ph.crop_why = SC.plan(ph.aspect, ph.face_boxes, ph.objects,
+                                                        SC.decode_map(ph.sal), scene, RATIOS)
+    if custom:
+        ph.crops[CUSTOM_CROP] = custom
+    if keep_best in ph.crops:
+        ph.best = keep_best
+    return True
+
+
+def suggested_crop(ph: Photo) -> str:
+    """El formato que propuso el recorte inteligente (aunque luego se eligiera otro a mano)."""
+    return max(ph.scores, key=ph.scores.get) if ph.scores else ph.best
+
+
+def smart_crops(photos: list[Photo], scene: str) -> int:
+    """Recortes de toda la sesión con su tipo ya detectado (en deporte, la pelota y los jugadores; en bodas, la
+    pareja…). Instantáneo: usa las cajas y el mapa guardados al analizar. Devuelve cuántas fotos se rehicieron."""
+    return sum(replan_crop(ph, scene) for ph in photos)
 
 
 def analyze(ph: Photo, st: Settings) -> Photo:
@@ -1073,7 +1017,19 @@ def analyze(ph: Photo, st: Settings) -> Photo:
         fl = face_lum(gray, faces)
         ph.face_lin = fl / (2 ** ev) if fl else 0.0
         del lin
-        ph.crops, ph.scores, ph.best = plan_crops(gray, faces)
+        # recorte inteligente: personas y pelota (YOLOX), caras y saliencia, sobre la imagen ya girada
+        hh, ww = gray.shape[:2]
+        ph.aspect = round(ww / hh, 5)
+        ph.face_boxes = [[round(x / ww, 4), round(y / hh, 4), round((x + fw) / ww, 4), round((y + fh) / hh, 4)]
+                         for (x, y, fw, fh) in faces]
+        ph.objects = []
+        if DET["ready"]:
+            try:
+                ph.objects = DET["obj"].detect(np.clip(g, 0, 1))
+            except Exception:
+                ph.objects = []
+        sal = SC.saliency(np.clip(g, 0, 1))
+        ph.sal = SC.encode_map(sal)
         ph.warn = ""
         if EYES["ready"]:  # YuNet trabajó sobre `g8`, que es la misma imagen (ya girada) que `g`
             sc = [x for x in _eyes_scores(np.clip(g, 0, 1), raw_faces) if x is not None]
@@ -1094,6 +1050,8 @@ def analyze(ph: Photo, st: Settings) -> Photo:
                 ph.scene_ai = AI["obj"].scores(np.clip(g, 0, 1))
             except Exception:
                 ph.scene_ai = {}
+        ph.crops, ph.scores, ph.best, ph.crop_why = SC.plan(ph.aspect, ph.face_boxes, ph.objects, sal,
+                                                            photo_scene(ph), RATIOS)
         ph.tone_q, ph.chroma, ph.ab = lab_stats(g)
         if st.camera_look:
             gc = np.clip(g, 0, 1)

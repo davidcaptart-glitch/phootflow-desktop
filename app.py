@@ -152,6 +152,10 @@ class Worker(QThread):
             self.st.style, self.st.style_name = dict(S.PRESETS[name]), name
             self.scene.emit(name, self.st.style)
             detected = f"Tipo detectado: {name}. "
+        # recorte inteligente con el tipo de la sesión (en deporte, la pelota y quien la disputa; en bodas, la
+        # pareja…): instantáneo, con lo guardado en el análisis; lo revisado a mano se respeta
+        scene = self.st.style_name if self.st.style_name in S.PRESETS else S.detect_scene(self.photos)[0]
+        E.smart_crops(self.photos, scene)
         # una sola curva y un solo color para toda la sesión, y exposición igualada entre fotos
         session = E.calibrate_session(self.photos, self.st)
         self.st.style = dict(self.st.style, **session)
@@ -1741,9 +1745,13 @@ class Main(QMainWindow):
             import masks as M
             M.configure(model_dir)
             E.setup_scene_ai(model_dir, prog)
-            bits = ["ojos cerrados" if E.EYES["ready"] else "", "tipo de evento" if E.AI["ready"] else ""]
+            E.setup_detector(model_dir, lambda a, b: b and self.models_status.emit(
+                f"Descargando el modelo de IA de recorte ({a * 100 // b} %)…"))
+            bits = ["ojos cerrados" if E.EYES["ready"] else "", "tipo de evento" if E.AI["ready"] else "",
+                    "recorte inteligente" if E.DET["ready"] else ""]
             bits = [b for b in bits if b]
-            self.models_status.emit("IA lista: " + " y ".join(bits) + "." if bits else
+            self.models_status.emit("IA lista: " + ", ".join(bits[:-1]) + (" y " if len(bits) > 1 else "")
+                                    + bits[-1] + "." if bits else
                                     "IA no disponible (sin conexión la primera vez): se usan los métodos clásicos.")
 
         threading.Thread(target=job, daemon=True).start()
@@ -1927,6 +1935,9 @@ class Main(QMainWindow):
         self.p_fmt.clear()
         self.p_fmt.addItems(list(ph.crops) or ["Original"])
         self.p_fmt.setCurrentText(ph.best)
+        why = f"Recorte sugerido: {ph.best}" + (f" — encuadra {ph.crop_why}" if ph.crop_why else "")
+        self.p_fmt.setToolTip(why)
+        self.p_fmt_chips.setToolTip(why)
         self.p_fmt_chips.rebuild()  # (con las señales bloqueadas, los chips no se enteran solos)
         for w in (self.p_keep, self.p_ev, self.p_ang, self.p_fmt, self.p_lut, self.p_bw, self.p_look):
             w.blockSignals(False)
@@ -2829,6 +2840,8 @@ def selftest() -> int:
         import eyes
         import onnxruntime  # noqa: F401
         import scene_ai  # noqa: F401
+        import smartcrop  # noqa: F401
+        assert all(p.aspect and p.sal and "4:5" in p.crops for p in ps), "falta el recorte inteligente"
         eyes._mediapipe()
         assert os.path.exists(E.asset("text_embeddings.npy"))
         import luts as LL
@@ -2840,7 +2853,8 @@ def selftest() -> int:
             p.keep = True
         out = os.path.join(d, "Editadas")
         n = E.export_many(ps, st, out, __version__)
-        assert n >= 10, n  # color (4 formatos x 2 tamaños… según caso) + B/N
+        # color (el sugerido, el original y los formatos elegidos, sin repetir; a 600 px solo «max») + B/N
+        assert n >= sum(len({p.best, "Original", "4:5", "16:9"}) + 1 for p in ps), n
         assert os.path.getsize(E.archive_originals(ps, out)) > 0
         E.write_report(ps, out)
         global _SELFTEST_WIN

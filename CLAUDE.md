@@ -23,7 +23,7 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
 
 - `engine.py` — procesado sin interfaz. `analyze()` a media resolución (≈1 s/foto con 3 hilos): exposición
   (`estimate_ev` + `_face_ev`), giro, nitidez, dHash, caras (YuNet, `assets/face_detection_yunet_2023mar.onnx`;
-  Haar de respaldo), avisos (ojos, cara blanda), rasgos de escena, recortes. `cull()` marca descartes.
+  Haar de respaldo), avisos (ojos, cara blanda), rasgos de escena, recortes (`smartcrop.py`). `cull()` marca descartes.
   `export_many()` revela en paralelo (≈15 s/foto con 2 hilos) aplicando `Settings.style`.
   Caché de análisis y reanudación en `<salida>/.phootflow/` (`save_session`/`load_session`, `exportadas.txt`).
   Formatos (`RAW_EXT`, `IMG_EXT`, `file_filter`): RAW de todas las marcas que lee LibRaw, JPEG, PNG, TIFF (16 bits
@@ -33,6 +33,15 @@ python -m unittest discover -s tests   # 143 pruebas, sin fotos reales ni red
   incrustado (`PREVIEW_ONLY`, aviso `PREVIEW_WARN`, y `Main._warn_dng` ofrece descargarlo).
   Salida: `Entrega/Color` y `Entrega/Blanco y negro` (`<foto>.jpg`, tamaño de entrega = max; `delivery_path`,
   `save_delivery`), `Otros tamaños/<n> px/…` y `Formatos/<proporción>/`. Edits sustituye la foto en Entrega/Color.
+- `smartcrop.py` — recorte inteligente de Events (sin Qt): personas y pelota con YOLOX-tiny (Apache-2.0, ONNX de la
+  release oficial, 20 MB en `%APPDATA%\PhootFlow\modelos`, SHA-256; `E.setup_detector`/`E.DET`, ≈90 ms por foto en
+  un hilo, sin cambio medible a 3 hilos), caras YuNet y saliencia clásica (residuo espectral + enfoque, `saliency`).
+  `analyze` guarda `objects`, `face_boxes`, `sal` (mapa de 48 px en base64) y `aspect` en la caché; `SC.plan` da el
+  recorte de cada formato de `RATIOS` (contiene lo destacado con aire, área mínima por tipo en `RULES`, sin partir
+  a nadie) y elige formato y orientación (`ph.best`, `ph.crop_why`). Tras detectar el tipo de sesión,
+  `E.smart_crops` lo rehace sin abrir las fotos: deporte = pelota + jugadores que la disputan; boda = la pareja;
+  resto = persona, grupo o saliencia. Respeta «Personalizado» y lo revisado. Revisión: ★ = sugerido
+  (`E.suggested_crop`), con qué encuadra. Análisis antiguos sin `aspect` conservan sus recortes.
 - `dcp.py` — perfiles de cámara DCP (sin Qt): `_develop_raw` revela en el RGB de la cámara (`output_color=raw`,
   balance de la toma) y `dcp.apply` aplica ForwardMatrix (interpolada por temperatura entre los dos iluminantes),
   HueSatMap, BaselineExposureOffset y LookTable en ProPhoto lineal → sRGB lineal, por franjas. La ProfileToneCurve no
