@@ -252,6 +252,8 @@ def evaluate(d: dict | None = None, ahora: float | None = None) -> Estado:
         return Estado(False, "sin_licencia", "Escribe tu clave de activación para empezar.", clave=clave)
     base = dict(titular=t.get("titular", ""), clave=t.get("clave", clave),
                 hasta=float(t.get("hasta", 0)), emitido=float(t.get("emitido", 0)))
+    if t.get("producto", "escritorio") != "escritorio":
+        return Estado(False, "producto", "Esta clave es de la app móvil de PhootFlow, no de la de PC.", **base)
     if t.get("huella") != fingerprint():
         return Estado(False, "otro_equipo", "Esta licencia se activó en otro equipo.", **base)
     if t.get("estado") == "revocada":
@@ -293,7 +295,7 @@ def _online(clave: str, timeout: float) -> Estado:
     """Pregunta al servidor y guarda el resultado. Lanza OSError sin conexión y ErrorLicencia si la rechaza."""
     from version import __version__
     code, body = _post({"clave": clave, "huella": fingerprint(), "nombre": machine_name(),
-                        "version": __version__}, timeout)
+                        "version": __version__, "producto": "escritorio"}, timeout)
     d = _load()
     if code == 200 and decode_token(body.get("token")):
         d.update(clave=clave, token=body["token"], comprobada=time.time(), codigo="")
@@ -307,6 +309,9 @@ def _online(clave: str, timeout: float) -> Estado:
             d.update(token=None, codigo="clave_no_valida")
             _save(d)
         raise ErrorLicencia("Esa clave no existe. Revisa que esté bien escrita.")
+    if code == 403 and body.get("error") == "producto_distinto":
+        app = {"lite": "PhootFlow Lite", "pro": "PhootFlow Pro"}.get(body.get("producto"), "otra app")
+        raise ErrorLicencia(f"Esta clave es de {app} para el móvil. Para el PC necesitas una clave de escritorio.")
     if code == 409:
         raise ErrorLicencia("Esta clave ya está en uso en otro equipo. Si has cambiado de PC, pide a "
                             f"{CONTACTO} que libere el anterior.")

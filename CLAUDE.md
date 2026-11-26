@@ -270,6 +270,10 @@ python -m unittest discover -s tests   # 242 pruebas, sin fotos reales ni red
   Supabase, token Ed25519 verificado en Python puro, 7 días sin conexión, huella del equipo), `watch()` cada 6 h,
   `show_status()` (botón «Licencia» del pie de la barra lateral). Servidor en `servidor_licencias/`,
   administración con `admin_licencias_gui.py` (ventana) o `admin_licencias.py` (consola); ninguno va en el paquete. Ver `LICENCIAS.md`. El selftest no usa licencia.
+  Licencias por producto (`producto`: `escritorio`, `lite`, `pro`; migración `002_productos.sql`): el PC manda
+  «escritorio» y rechaza claves y tokens de móvil; Pro abre también Lite. Las apps móviles (PWA, Lite y Pro) están en
+  `../PhootFlow-Mobile` y usan el mismo servidor (con CORS). `origen`/`compra_ref` quedan listos para las compras
+  en Google Play / App Store de las futuras apps nativas.
 - `.github/workflows/build.yml` — en etiquetas `v*`: pruebas, PyInstaller, selftest del .exe, zip de código,
   sumas y release.
 

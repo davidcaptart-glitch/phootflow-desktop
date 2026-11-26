@@ -9,6 +9,7 @@ PHOOTFLOW_SERVICE_KEY o en %APPDATA%\\PhootFlow\\admin.env (línea PHOOTFLOW_SER
     python admin_licencias.py revocar PF-XXXXX-…
     python admin_licencias.py reactivar PF-XXXXX-…
     python admin_licencias.py liberar PF-XXXXX-… [equipo]
+    python admin_licencias.py crear "Ana" --producto lite        # app móvil Lite (o pro)
     python admin_licencias.py cambiar PF-XXXXX-… --equipos 2 --dias 14 --caduca 2027-12-31|nunca
 """
 from __future__ import annotations
@@ -88,9 +89,12 @@ class Admin:
         return r[0]
 
     # --- cambios
-    def create(self, titular: str, email="", notas="", equipos=1, dias=7, caduca=None) -> dict:
+    def create(self, titular: str, email="", notas="", equipos=1, dias=7, caduca=None,
+               producto="escritorio") -> dict:
         row = {"clave": new_key(), "titular": titular, "email": email, "notas": notas,
                "max_equipos": equipos, "dias_offline": dias, "caduca": caduca}
+        if producto != "escritorio":  # sin la migración 002 la columna no existe: las de PC no la mandan
+            row["producto"] = producto
         return self._req("POST", "licencias", row)[0]
 
     def update(self, lic: dict, **cambios) -> dict:
@@ -120,9 +124,13 @@ def _caduca(s: str | None):
     return dt.datetime.strptime(s, "%Y-%m-%d").replace(hour=23, minute=59, tzinfo=dt.timezone.utc).isoformat()
 
 
+PRODUCTOS = {"escritorio": "PC (escritorio)", "lite": "móvil Lite", "pro": "móvil Pro (incluye Lite)"}
+
+
 def describe(lic: dict) -> str:
     eqs = lic.get("equipos", [])
-    lines = [f"{lic['titular'] or '(sin nombre)'}  ·  {lic['clave']}",
+    lines = [f"{lic['titular'] or '(sin nombre)'}  ·  {lic['clave']}  ·  "
+             f"{PRODUCTOS.get(lic.get('producto') or 'escritorio', '?')}",
              f"  estado: {lic['estado']}   equipos: {len(eqs)}/{lic['max_equipos']}   "
              f"sin conexión: {lic['dias_offline']} días   caduca: {_fecha(lic.get('caduca'))}",
              f"  email: {lic.get('email') or '—'}   creada: {_fecha(lic.get('creada'))}"]
@@ -149,6 +157,8 @@ def main(argv=None, admin: Admin | None = None) -> None:
     c.add_argument("--equipos", type=int, default=1)
     c.add_argument("--dias", type=int, default=7, help="días que funciona sin conexión")
     c.add_argument("--caduca", help="AAAA-MM-DD (por defecto, no caduca)")
+    c.add_argument("--producto", choices=["escritorio", "lite", "pro"], default="escritorio",
+                   help="escritorio = PhootFlow para PC; lite / pro = apps móviles (Pro abre también Lite)")
     sub.add_parser("listar", help="todas las licencias con sus equipos")
     for name, h in (("ver", "detalle de una licencia"), ("revocar", "quita el acceso"),
                     ("reactivar", "devuelve el acceso")):
@@ -166,7 +176,8 @@ def main(argv=None, admin: Admin | None = None) -> None:
     adm = admin or Admin(os.environ.get("PHOOTFLOW_SUPABASE_URL") or SUPABASE_URL, service_key())
 
     if a.cmd == "crear":
-        lic = adm.create(a.titular, a.email, a.notas, a.equipos, a.dias, _caduca(a.caduca) or None)
+        lic = adm.create(a.titular, a.email, a.notas, a.equipos, a.dias, _caduca(a.caduca) or None,
+                         a.producto)
         print("Licencia creada. Envía esta clave al titular:\n\n    " + lic["clave"] + "\n")
         print(describe({**lic, "equipos": []}))
     elif a.cmd == "listar":

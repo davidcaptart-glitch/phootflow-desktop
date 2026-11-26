@@ -57,10 +57,27 @@ def estado(lic: dict, ahora: dt.datetime | None = None) -> str:
     return "activa"
 
 
+# Dirección de las apps móviles (PWA). Pendiente de publicarlas: cámbiala cuando tengan su dominio.
+MOVIL = {"lite": "https://lite.phootflow.com", "pro": "https://pro.phootflow.com"}
+PRODUCTO_TXT = {"escritorio": "PC", "lite": "Móvil Lite", "pro": "Móvil Pro"}
+
+
 def mensaje(lic: dict) -> str:
     """Texto listo para mandar por WhatsApp o email."""
     fin = parse_fecha(lic.get("caduca"))
     dura = f"válida hasta el {fin.astimezone():%d/%m/%Y}" if fin else "sin fecha de fin"
+    prod = lic.get("producto") or "escritorio"
+    if prod != "escritorio":
+        app = "PhootFlow Pro" if prod == "pro" else "PhootFlow Lite"
+        return (f"¡Hola{(' ' + lic['titular'].split()[0]) if lic.get('titular') else ''}! Aquí tienes tu acceso a {app}.\n\n"
+                f"Clave de activación: {lic['clave']}\n"
+                f"({dura}, para un móvil)\n\n"
+                f"1. Abre {MOVIL[prod]} en el navegador del móvil (Safari en iPhone, Chrome en Android).\n"
+                "2. Añádela a la pantalla de inicio: Compartir › «Añadir a pantalla de inicio» (iPhone) o "
+                "menú ⋮ › «Instalar app» (Android).\n"
+                "3. Ábrela y pega la clave cuando te la pida.\n\n"
+                + ("Con Pro también puedes usar PhootFlow Lite con la misma clave.\n" if prod == "pro" else "")
+                + "Queda vinculada a tu móvil y funciona hasta 7 días sin conexión. No la compartas, por favor.")
     return (f"¡Hola{(' ' + lic['titular'].split()[0]) if lic.get('titular') else ''}! Aquí tienes tu acceso a PhootFlow.\n\n"
             f"Clave de activación: {lic['clave']}\n"
             f"({dura}, para un PC)\n\n"
@@ -110,13 +127,22 @@ class LicenciaDialog(QDialog):
         self.fecha.setMinimumDate(QDate.currentDate())
         self.fecha.setVisible(False)
         self.dura.currentIndexChanged.connect(lambda: self.fecha.setVisible(self.dura.currentData() == -1))
+        self.producto = QComboBox()
+        for k, txt in (("escritorio", "PhootFlow para PC"), ("lite", "App móvil Lite"),
+                       ("pro", "App móvil Pro (incluye Lite)")):
+            self.producto.addItem(txt, k)
+        if lic:
+            self.producto.setCurrentIndex(max(0, self.producto.findData(lic.get("producto") or "escritorio")))
+            self.producto.setEnabled(False)  # una clave no cambia de producto: se crea otra
+        form.addRow("Producto", self.producto)
         form.addRow("Titular", self.titular)
         form.addRow("Email", self.email)
         form.addRow("Notas", self.notas)
         form.addRow("Duración", self.dura)
         form.addRow("", self.fecha)
         lay.addLayout(form)
-        hint = QLabel("La clave se genera sola y sirve para un solo PC. Puedes terminarla cuando quieras.")
+        hint = QLabel("La clave se genera sola y sirve para un solo equipo (un PC o un móvil, según el producto). "
+                      "Puedes terminarla cuando quieras.")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         lay.addWidget(hint)
@@ -149,6 +175,8 @@ class LicenciaDialog(QDialog):
     def datos(self) -> dict:
         d = {"titular": self.titular.text().strip(), "email": self.email.text().strip(),
              "notas": self.notas.text().strip()}
+        if not self.lic:
+            d["producto"] = self.producto.currentData()
         f = self.fin()
         if f != "mantener":
             d["caduca"] = f
@@ -201,7 +229,7 @@ class ClaveDialog(QDialog):
 
 
 # ------------------------------------------------------------------ ventana
-COLS = ["Titular", "Clave", "Estado", "Hasta", "PC", "Último uso", "Notas"]
+COLS = ["Titular", "Clave", "Producto", "Estado", "Hasta", "Equipo", "Último uso", "Notas"]
 COLOR = {"activa": T.OK, "terminada": T.DANGER, "caducada": T.WARN}
 
 
@@ -320,7 +348,7 @@ class AdminWindow(QWidget):
             eqs = r.get("equipos") or []
             ult = max((e.get("ultima") or "" for e in eqs), default="")
             est = estado(r)
-            vals = [r.get("titular") or "—", r["clave"], est, _dia(r.get("caduca")) if r.get("caduca") else "sin fin",
+            vals = [r.get("titular") or "—", r["clave"], PRODUCTO_TXT.get(r.get("producto") or "escritorio", "?"), est, _dia(r.get("caduca")) if r.get("caduca") else "sin fin",
                     (eqs[0].get("nombre") or "?") if eqs else "—", _dia(ult) if ult else "nunca", r.get("notas") or ""]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
@@ -328,7 +356,7 @@ class AdminWindow(QWidget):
                 if c == 1:
                     it.setFont(QGuiApplication.font())
                     it.setForeground(QColor(T.TEXT))
-                if c == 2:
+                if c == 3:
                     it.setForeground(QColor(COLOR[est]))
                 self.tabla.setItem(i, c, it)
             if r["id"] == cur_id:
@@ -378,7 +406,8 @@ class AdminWindow(QWidget):
         if d.exec() != QDialog.Accepted:
             return
         x = d.datos()
-        lic = self._call("create", x["titular"], x["email"], x["notas"], 1, 7, x.get("caduca"))
+        lic = self._call("create", x["titular"], x["email"], x["notas"], 1, 7, x.get("caduca"),
+                         x.get("producto", "escritorio"))
         if lic:
             self._replace(lic)
             self._select(lic["id"])

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "phootflow-lite",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "../PhootFlow-Mobile/apps/lite", "run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "phootflow-pro",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "../PhootFlow-Mobile/apps/pro", "run", "dev"],
+      "port": 5174
+    }
+  ]
+}

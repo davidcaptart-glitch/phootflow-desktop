@@ -112,6 +112,44 @@ Ya está cambiado en esta rama:
      Para endurecerlo más adelante: un `.exe` firmado con certificado de código (además, Smart App Control lo
      aceptaría) o compilar con Nuitka.
 
+## Apps móviles: licencias por producto
+
+Cada clave es de un producto (columna `producto`, migración `002_productos.sql`):
+
+| Producto | Abre | Se crea con |
+|---|---|---|
+| `escritorio` | PhootFlow para PC (todas las claves anteriores) | `crear "Ana"` o la ventana |
+| `lite` | PhootFlow Lite (móvil) | `crear "Ana" --producto lite` o «Producto» en la ventana |
+| `pro` | PhootFlow Pro y también Lite (móvil) | `crear "Ana" --producto pro` |
+
+- La app de PC manda `producto: "escritorio"`. Las versiones anteriores no lo mandan y el servidor lo da por
+  escritorio. Una clave de móvil en el PC (o al revés) responde 403 `producto_distinto` y la app explica por qué.
+  El token lleva `producto`, así que copiar un token de móvil al PC tampoco vale.
+- Las apps móviles son PWA y llaman desde el navegador: la función responde con CORS.
+- En el móvil, la huella es un identificador aleatorio que la app guarda en el dispositivo. Si se borran los datos
+  del navegador o se reinstala, cambia: igual que al cambiar de PC, usa «Cambiar de PC» (`liberar`).
+- El mensaje para compartir de una clave móvil explica cómo instalar la PWA. La dirección está en `MOVIL`
+  (`admin_licencias_gui.py`); **pendiente** hasta publicar las apps.
+
+**Orden para desplegar:** primero la migración `002_productos.sql`, después la función. La función nueva lee la
+columna `producto`. Las apps de PC instaladas siguen funcionando igual.
+
+### Futuro: apps nativas y compra en la tienda
+
+La migración ya añade `origen` (`manual`, `google_play`, `app_store`, `web`) y `compra_ref` (único por tienda).
+Cuando existan las apps nativas (Capacitor sobre el mismo código):
+
+1. La app compra con Google Play Billing o StoreKit y manda a la función `{accion: "compra", tienda, recibo,
+   producto, huella}`.
+2. La función valida el recibo con la tienda (Google Play Developer API / App Store Server API, con credenciales
+   guardadas como secretos de Supabase, nunca en el repo) y crea o renueva la licencia con `origen` y `compra_ref`.
+   Las suscripciones usan `caduca`; las notificaciones de la tienda (RTDN de Google, Server Notifications v2 de
+   Apple) la alargan o la terminan.
+3. Devuelve el mismo token firmado de siempre, así que la comprobación en la app no cambia. «Restaurar compras»
+   busca por `compra_ref`.
+
+Apple obliga a vender dentro de la app de iOS con su sistema de compras. La PWA, en cambio, se vende con claves.
+
 ## Supabase: cosas a vigilar
 
 - El proyecto está en el plan **gratis**. Para crearlo se pausó **linked-and-in** (límite de 2 proyectos activos).

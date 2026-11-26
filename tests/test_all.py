@@ -1648,6 +1648,9 @@ class FakeLicencias(http.server.BaseHTTPRequestHandler):
         lic = self.db.get(clave)
         if not lic:
             return self._json(404, {"error": "clave_no_valida"})
+        producto, de_lic = body.get("producto", "escritorio"), lic.get("producto", "escritorio")
+        if de_lic not in {"escritorio": ["escritorio"], "lite": ["lite", "pro"], "pro": ["pro"]}[producto]:
+            return self._json(403, {"error": "producto_distinto", "producto": de_lic})
         now = int(time.time())
         estado = ("revocada" if lic["estado"] == "revocada"
                   else "caducada" if lic.get("caduca") and lic["caduca"] <= now else "activa")
@@ -1661,7 +1664,8 @@ class FakeLicencias(http.server.BaseHTTPRequestHandler):
             hasta = min(hasta, lic["caduca"])
         tok = LIC.make_token(self.seed, {"v": 1, "clave": clave, "huella": huella, "estado": estado,
                                          "titular": lic.get("titular", ""), "emitido": now, "hasta": hasta,
-                                         "caduca": lic.get("caduca")})
+                                         "caduca": lic.get("caduca"), "producto": producto,
+                                         "licencia": de_lic})
         self._json(200, {"token": tok, "estado": estado})
 
     def log_message(self, *a):
@@ -1693,6 +1697,20 @@ class Licencias(unittest.TestCase):
         LIC.STORE = os.path.join(tempfile.mkdtemp(), "licencia.json")
         FakeLicencias.db = {self.KEY: {"estado": "activa", "titular": "Ana"}}
         FakeLicencias.seed, FakeLicencias.down = TEST_SEED, False
+
+    def test_clave_de_movil_no_abre_el_pc(self):
+        FakeLicencias.db["PF-MOVIL-11111-22222-33333"] = {"estado": "activa", "titular": "Eva", "producto": "lite"}
+        with self.assertRaises(LIC.ErrorLicencia) as cm:
+            LIC.activate("PF-MOVIL-11111-22222-33333")
+        self.assertIn("Lite", str(cm.exception))
+        self.assertTrue(LIC.activate(self.KEY).ok)
+        # un token de móvil copiado a este equipo tampoco vale
+        with open(LIC.STORE, encoding="utf-8") as f:
+            d = json.load(f)
+        t = LIC.decode_token(d["token"])
+        d["token"] = LIC.make_token(TEST_SEED, {**t, "producto": "lite"})
+        st = LIC.evaluate(d)
+        self.assertEqual((st.ok, st.codigo), (False, "producto"))
 
     def test_ed25519_rfc8032(self):
         sk = bytes.fromhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
@@ -1834,6 +1852,8 @@ class Licencias(unittest.TestCase):
         w.nueva()
         post = [c for c in calls if c[0] == "POST"][0][2]
         self.assertEqual((post["titular"], post["max_equipos"]), ("Eva", 1))
+        self.assertNotIn("producto", post)  # las de PC no mandan la columna (sirve sin la migración 002)
+        self.assertIn("móvil", G.mensaje({**row, "producto": "lite"}))
         fin = dt.date.fromisoformat(post["caduca"][:10])
         self.assertEqual(fin, G.add_months(dt.date.today(), 3))
         w.close()
